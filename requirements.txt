@@ -154,6 +154,5 @@ pyyaml
 typeguard
 zipp
 opencv-python
-depthai
 mujoco
 torch
