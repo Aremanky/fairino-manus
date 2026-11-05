@@ -8,10 +8,12 @@ Cinemática del FAIRINO FR5 en numpy puro (sin MuJoCo).
   tipo UR (ejes 2-3-4 paralelos, muñeca con desplazamiento d4), IK ANALÍTICA con sus 8
   configuraciones (hombro izq/der × codo arriba/abajo × muñeca normal/volteada).
 
-Hallazgo (27-oct, ver AUDITORIA_JOINTS.md): el MJCF/URDF del repo tiene d1 = 155 mm y
-d4 = 130 mm, mientras que la tabla DH oficial del FR5 dice d1 = 152 y d4 = 102 (y el alcance
-de catálogo, 922 mm, es a2 + a3 + d5 = 425 + 395 + 102). `CadenaFR5.desde_dh()` construye la
-cadena oficial; `comparar_con_dh()` imprime las diferencias.
+Medidas (corregido el 5-nov): el MJCF salía del URDF ANTIGUO del FR5 (fr5_robot.urdf de
+frcobot_ros: d1 = 155 mm, d4 = 130 mm), que pone la muñeca 28 mm desplazada respecto al robot
+real en cualquier postura. Ahora fairino_mjcf.xml tiene las del URDF OFICIAL del FR5 v6
+(fr5v6.urdf / fairino5_v6.urdf): d1 = 152, a2 = 425, a3 = 395,01, d4 = 102,1, d5 = 102 mm
+(alcance de catálogo, 922 mm ≈ a2 + a3 + d5). `CadenaFR5.desde_dh()` construye la cadena
+oficial; `comparar_con_dh()` imprime las diferencias (deben salir < 0,1 mm).
 
 Convenciones:
   q  = ángulos de joint1..joint6 tal como los usa MuJoCo (= theta de la DH estándar).
@@ -29,8 +31,9 @@ OFFSET_MUNECA_ORCA = np.array([0.0, 0.0923, 0.010])     # eje de la articulació
 OFFSET_PALMA_ORCA  = np.array([0.0, 0.137, 0.007])      # centro de la palma
 OFFSET_NUDILLOS    = np.array([0.0008, 0.181, 0.004])
 
-# Parámetros DH oficiales del FR5 (manual FAIRINO, tabla 2.4-5), DH estándar tipo UR
-DH_OFICIAL_FR5 = dict(d1=0.152, a2=-0.425, a3=-0.395, d4=0.102, d5=0.102, d6=0.100)
+# Parámetros DH oficiales del FR5 (manual FAIRINO, tabla 2.4-5, y URDF oficial fr5v6.urdf),
+# DH estándar tipo UR. d6 = brida (en el MJCF la cadena llega hasta mano_mount, más allá).
+DH_OFICIAL_FR5 = dict(d1=0.152, a2=-0.425, a3=-0.39501, d4=0.1021, d5=0.102, d6=0.100)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

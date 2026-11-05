@@ -968,6 +968,13 @@ def main():
                         _z_min_v2 = ARM_Z_MINIMA
                     if globals().get("TELEOP_FR5_Z_MIN") is not None:
                         _z_min_v2 = TELEOP_FR5_Z_MIN
+                    # 5-nov: mesa, peana, cámaras y zonas prohibidas (skill_shield/teleop_fr5/obstaculos.py)
+                    from skill_shield.teleop_fr5.obstaculos import cajas_desde_config, dibujar_en_visor
+                    _ent_v2.cajas = cajas_desde_config(globals(), _ent_v2.z_suelo)
+                    if globals().get("TELEOP_FR5_OBSTACULOS_VER", True) and not globals().get("_obst_dibujados"):
+                        with visor.lock():
+                            dibujar_en_visor(visor, _ent_v2)
+                        globals()["_obst_dibujados"] = True
                     teleop_v2 = TeleopBrazoFR5(
                         RUTA_XML, _cams_v2,
                         cfg=ConfigTeleop(brazo=BRAZO_HUMANO, longitudes_manual=LONG_BRAZO_MANUAL,

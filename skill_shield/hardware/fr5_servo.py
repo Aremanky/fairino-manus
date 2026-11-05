@@ -67,6 +67,8 @@ PARAMETROS_POR_DEFECTO = dict(
     FR5_PRIORIDAD_RT=50,            # SCHED_FIFO si hay permisos (0 = no intentarlo)
     FR5_CPU=None,                   # núcleo fijo para el proceso (None = cualquiera)
     FR5_TIMEOUT_CONEXION_S=5.0,
+    FR5_FIJAR_LIMITES_BLANDOS=False,  # escribir los límites blandos en la controladora al conectar
+    FR5_LIMITES_BLANDOS_DEG=None,     # ((min, max) × 6) en grados; None = no tocar
 )
 
 # Índices de la memoria compartida de estado
@@ -268,6 +270,53 @@ class _LectorPoseReal:
         return None
 
 
+def _limites_blandos(robot, p, q_real):
+    """Escribe (o, en simulacro, solo compara) los límites blandos de los joints en la
+    controladora. Devuelve los límites que hay que respetar (grados, (6, 2)) o None."""
+    lim = p.get("FR5_LIMITES_BLANDOS_DEG")
+    if lim is None:
+        return None
+    lim = np.asarray(lim, dtype=float).reshape(6, 2)
+    try:
+        r = robot.GetJointSoftLimitDeg(0)
+        actuales = np.asarray(r[1], dtype=float).reshape(6, 2) if _ret(r) == 0 else None
+    except Exception:
+        actuales = None
+    if actuales is not None:
+        print("  fr5_servo: límites blandos en la controladora (°): "
+              + "  ".join(f"j{i + 1}[{a:.0f},{b:.0f}]" for i, (a, b) in enumerate(actuales)))
+    if not p.get("FR5_FIJAR_LIMITES_BLANDOS"):
+        return actuales
+    fuera = [i + 1 for i in range(6) if not (lim[i, 0] <= q_real[i] <= lim[i, 1])]
+    if fuera:
+        print(f"⚠ fr5_servo: el robot está FUERA de los límites blandos nuevos en j{fuera} → "
+              f"no los escribo (llévalo dentro con el mando y vuelve a arrancar)")
+        return actuales
+    if actuales is not None and np.allclose(actuales, lim, atol=0.05):
+        print("✓ fr5_servo: límites blandos ya puestos")
+        return lim
+    if p["FR5_SIMULACRO"]:
+        print("  fr5_servo [SIMULACRO]: pondría los límites blandos (°): "
+              + "  ".join(f"j{i + 1}[{a:.0f},{b:.0f}]" for i, (a, b) in enumerate(lim)))
+        return actuales
+    try:
+        e_pos = _ret(robot.SetLimitPositive([float(v) for v in lim[:, 1]]))
+        e_neg = _ret(robot.SetLimitNegative([float(v) for v in lim[:, 0]]))
+    except Exception as e:
+        e_pos = e_neg = f"excepción: {e}"
+    try:
+        r = robot.GetJointSoftLimitDeg(0)
+        leidos = np.asarray(r[1], dtype=float).reshape(6, 2) if _ret(r) == 0 else None
+    except Exception:
+        leidos = None
+    if e_pos == 0 and e_neg == 0 and leidos is not None and np.allclose(leidos, lim, atol=0.05):
+        print("✓ fr5_servo: límites blandos escritos y comprobados en la controladora")
+        return lim
+    print(f"⚠ fr5_servo: NO se pudieron fijar los límites blandos (SetLimitPositive → {e_pos}, "
+          f"SetLimitNegative → {e_neg}). Ponlos a mano en la web del FR5 (ajustes de seguridad).")
+    return leidos if leidos is not None else actuales
+
+
 def _ret(r):
     """Los métodos del SDK devuelven err o (err, datos)."""
     return r[0] if isinstance(r, (tuple, list)) else r
@@ -322,6 +371,7 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo):
         est[_E_ESTADO] = ESPERA
         print(f"✓ fr5_servo: FR5 conectado, pose real (°) = "
               f"[{', '.join(f'{v:.1f}' for v in q_real[:6])}]")
+        lim_blandos = _limites_blandos(robot, p, q_real)
         listo.set()
         _prioridad_tiempo_real(p)
 
@@ -332,6 +382,9 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo):
         m = float(p["FR5_MARGEN_LIMITES_DEG"])
         lim_inf = np.array([a + m for a, _ in LIMITES_FR5_DEG])
         lim_sup = np.array([b - m for _, b in LIMITES_FR5_DEG])
+        if lim_blandos is not None:            # nunca pedir nada que la controladora rechace
+            lim_inf = np.maximum(lim_inf, lim_blandos[:, 0] + 0.5)
+            lim_sup = np.minimum(lim_sup, lim_blandos[:, 1] - 0.5)
         servoj = _LlamadaServoJ(robot, p)
 
         q_cmd = np.asarray(q_real[:6], float)

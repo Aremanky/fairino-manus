@@ -41,7 +41,9 @@ from dataclasses import dataclass
 import numpy as np
 
 from skill_shield.teleop_fr5.cinematica import CadenaFR5, OFFSET_MUNECA_ORCA
-from skill_shield.teleop_fr5.ik_teleop import ControlIKFR5, ModeloColision, ParametrosIK, PosturaHumana
+from skill_shield.teleop_fr5.ik_teleop import (
+    ControlIKFR5, ModeloColision, ParametrosIK, PosturaHumana, _lejos_caja,
+)
 
 
 def _clip01(x):
@@ -188,7 +190,7 @@ class ControlIKDiferencial:
         try:
             self.r_hueco = abs(float(cadena.dh_equivalente()["params"]["d4"]))
         except Exception:
-            self.r_hueco = 0.13
+            self.r_hueco = 0.1021          # d4 oficial del FR5
         self.q = None
         self.q_buena = None               # última postura de referencia alcanzable
         self._manip = 0.0
@@ -311,6 +313,13 @@ class ControlIKDiferencial:
                 d = dist - c.r - o.r - ent.margen
                 if d < pd.d_col_activa and dist > 1e-6:
                     fila(v / dist, self._jac_punto(m, pa, k, WO), d)
+            for o in ent.cajas:                       # 5-nov: mesa, peana, cámaras, zonas
+                if _lejos_caja(c.a, c.b, c.r, o, pd.d_col_activa + ent.margen):
+                    continue
+                pa, n, sd = o.segmento(c.a, c.b)
+                d = sd - c.r - ent.margen
+                if d < pd.d_col_activa:
+                    fila(n, self._jac_punto(m, pa, k, WO), d)
         for a_, b_ in self.col.PARES_PROPIOS:
             ca, cb = caps[a_], caps[b_]
             if _lejos(esf[a_], esf[b_], pd.d_col_activa):

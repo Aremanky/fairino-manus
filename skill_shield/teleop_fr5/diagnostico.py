@@ -133,7 +133,7 @@ class TrayectoriaLimpia:
         return self.S.copy(), E, W, fase
 
 
-def construir_teleop(L=(0.30, 0.26), usar_config=True, verbose=False):
+def construir_teleop(L=(0.30, 0.26), usar_config=True, verbose=False, obstaculos=False):
     """TeleopBrazoFR5 con la configuración de la app (config.py, igual que en
     Skill_Shield_Nivel_6.py) y longitudes fijas. Devuelve (teleop, q_reposo, origen)."""
     from skill_shield.teleop_fr5.cinematica import cargar_cadena
@@ -162,6 +162,9 @@ def construir_teleop(L=(0.30, 0.26), usar_config=True, verbose=False):
         ent, z_min = Entorno(z_suelo=0.0), g("ARM_Z_MINIMA", 0.10)
     if g("TELEOP_FR5_Z_MIN") is not None:
         z_min = g("TELEOP_FR5_Z_MIN")
+    if C is not None and obstaculos:                    # 5-nov: mesa, peana, cámaras, zonas
+        from skill_shield.teleop_fr5.obstaculos import cajas_desde_config
+        ent.cajas = cajas_desde_config(C, ent.z_suelo, verbose=verbose)
     muneca = g("TELEOP_FR5_MUNECA_DEG", (80.0, 60.0))
     teleop = TeleopBrazoFR5(
         cadena=cadena, camaras={},
@@ -331,12 +334,12 @@ def imprimir_ik(r, detalle=False):
 
 
 def barrido_ruido(ruidos=(0.0, 0.5, 1.0, 2.0, 4.0), saltos=(0.0,), fps=10.0, semilla=0, detalle=False,
-                  usar_config=True):
+                  usar_config=True, obstaculos=False):
     """La misma trayectoria con varios niveles de ruido. Imprime una tabla y devuelve la lista."""
     filas = []
     for s in saltos:
         for r in ruidos:
-            teleop, q0, _ = construir_teleop(usar_config=usar_config)
+            teleop, q0, _ = construir_teleop(usar_config=usar_config, obstaculos=obstaculos)
             res, _ = diagnosticar_ik(r, s, fps=fps, semilla=semilla, teleop=teleop, q0=q0,
                                      verbose=detalle or (r == 0 and s == 0), detalle=detalle)
             filas.append(res)
@@ -648,12 +651,14 @@ def main(argv=None):
     pi.add_argument("--semilla", type=int, default=0)
     pi.add_argument("--detalle", action="store_true", help="tabla por pose")
     pi.add_argument("--sin-config", action="store_true", help="no leer config.py")
+    pi.add_argument("--obstaculos", action="store_true",
+                    help="con la mesa, peana, cámaras y zonas prohibidas de config.py")
     pf = sub.add_parser("informe", help="informe de un registro quieto guardado (.npz)")
     pf.add_argument("ruta", nargs="+")
     a = ap.parse_args(argv)
     if a.cmd == "ik":
         barrido_ruido(_lista(a.ruido), _lista(a.saltos), fps=a.fps, semilla=a.semilla, detalle=a.detalle,
-                      usar_config=not a.sin_config)
+                      usar_config=not a.sin_config, obstaculos=a.obstaculos)
     elif a.cmd == "informe":
         for r in a.ruta:
             informe_quieto(cargar(r), ruta=r)

@@ -140,9 +140,12 @@
     <!-- ══ SOPORTE DEL BRAZO: columna con cabezal en T y hombros a 45° (27-oct) ═══════
          Sustituye a la peana azul. El FR5 va atornillado en la placa del HOMBRO DERECHO
          (-X), inclinado 45° hacia fuera y hacia abajo, como en la foto del soporte.
-         Su HOMBRO (eje de joint2) sigue EXACTAMENTE donde estaba: (0, 0, 0.155). Lo que
-         se mueve es la base (gira alrededor de ese punto), el soporte y el SUELO, que
-         baja a z = -0.975 (hombro a 1.13 m del suelo, como un hombro humano).
+         Su HOMBRO (eje de joint2) se quedó donde estaba con la peana, (0, 0, 0.155), con
+         el d1 = 155 mm del modelo antiguo. Lo que se movió es la base (gira alrededor de
+         ese punto), el soporte y el SUELO, que baja a z = -0.975 (hombro a 1.13 m del
+         suelo, como un hombro humano). 5-nov: con el d1 REAL (152 mm) la base y el
+         soporte no se mueven y el hombro queda 3 mm más cerca de la base, en
+         (0.0021, 0, 0.1571).
          Así lo que el programa coloca en coordenadas del mundo (taladro [4]/[5], techo
          automático...) sigue a la misma distancia del hombro del robot.
          El soporte está en decoracion/soporte_hombros.xml y lo GENERA
@@ -165,7 +168,13 @@
     <geom name="deco_logo_departamento" type="plane" pos="0.84 1.785 0.8" euler="1.5708 0 0" size="0.72 0.24 0.02"
           material="logo_departamento_material" contype="0" conaffinity="0"/>
 
-    <!-- ══ BRAZO FAIRINO FR5 (base fija, sin colisión) ══ -->
+    <!-- ══ BRAZO FAIRINO FR5 (base fija, sin colisión) ══
+         5-nov: medidas del URDF OFICIAL del FR5 v6 (frcobot_ros/fr5v6.urdf):
+           d1 = 152 mm (upperarm_Link, antes 155) · d4 = 102,1 mm (wrist2_Link, antes 130).
+         El modelo antiguo (fr5_robot.urdf) ponía la muñeca 28 mm desplazada en cualquier
+         postura. Los meshes son los del modelo antiguo: los de wrist1_Link se bajan 27,9 mm
+         (pos de cada geom) para que la muñeca siga encajando; la parte que solapa queda
+         dentro del alojamiento del joint4 del antebrazo. -->
     <body name="base_link" pos="0.109601551 0 0.264601551" quat="0.27059805 -0.653281482 -0.653281482 0.27059805">
       <geom type="mesh" mesh="fr5_vis_base_0" material="fr5e_carcasa" contype="0" conaffinity="0" group="2"/>
       <geom type="mesh" mesh="fr5_vis_base_1" material="fr5e_tapa" contype="0" conaffinity="0" group="2"/>
@@ -180,7 +189,7 @@
         <geom type="mesh" mesh="fr5_vis_shoulder_3" material="fr5e_banda" contype="0" conaffinity="0" group="2"/>
         <geom type="mesh" mesh="fr5_vis_shoulder_4" material="fr5e_banda" contype="0" conaffinity="0" group="2"/>
         <geom type="mesh" mesh="fr5_col_shoulder_Link" contype="1" conaffinity="1" group="3" rgba="0.5 0.5 0.5 0.3"/>
-        <body name="upperarm_Link" pos="0 0 0.155" quat="0.5 0.5 -0.5 0.5" gravcomp="1">
+        <body name="upperarm_Link" pos="0 0 0.152" quat="0.5 0.5 -0.5 0.5" gravcomp="1">
           <inertial pos="0.00000 0.21250 0.13547" mass="6.5" diaginertia="0.172373 0.021126 0.165825"/>
           <joint name="joint2" axis="0 0 1" range="-4.6251 1.4835"/>
           <geom type="mesh" mesh="fr5_vis_upperarm_0" material="fr5e_banda" contype="0" conaffinity="0" group="2"/>
@@ -211,15 +220,15 @@
             <geom name="fr5e_antebrazo_franja_muneca" type="cylinder" fromto="-0.337 0 0 -0.345 0 0" size="0.0408" material="fr5e_franja" contype="0" conaffinity="0" group="2" mass="0"/>
             <!-- ══ FIN DECO ELECNOR ══ -->
             <body name="wrist1_Link" pos="-0.395 0 0" quat="0.707107 0 0 0.707107" gravcomp="1">
-              <inertial pos="0.00044 -0.00000 0.10975" mass="1.5" diaginertia="0.002425 0.003547 0.002723"/>
+              <inertial pos="0.00044 -0.00000 0.08185" mass="1.5" diaginertia="0.002425 0.003547 0.002723"/>
               <joint name="joint4" axis="0 0 1" range="-4.6251 1.4835"/>
-              <geom type="mesh" mesh="fr5_vis_wrist1_0" material="fr5e_tapa" contype="0" conaffinity="0" group="2"/>
-              <geom type="mesh" mesh="fr5_vis_wrist1_1" material="fr5e_detalle" contype="0" conaffinity="0" group="2"/>
-              <geom type="mesh" mesh="fr5_vis_wrist1_2" material="fr5e_carcasa" contype="0" conaffinity="0" group="2"/>
-              <geom type="mesh" mesh="fr5_vis_wrist1_3" material="fr5e_acento" contype="0" conaffinity="0" group="2"/>
-              <geom type="mesh" mesh="fr5_vis_wrist1_4" material="fr5e_banda" contype="0" conaffinity="0" group="2"/>
-              <geom type="mesh" mesh="fr5_col_wrist1_Link" contype="1" conaffinity="1" group="3" rgba="0.5 0.5 0.5 0.3"/>
-              <body name="wrist2_Link" pos="0 0 0.13" quat="0.5 0.5 -0.5 -0.5" gravcomp="1">
+              <geom pos="0 0 -0.0279" type="mesh" mesh="fr5_vis_wrist1_0" material="fr5e_tapa" contype="0" conaffinity="0" group="2"/>
+              <geom pos="0 0 -0.0279" type="mesh" mesh="fr5_vis_wrist1_1" material="fr5e_detalle" contype="0" conaffinity="0" group="2"/>
+              <geom pos="0 0 -0.0279" type="mesh" mesh="fr5_vis_wrist1_2" material="fr5e_carcasa" contype="0" conaffinity="0" group="2"/>
+              <geom pos="0 0 -0.0279" type="mesh" mesh="fr5_vis_wrist1_3" material="fr5e_acento" contype="0" conaffinity="0" group="2"/>
+              <geom pos="0 0 -0.0279" type="mesh" mesh="fr5_vis_wrist1_4" material="fr5e_banda" contype="0" conaffinity="0" group="2"/>
+              <geom pos="0 0 -0.0279" type="mesh" mesh="fr5_col_wrist1_Link" contype="1" conaffinity="1" group="3" rgba="0.5 0.5 0.5 0.3"/>
+              <body name="wrist2_Link" pos="0 0 0.1021" quat="0.5 0.5 -0.5 -0.5" gravcomp="1">
                 <inertial pos="0.00008 -0.01264 0.09851" mass="1.5" diaginertia="0.002843 0.001721 0.002723"/>
                 <joint name="joint5" axis="0 0 1" range="-3.0543 3.0543"/>
                 <geom type="mesh" mesh="fr5_vis_wrist2_0" material="fr5e_detalle" contype="0" conaffinity="0" group="2"/>

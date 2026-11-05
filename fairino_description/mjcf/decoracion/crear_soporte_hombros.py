@@ -63,9 +63,13 @@ MEDIDAS = dict(
     disco          = (0.085, 0.006),   # adaptador entre placa y base del FR5 (radio, espesor)
 )
 
-# El FR5: su hombro (ancla de joint2) está a 0.155 m de la base, sobre el eje de joint1.
-HOMBRO_MUNDO = (0.0, 0.0, 0.155)   # NO cambiar: es donde estaba con la peana (ver arriba)
+# Colocación de la base: HOMBRO_MUNDO y BASE_A_HOMBRO son las del DISEÑO del soporte (con el
+# d1 = 155 mm del modelo antiguo). NO cambiar: fijan dónde está la base (atornillada en la placa).
+# 5-nov: el d1 REAL del FR5 v6 es D1_FR5 = 152 mm (está en fairino_mjcf.xml, upperarm_Link);
+# con la base en el mismo sitio, el hombro real queda 3 mm más cerca de ella.
+HOMBRO_MUNDO = (0.0, 0.0, 0.155)
 BASE_A_HOMBRO = 0.155
+D1_FR5 = 0.152
 
 # Colores: "elecnor" = columna y alas azul corporativo, chapas grafito, acentos naranja
 #          "real"    = acero negro, bastidor galvanizado y ruedas rojas (como en los vídeos)
@@ -328,4 +332,6 @@ if __name__ == "__main__":
     geo = generar()
     colocar_base(geo)
     print(f"  Suelo en z = {geo['z_suelo']:.4f} m (config.py → SOPORTE_SUELO_Z y marcas [H]/[Z] "
-          f"si ha cambiado) · hombro del FR5 a {HOMBRO_MUNDO[2] - geo['z_suelo']:.3f} m del suelo")
+          f"si ha cambiado) · hombro del FR5 a "
+          f"{HOMBRO_MUNDO[2] + (BASE_A_HOMBRO - D1_FR5) * math.cos(math.radians(MEDIDAS['hombro_grados'])) - geo['z_suelo']:.3f}"
+          f" m del suelo")

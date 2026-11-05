@@ -82,11 +82,69 @@ class Capsula:
 
 
 @dataclass
+class Caja:
+    """Obstáculo o zona prohibida con forma de caja (5-nov): centro y semi-lados en el MUNDO,
+    R = orientación (columnas = ejes de la caja; None = alineada con el mundo)."""
+    nombre: str
+    centro: np.ndarray
+    semi: np.ndarray
+    R: np.ndarray = None
+    zona: bool = False            # True = zona prohibida (no es un objeto: espacio reservado)
+
+    def __post_init__(self):
+        self.centro = np.asarray(self.centro, dtype=float)
+        self.semi = np.asarray(self.semi, dtype=float)
+        self.R = np.eye(3) if self.R is None else np.asarray(self.R, dtype=float)
+        self.radio_env = float(np.linalg.norm(self.semi))      # esfera envolvente
+
+    def sdf(self, p):
+        """Distancia con signo de p a la caja (negativa dentro) y su gradiente (normal hacia
+        fuera, unitaria)."""
+        l = self.R.T @ (np.asarray(p, dtype=float) - self.centro)
+        q = np.abs(l) - self.semi
+        fuera = np.maximum(q, 0.0)
+        nf = float(np.linalg.norm(fuera))
+        if nf > 1e-12:                                   # fuera: hacia el punto más cercano
+            g = np.sign(l) * fuera / nf
+            return nf, self.R @ g
+        i = int(np.argmax(q))                            # dentro: hacia la cara más cercana
+        g = np.zeros(3)
+        g[i] = 1.0 if l[i] >= 0.0 else -1.0
+        return float(q[i]), self.R @ g
+
+    def segmento(self, a, b, n_iter=18):
+        """Punto del segmento a-b más cercano a la caja: (punto, normal, distancia con signo).
+        La distancia con signo a un convexo es convexa a lo largo del segmento → búsqueda
+        ternaria."""
+        a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+        d = b - a
+        lo, hi = 0.0, 1.0
+        for _ in range(n_iter):
+            m1, m2 = lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0
+            if self.sdf(a + m1 * d)[0] <= self.sdf(a + m2 * d)[0]:
+                hi = m2
+            else:
+                lo = m1
+        p = a + 0.5 * (lo + hi) * d
+        sd, n = self.sdf(p)
+        return p, n, sd
+
+
+def _lejos_caja(a, b, r, caja, umbral):
+    """Descarte rápido por esferas envolventes (cápsula a-b de radio r contra la caja)."""
+    c = 0.5 * (np.asarray(a) + np.asarray(b))
+    rc = 0.5 * float(np.linalg.norm(np.asarray(b) - np.asarray(a))) + r
+    return float(np.linalg.norm(c - caja.centro)) - rc - caja.radio_env > umbral
+
+
+@dataclass
 class Entorno:
-    """Obstáculos fijos: suelo (z) y cápsulas (columna del soporte, mesa...)."""
+    """Obstáculos fijos: suelo (z), cápsulas (columna del soporte...) y cajas (mesa, peana,
+    cámaras, zonas prohibidas — 5-nov, ver skill_shield/teleop_fr5/obstaculos.py)."""
     z_suelo: float = None
     capsulas: list = field(default_factory=list)
     margen: float = 0.03
+    cajas: list = field(default_factory=list)
 
 
 def entorno_soporte_hombros(z_suelo=-0.975):
@@ -144,6 +202,12 @@ class ModeloColision:
                     out.append((nombre, "suelo", ent.z_suelo - z))
             for o in ent.capsulas:
                 d = _dist_segmentos(c.a, c.b, o.a, o.b) - c.r - o.r - ent.margen
+                if d < 0.0:
+                    out.append((nombre, o.nombre, -d))
+            for o in ent.cajas:
+                if _lejos_caja(c.a, c.b, c.r, o, ent.margen):
+                    continue
+                d = o.segmento(c.a, c.b)[2] - c.r - ent.margen
                 if d < 0.0:
                     out.append((nombre, o.nombre, -d))
         return out

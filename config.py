@@ -1014,7 +1014,8 @@ if ROBOT_BRAZO == "FR5":
     # La del ARCTOS salía de una foto del brazo real; para el FR5 se puede sacar igual.
     POSE_BRAZO_ACTIVAR = None
 
-    # Espacio de trabajo. El hombro del FR5 está a 0.155 m sobre la peana (el del ARCTOS a
+    # Espacio de trabajo. El hombro del FR5 está a 0.152 m sobre su base (d1 oficial; el modelo
+    # antiguo decía 0.155) (el del ARCTOS a
     # 0.29) y el brazo es mucho más largo (0.425 + 0.395 m). Con CODO_Z_MIN = 0 el codo puede
     # bajar hasta la altura de la peana (~21° por debajo de la horizontal).
     CODO_Z_MIN    = 0.0
@@ -1026,7 +1027,8 @@ if ROBOT_BRAZO == "FR5":
 # ═══════════════════════════════════════════════════════════════════════════
 # El FR5 va en la placa del HOMBRO DERECHO del soporte nuevo, inclinado 45° hacia fuera y
 # hacia abajo (fairino_description/mjcf/decoracion/crear_soporte_hombros.py). Su HOMBRO
-# (eje de joint2) sigue en (0, 0, 0.155), donde estaba con la peana; el suelo baja a
+# (eje de joint2) estaba en (0, 0, 0.155) con la peana (5-nov: con el d1 real, 152 mm, queda en
+# (0.0021, 0, 0.1571): la base no se mueve y el hombro está 3 mm más cerca); el suelo baja a
 # z = -0.975 (hombro a 1.13 m del suelo, como el de una persona).
 #
 # Se DETECTA SOLO leyendo fairino_mjcf.xml: si base_link tiene la base girada, se aplica
@@ -1146,6 +1148,54 @@ TELEOP_FR5_PEDAL_TECLAS      = (ord("p"), ord("P"), 112)   # modo "tecla": códi
 TELEOP_FR5_PEDAL_EVDEV       = None     # modo "evdev": "/dev/input/by-id/..." o parte del nombre
 TELEOP_FR5_PEDAL_EVDEV_CODIGO = None    # código de la tecla del pedal (None = cualquiera)
 TELEOP_FR5_PEDAL_HOMBRE_MUERTO = True   # modo "evdev": armado solo MIENTRAS se pisa
+
+# ── OBSTÁCULOS Y ZONAS PROHIBIDAS DE LA IK (5-nov) ─────────────────────────────────────
+# Antes la IK solo evitaba el suelo y el soporte de hombros. Ahora también estas CAJAS
+# (skill_shield/teleop_fr5/obstaculos.py): el robot se aparta de ellas a menos de 7 cm y no
+# acepta posturas que las atraviesen (margen 3 cm). Coordenadas en metros, en el MUNDO del
+# simulador: hombro del FR5 en ~(0, 0, 0.157), el robot mira hacia −Y, T-pose hacia −X,
+# z hacia arriba, suelo en SOPORTE_SUELO_Z. Se ven en el visor como cajas translúcidas
+# (naranja = objeto, rojo = zona prohibida) con TELEOP_FR5_OBSTACULOS_VER.
+# ⚠ MEDIRLAS EN EL LABORATORIO: lo que tenga posición None NO se protege (se avisa al arrancar).
+TELEOP_FR5_OBSTACULOS_VER = False
+_MESA = globals().get("TALLER_POS_MESA", (-0.45, -0.45, -0.40))      # (x, y, z del tablero)
+_PEANA = globals().get("TALADRO_POS_SOPORTE", (-0.66, -0.29, 0.25))  # (x, y, z de la cara de arriba)
+TELEOP_FR5_OBSTACULOS = [
+    # desde_suelo=True: del suelo hasta z_sup. Por defecto, donde están en el simulador ([3] y [4]).
+    dict(nombre="mesa",  xy=_MESA[:2],  semi_xy=(0.18, 0.28),     z_sup=_MESA[2],  desde_suelo=True),
+    # La peana del simulador está DENTRO del espacio de trabajo (de ahí coge el robot el taladro):
+    # activa en ese sitio bloquea media teleoperación (probado con el diagnóstico de la IK). Ponla
+    # en su sitio REAL y actívala; si hay que coger cosas de encima, deja z_sup algo más baja.
+    dict(nombre="peana", xy=_PEANA[:2], semi_xy=(0.0825, 0.0825), z_sup=_PEANA[2], desde_suelo=True,
+         activo=False),
+    # caja suelta: dict(nombre="armario", centro=(x, y, z), semi=(sx, sy, sz)),
+]
+TELEOP_FR5_CAMARAS = [
+    # cuerpo de la OAK-D (semi-lados) + trípode hasta el suelo (caja de radio_tripode)
+    dict(nombre="camara_A", xyz=None, semi=(0.06, 0.06, 0.04), tripode=True, radio_tripode=0.15),
+    dict(nombre="camara_B", xyz=None, semi=(0.06, 0.06, 0.04), tripode=True, radio_tripode=0.15),
+]
+TELEOP_FR5_ZONAS_PROHIBIDAS = [
+    # Espacio reservado aunque no haya nada: puesto del operador, paso de personas...
+    # dict(nombre="operador", centro=(x, y, z), semi=(sx, sy, sz)),
+]
+
+# ── LÍMITES BLANDOS EN LA CONTROLADORA DEL FR5 (5-nov) ───────────────────────────────────
+# Tope de seguridad independiente del programa: fr5_servo los ESCRIBE en la controladora al
+# conectar (SetLimitPositive/Negative) y los comprueba leyéndolos (GetJointSoftLimitDeg).
+# Si un comando los supera, el FR5 se para solo aunque el programa falle. En FR5_SIMULACRO
+# solo se leen y se comparan (no se cambia nada en el robot).
+# Por defecto = los topes duros de la IK de teleoperación + 5° (la teleoperación nunca debería
+# tocarlos), dentro de los rangos del FR5. Grados, en el convenio de la controladora.
+FR5_FIJAR_LIMITES_BLANDOS = True
+FR5_LIMITES_BLANDOS_DEG = (
+    (-175.0, 175.0),    # joint1 (base)
+    (-265.0,  85.0),    # joint2 (hombro)
+    ( -10.0, 150.0),    # joint3 (codo): solo hacia el lado "humano"
+    (-105.0,  85.0),    # joint4 (muñeca 1)
+    (   5.0, 175.0),    # joint5 (muñeca 2)
+    (-175.0, 175.0),    # joint6 (brida)
+)
 
 # Fusión de cámaras (ver fusion_muneca_codo.Parametros): ángulo del antebrazo respecto al rayo
 # de la cámara por debajo del cual esa cámara NO ve bien codo y muñeca (escorzo / palma delante)
