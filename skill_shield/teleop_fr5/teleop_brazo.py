@@ -18,8 +18,18 @@ Calibración al pulsar [A] (28-oct: TODO automático, sin medir nada a mano):
 Durante la teleoperación se vigila la extrínseca y, si A y B dejan de coincidir (alguien movió
 una cámara), se recalibra sola en segundo plano.
 
-Estados (info["estado"]): "calibrando", "sin_medida", "hold", "exacta", "aprox",
+Estados (info["estado"]): "calibrando", "desarmado", "sin_medida", "hold", "exacta", "aprox",
 "transicion", "bloqueado".
+
+ARMADO Y ENTRADA LENTA (5-nov): calibrar NO mueve el robot.
+  · Con cfg.requiere_armado, al acabar la calibración el estado es "desarmado": no se devuelve
+    ningún q (el robot se queda donde está) hasta que alguien llame a armar() (el pedal).
+    desarmar() lo vuelve a dejar quieto; iniciar_calibracion() siempre desarma.
+  · Cada vez que la IK arranca desde la postura real del robot (al armar, o al acabar de calibrar
+    si no hace falta armar), la salida va como mucho a cfg.v_entrada rad/s por joint hasta estar a
+    menos de cfg.entrada_fin_rad del objetivo; luego, seguimiento normal (TELEOP_FR5_V_MAX).
+    Antes ese arranque iba a v_transicion = 1,2 rad/s y TELEOP_FR5_V_MAX no lo limitaba.
+    info["entrada"] = True mientras dura.
 """
 import math
 import time
@@ -47,6 +57,9 @@ class ConfigTeleop:
     vigilar_extrinseca: bool = True       # ... y vigilarla durante la teleoperación
     vertical_auto: bool = True            # vertical del tronco medida en la T-pose
     huesos_triangulados: bool = True      # huesos solo con las dos cámaras (si hay dos)
+    requiere_armado: bool = False         # 5-nov: tras calibrar, quieto hasta armar() (pedal)
+    v_entrada: float = None               # 5-nov: rad/s máx. al arrancar desde la postura real (None = sin tope)
+    entrada_fin_rad: float = 0.05         # a menos de esto (rad, cada joint) del objetivo acaba la entrada
 
 
 class TeleopBrazoFR5:
@@ -107,11 +120,24 @@ class TeleopBrazoFR5:
         self.p_w_filtrada = None
         self.info = {"estado": "sin_medida"}
         self.ultima_medida = None             # salida de la fusión del último fotograma (diagnóstico)
+        self.armado = False                   # 5-nov: pedal (solo cuenta con cfg.requiere_armado)
+        self._entrando = False
+        self._q_entrada = None
         if self.calib.longitudes is not None:
             self.fusor.longitudes = self.calib.longitudes
 
     # ── calibración (al pulsar [A]) ──────────────────────────────────────────
+    # ── armado (pedal) ────────────────────────────────────────────────────────
+    def armar(self):
+        """El robot empieza a seguirte, entrando despacio desde donde esté."""
+        self.armado = True
+
+    def desarmar(self):
+        """El robot se queda quieto; al volver a armar, entra otra vez despacio."""
+        self.armado = False
+
     def iniciar_calibracion(self):
+        self.armado = False                   # calibrar nunca mueve el robot
         self.calib.iniciar()
         self.fusor.reiniciar()
         self.retarget.reiniciar_roll()
@@ -314,6 +340,8 @@ class TeleopBrazoFR5:
             if hasattr(self.ik, "arrancando"):
                 self.ik.arrancando = True
             self.retarget.reiniciar_roll(self.cadena.fk(self.ik.q)["T_tool"][:3, :3])
+            self._entrando = self.cfg.v_entrada is not None   # 5-nov: arranque lento
+            self._q_entrada = self.ik.q.copy()
         if self.fase_cal == "camaras":            # (solo si se llama directamente sin cámaras)
             self.fase_cal = "huesos"
         if self.fase_cal == "huesos" or (self.fase_cal is None and self.calib.longitudes is None):
@@ -347,6 +375,16 @@ class TeleopBrazoFR5:
                              texto=f"CALIBRANDO HUESOS {self.calib.progreso}/{self.calib.n} - T-pose, brazo estirado")
             return None, self.info
 
+        armado = self.armado                  # (lo cambia el bucle principal: se lee una vez)
+        if self.cfg.requiere_armado and not armado:
+            # Calibrado pero SIN ARMAR: no se manda nada (el robot se queda donde está) y la IK
+            # se reinicia para arrancar, al armar, desde la postura real del robot.
+            self.ik.q = None
+            self.q = None
+            self.info = dict(estado="desarmado", fuentes=fuentes, aviso=self.aviso,
+                             texto="CALIBRADO - pisa el PEDAL para armar el brazo")
+            return None, self.info
+
         obj = None
         if res is not None:
             obj = self.retarget.objetivo(res, self.calib.longitudes, mano=mano, roll=roll, t=t)
@@ -365,8 +403,25 @@ class TeleopBrazoFR5:
             return self.q, self.info
 
         q, info_ik = self.ik.resolver(obj, t, dt)
+        entrando = False
+        if self._entrando:
+            # 5-nov: entrada lenta. La salida va hacia la de la IK a v_entrada como mucho, y la
+            # IK sigue desde la postura limitada (es por donde va el robot de verdad).
+            q = np.asarray(q, dtype=float)
+            d = q - self._q_entrada
+            if float(np.abs(d).max()) <= self.cfg.entrada_fin_rad:
+                self._entrando = False
+                if self.verbose:
+                    print("🟢 TELEOP v2: brazo alcanzado → seguimiento normal")
+            else:
+                paso = self.cfg.v_entrada * float(dt) if dt else 0.0
+                q = self._q_entrada + np.clip(d, -paso, paso)
+                self.ik.q = q.copy()
+                entrando = True
+            self._q_entrada = q.copy()
         self.q = q
         self.info = dict(info_ik)
+        self.info["entrada"] = entrando
         self.info.update(fuentes=fuentes, codo_reconstruido=res.get("codo_reconstruido") if res else None,
                          hold=res is None, escala=obj["escala"], roll=obj["roll"], aviso=self.aviso,
                          anatomia=(self.retarget.anatomia.n_hombro, self.retarget.anatomia.n_codo))

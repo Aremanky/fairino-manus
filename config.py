@@ -1126,6 +1126,27 @@ TELEOP_FR5_V_MAX     = 3.0      # tope del propio módulo (lo que no llega, se q
 TELEOP_FR5_SUAVE_VEL = 2.5      # GeneradorSuave (hilo de física), por joint
 TELEOP_FR5_SUAVE_ACEL = 20.0
 
+# ── ARMADO CON PEDAL Y ENTRADA LENTA (5-nov) ───────────────────────────────────────────
+# Antes, al acabar la T-pose el robot iba SOLO hacia tu postura a 1,2 rad/s (v_transicion de
+# la IK; TELEOP_FR5_V_MAX no limitaba ese arranque). Ahora:
+#   · [A] + T-pose solo CALIBRA: el robot no se mueve (tampoco va a la T-pose del simulador).
+#   · Al acabar, "CALIBRADO - pisa el PEDAL": el robot sigue quieto hasta que lo armas.
+#   · Armado: entra hacia tu postura a TELEOP_FR5_V_ENTRADA rad/s (cada joint) y, cuando está
+#     a menos de TELEOP_FR5_ENTRADA_FIN_RAD, pasa a seguirte a TELEOP_FR5_V_MAX.
+#   · Desarmar (pedal otra vez / soltarlo en hombre muerto, [S] o [A]) → quieto. Al volver a
+#     armar, entra otra vez despacio desde donde esté.
+# Pedal: "tecla" = pedal USB que hace de teclado (o la tecla de abajo en la ventana de la
+# cámara), cada pisada alterna · "evdev" = se lee de /dev/input y permite HOMBRE MUERTO
+# (pip install evdev y usuario en el grupo input) · None = sin pedal, se arma al calibrar
+# (solo para el simulador). Ver skill_shield/teleop_fr5/pedal.py.
+TELEOP_FR5_V_ENTRADA         = 0.15     # rad/s (≈ 8,6 °/s): pedido 0,1-0,2
+TELEOP_FR5_ENTRADA_FIN_RAD   = 0.05     # rad (≈ 3°) por joint: aquí acaba la entrada lenta
+TELEOP_FR5_PEDAL             = "tecla"  # "tecla" | "evdev" | None
+TELEOP_FR5_PEDAL_TECLAS      = (ord("p"), ord("P"), 112)   # modo "tecla": códigos de cv2.waitKeyEx
+TELEOP_FR5_PEDAL_EVDEV       = None     # modo "evdev": "/dev/input/by-id/..." o parte del nombre
+TELEOP_FR5_PEDAL_EVDEV_CODIGO = None    # código de la tecla del pedal (None = cualquiera)
+TELEOP_FR5_PEDAL_HOMBRE_MUERTO = True   # modo "evdev": armado solo MIENTRAS se pisa
+
 # Fusión de cámaras (ver fusion_muneca_codo.Parametros): ángulo del antebrazo respecto al rayo
 # de la cámara por debajo del cual esa cámara NO ve bien codo y muñeca (escorzo / palma delante)
 TELEOP_FR5_ESCORZO_DEG = (20.0, 40.0)

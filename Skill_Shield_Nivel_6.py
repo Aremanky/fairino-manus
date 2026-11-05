@@ -951,7 +951,11 @@ def main():
                                          ik=str(globals().get("TELEOP_FR5_IK", "diferencial")),
                                          auto_extrinseca=_auto_ext_v2,
                                          vigilar_extrinseca=bool(globals().get("TELEOP_FR5_VIGILAR_EXTRINSECA", True)),
-                                         vertical_auto=bool(globals().get("TELEOP_FR5_VERTICAL_AUTO", True))),
+                                         vertical_auto=bool(globals().get("TELEOP_FR5_VERTICAL_AUTO", True)),
+                                         # 5-nov: calibrar no mueve el robot; se arma con el pedal
+                                         requiere_armado=globals().get("TELEOP_FR5_PEDAL", "tecla") is not None,
+                                         v_entrada=globals().get("TELEOP_FR5_V_ENTRADA", 0.15),
+                                         entrada_fin_rad=float(globals().get("TELEOP_FR5_ENTRADA_FIN_RAD", 0.05))),
                         al_calibrar_extrinseca=_guardar_ext_v2,
                         par_fusion=_ParFusionV2(vis_min=POSE_VISIBILIDAD_MIN, z_min=PROF_Z_MIN, z_max=PROF_Z_MAX,
                                                 prof_radio_px=PROF_RADIO_PX, prof_percentil=PROF_PERCENTIL,
@@ -983,6 +987,17 @@ def main():
                           f"{teleop_v2.retarget.alcance_robot:.2f} m, suelo {_ent_v2.z_suelo}")
                 t_ult_print_v2 = 0.0
                 t_prev_v2 = None
+                # 5-nov: pedal para ARMAR el brazo tras calibrar (skill_shield/teleop_fr5/pedal.py)
+                pedal_v2 = None
+                if teleop_v2 is not None:
+                    from skill_shield.teleop_fr5.pedal import Pedal
+                    pedal_v2 = Pedal(modo=globals().get("TELEOP_FR5_PEDAL", "tecla"),
+                                     teclas=globals().get("TELEOP_FR5_PEDAL_TECLAS", (ord("p"), ord("P"))),
+                                     dispositivo=globals().get("TELEOP_FR5_PEDAL_EVDEV"),
+                                     codigo=globals().get("TELEOP_FR5_PEDAL_EVDEV_CODIGO"),
+                                     hombre_muerto=globals().get("TELEOP_FR5_PEDAL_HOMBRE_MUERTO", True))
+                    print(f"🦶 Armado del brazo: {pedal_v2.descripcion}; entrada a "
+                          f"{globals().get('TELEOP_FR5_V_ENTRADA', 0.15)} rad/s")
                 # 28-oct (fluidez): la v2 en un hilo aparte, solapada con la cámara y MediaPipe
                 teleop_v2_par = None
                 if teleop_v2 is not None and globals().get("TELEOP_FR5_EN_PARALELO", True):
@@ -1961,6 +1976,13 @@ def main():
                                 f"CALIBRANDO HUESOS {_info_v2.get('progreso', 0)}/{CALIB_HUESOS_FRAMES}"
                                 " - manten T-pose (brazo estirado)")
                             _col_v2 = (0, 200, 255)
+                        elif _est_v2 == "desarmado":
+                            _txt_v2 = _info_v2.get("texto", "DESARMADO")
+                            _col_v2 = (0, 140, 255)
+                        elif _info_v2.get("entrada"):
+                            _txt_v2 = (f"BRAZO v2: ENTRANDO DESPACIO "
+                                       f"({globals().get('TELEOP_FR5_V_ENTRADA', 0.15)} rad/s)")
+                            _col_v2 = (255, 200, 0)
                         else:
                             _txt_v2 = (f"BRAZO v2: {_est_v2.upper()}  "
                                        f"err={100 * (_info_v2.get('error') or 0):.1f}cm"
@@ -1981,6 +2003,22 @@ def main():
                     key = cv2.waitKeyEx(1)
                     if perfil is not None:
                         perfil.marca("waitKey")
+
+                    # 5-nov: PEDAL — arma / desarma el brazo (solo cuenta con la cámara activa)
+                    if pedal_v2 is not None:
+                        _ev_pedal = pedal_v2.tecla(key) or pedal_v2.actualizar()
+                        if _ev_pedal is not None and pedal_v2.modo == "tecla":
+                            key = -1                     # la tecla del pedal no hace nada más
+                        if _ev_pedal == "armar":
+                            if estado["camara_activa"] and teleop_v2.calibrado:
+                                teleop_v2.armar()
+                                print("🟠 PEDAL: brazo ARMADO → entra despacio hacia tu postura")
+                            else:
+                                pedal_v2.desarmar()
+                                print("⚠ PEDAL: no se arma sin calibrar ([A] + T-pose primero)")
+                        elif _ev_pedal == "desarmar":
+                            teleop_v2.desarmar()
+                            print("⏸ PEDAL: brazo DESARMADO → quieto")
 
                     if key == 32:  # 32 es el código ASCII del Espacio
                         estado["pinza_habilitada"] = not estado.get("pinza_habilitada", True)
@@ -2009,11 +2047,14 @@ def main():
                                 if teleop_v2_par is not None:
                                     teleop_v2_par.recoger()              # que el hilo no esté a medias
                                     teleop_v2_par.ultimo = (None, {"estado": "calibrando"})
-                                teleop_v2.iniciar_calibracion()
+                                teleop_v2.iniciar_calibracion()     # (también desarma)
                                 teleop_v2.ik.q = None
                                 t_prev_v2 = None
+                                if pedal_v2 is not None:
+                                    pedal_v2.desarmar()
                                 print("🦾 [A] TELEOP v2: calibrando huesos (T-pose, brazo estirado) "
-                                      f"~{CALIB_HUESOS_FRAMES} fotogramas; el FR5 sale de su postura actual.")
+                                      f"~{CALIB_HUESOS_FRAMES} fotogramas. El FR5 NO se mueve: al acabar, "
+                                      "pisa el pedal para armarlo.")
                             _pose_A = globals().get("POSE_BRAZO_ACTIVAR") if teleop_v2 is None else None
                             if _pose_A is not None:
                                 # 9-oct: pose fija al pulsar [A] (config.POSE_BRAZO_ACTIVAR). Se
@@ -2024,7 +2065,8 @@ def main():
                                 print("🦾 [A] Brazo a POSE_BRAZO_ACTIVAR: "
                                       + "  ".join(f"q{_k + 1}={float(_v):+.2f}" for _k, _v in enumerate(_pose_A))
                                       + " rad")
-                            elif IMITAR_REFERENCIA == "absoluto" and IMITAR_TPOSE_SIM_AL_CALIBRAR:
+                            elif IMITAR_REFERENCIA == "absoluto" and IMITAR_TPOSE_SIM_AL_CALIBRAR \
+                                    and teleop_v2 is None:   # 5-nov: con el FR5 calibrar NO mueve el robot
                                 _qT = angulos_humano_a_q_brazo(
                                     math.radians(T_POSE_HUMANA[0]),
                                     math.radians(T_POSE_HUMANA[1]),
@@ -2050,6 +2092,12 @@ def main():
                     elif key == ord("s"):
                         estado["camara_activa"] = False
                         estado["muneca_bloqueada"] = False
+                        if teleop_v2 is not None:            # 5-nov: hay que volver a armar
+                            if teleop_v2_par is not None:
+                                teleop_v2_par.recoger()
+                            teleop_v2.desarmar()
+                            if pedal_v2 is not None:
+                                pedal_v2.desarmar()
                         if grabando and tarea_actual:
                             ruta = guardar_episodio(
                                 buffer_episodio, os.path.join(EPISODIOS_DIR, tarea_actual))
@@ -2413,6 +2461,8 @@ def main():
                     pool_mano = None
                 if fr5 is not None:                  # FR5 real: ServoMoveEnd y quieto
                     fr5.habilitar(False)
+                if pedal_v2 is not None:
+                    pedal_v2.cerrar()
                 if fisica is not None:
                     fisica.parar()
                     fisica = None
