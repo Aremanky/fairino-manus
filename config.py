@@ -1218,9 +1218,13 @@ TELEOP_FR5_DIAG_ETIQUETA = "tpose"
 # skill_shield/hardware/fr5_servo.py. Durante la teleoperación, el comando del brazo del
 # simulador (ctrl de joint1..6, ya suavizado por el generador del PASO 7.1) se publica en cada
 # mj_step y un PROCESO aparte lo manda al FR5 con ServoJ a ritmo fijo.
-#   · Al entrar en teleoperación arranca desde la pose REAL del robot; si el simulador está
-#     lejos, se acerca a FR5_VEL_APROX_DEG_S hasta estar a < FR5_DESFASE_MAX_DEG.
-#   · Al salir de teleoperación (IA, demo, [Q]) → ServoMoveEnd: el robot se queda quieto.
+#   · El simulador NO es el estado real (5-nov): al arrancar, al entrar en teleoperación y en
+#     cada vuelta mientras el brazo está DESARMADO, MuJoCo (y el generador suave) se copian de
+#     la postura LEÍDA del FR5; la IK sale de ahí.
+#   · Solo se manda ServoJ con el brazo ARMADO (pedal, ver TELEOP_FR5_PEDAL); al armar empieza
+#     desde la pose real. Si aun así el simulador estuviera lejos, se acerca a
+#     FR5_VEL_APROX_DEG_S hasta estar a < FR5_DESFASE_MAX_DEG.
+#   · Desarmar, [S], [A] o salir de teleoperación (IA, demo, [Q]) → ServoMoveEnd: quieto.
 # Probarlo SOLO, sin cámaras:  python -m skill_shield.hardware.fr5_servo [--real] [--oscilar 2]
 FR5_REAL_ACTIVO = False          # True = arrancar el proceso fr5_servo con Skill_Shield_Nivel_6
 FR5_SIMULACRO   = True           # True = conecta y lee la pose, pero NO manda ServoJ (1ª prueba)

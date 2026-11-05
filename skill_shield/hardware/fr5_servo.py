@@ -71,8 +71,11 @@ PARAMETROS_POR_DEFECTO = dict(
 
 # Índices de la memoria compartida de estado
 _E_ESTADO, _E_CICLOS, _E_RETRASOS, _E_ERR, _E_PER_MED, _E_PER_MAX, _E_SJ_MED, _E_SJ_MAX = range(8)
-_E_QREAL = 8          # 8..13: última pose real/comandada (grados)
-_N_ESTADO = 14
+_E_QCMD = 8           # 8..13: último comando enviado (o pose real si no se envía), grados
+_E_QREAL = 14         # 14..19: pose REAL leída del robot (grados)
+_E_TREAL = 20         # time.monotonic() de esa lectura
+_N_ESTADO = 21
+PERIODO_LECTURA_S = 0.02    # pose real: 50 Hz (del paquete de estado en tiempo real, sin RPC)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -138,7 +141,25 @@ class FR5Servo:
                     retrasos=int(e[_E_RETRASOS]), errores_servoj=int(e[_E_ERR]),
                     periodo_medio_ms=e[_E_PER_MED], periodo_max_ms=e[_E_PER_MAX],
                     servoj_medio_ms=e[_E_SJ_MED], servoj_max_ms=e[_E_SJ_MAX],
-                    q_deg=e[_E_QREAL:_E_QREAL + 6])
+                    q_deg=e[_E_QCMD:_E_QCMD + 6], q_real_deg=e[_E_QREAL:_E_QREAL + 6],
+                    edad_real_s=(time.monotonic() - e[_E_TREAL]) if e[_E_TREAL] else None)
+
+    def q_real_rad(self, max_edad_s=0.3):
+        """Pose REAL del FR5 en el convenio del MJCF (rad), o None si no hay lectura reciente.
+        Inversa de q_FR5[°] = SIGNO · grados(q_MJCF) + OFFSET."""
+        if not self.conectado:
+            return None
+        e = self._est[:]
+        if not e[_E_TREAL] or time.monotonic() - e[_E_TREAL] > max_edad_s:
+            return None
+        q_deg = np.asarray(e[_E_QREAL:_E_QREAL + 6], float)
+        return np.radians(q_deg - np.asarray(self.p["FR5_OFFSET_DEG"], float)) \
+            * np.asarray(self.p["FR5_SIGNO"], float)
+
+    @property
+    def enviando(self):
+        """True mientras el proceso manda ServoJ (habilitado y sin error)."""
+        return self.conectado and int(self._est[_E_ESTADO]) in (ACERCANDO, ENVIANDO)
 
     def parar(self, timeout=2.0):
         """ServoMoveEnd + CloseRPC en el hijo y espera a que termine."""
@@ -152,6 +173,17 @@ class FR5Servo:
             self._proc.terminate()
             self._proc.join(1.0)
         self._proc = None
+
+
+def sincronizar_mujoco(modelo, datos, q, qpos_idx, dof_idx, ctrl_idx):
+    """Pone el brazo del simulador EXACTAMENTE en q (rad): posición, velocidad 0 y ctrl = q,
+    para que la simulación, la IK y el generador suave arranquen de la postura REAL."""
+    import mujoco
+    for k in range(6):
+        datos.qpos[qpos_idx[k]] = float(q[k])
+        datos.qvel[dof_idx[k]] = 0.0
+        datos.ctrl[ctrl_idx[k]] = float(q[k])
+    mujoco.mj_forward(modelo, datos)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -203,6 +235,39 @@ class _LlamadaServoJ:
         return self.robot.ServoJ(q, 0.0, 0.0, self.p["FR5_PERIODO_S"], 0.0, 0.0)
 
 
+class _LectorPoseReal:
+    """Pose real (°): del paquete de estado en tiempo real del SDK (lo actualiza su hilo de
+    estado, sin RPC) y, si este SDK no lo tiene, GetActualJointPosDegree (RPC) a 10 Hz."""
+
+    def __init__(self, robot):
+        self.robot = robot
+        self.rapido = True
+        self.t_rpc = 0.0
+
+    def __call__(self, ahora):
+        if self.rapido:
+            try:
+                r = self.robot.GetRobotRealTimeState()
+                pkg = r[1] if isinstance(r, (tuple, list)) else r
+                q = [float(v) for v in list(pkg.jt_cur_pos)[:6]]
+                if len(q) == 6 and any(abs(v) > 1e-9 for v in q):
+                    return q
+            except Exception:
+                pass
+            self.rapido = False
+            print("  fr5_servo: este SDK no da el estado en tiempo real → pose real por RPC a 10 Hz")
+        if ahora - self.t_rpc < 0.1:
+            return None
+        self.t_rpc = ahora
+        try:
+            r = self.robot.GetActualJointPosDegree(1)
+            if _ret(r) == 0:
+                return [float(v) for v in list(r[1])[:6]]
+        except Exception:
+            pass
+        return None
+
+
 def _ret(r):
     """Los métodos del SDK devuelven err o (err, datos)."""
     return r[0] if isinstance(r, (tuple, list)) else r
@@ -251,7 +316,9 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo):
                   f"robot encendido?")
             est[_E_ESTADO] = ERROR
             return
+        est[_E_QCMD:_E_QCMD + 6] = q_real[:6]
         est[_E_QREAL:_E_QREAL + 6] = q_real[:6]
+        est[_E_TREAL] = time.monotonic()
         est[_E_ESTADO] = ESPERA
         print(f"✓ fr5_servo: FR5 conectado, pose real (°) = "
               f"[{', '.join(f'{v:.1f}' for v in q_real[:6])}]")
@@ -276,6 +343,13 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo):
         t_ult = None
         t_dead = time.perf_counter() + dt
         t_ult_lectura = 0.0
+        leer_real = _LectorPoseReal(robot)
+
+        def _publicar_real(ahora_):
+            q_ = leer_real(ahora_)
+            if q_ is not None:
+                est[_E_QREAL:_E_QREAL + 6] = q_
+                est[_E_TREAL] = time.monotonic()
 
         # ── Bucle a 8 ms ──────────────────────────────────────────────────────
         while not salir.is_set():
@@ -292,14 +366,10 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo):
                     print("⏸  fr5_servo: ServoMoveEnd (en espera)")
                 if est[_E_ESTADO] != ERROR:
                     est[_E_ESTADO] = ESPERA
-                if ahora - t_ult_lectura > 0.1:          # pose real para el HUD, a 10 Hz
+                if ahora - t_ult_lectura >= PERIODO_LECTURA_S:   # pose real (sincroniza MuJoCo)
                     t_ult_lectura = ahora
-                    try:
-                        r = robot.GetActualJointPosDegree(0)
-                        if _ret(r) == 0:
-                            est[_E_QREAL:_E_QREAL + 6] = list(r[1])[:6]
-                    except Exception:
-                        pass
+                    _publicar_real(ahora)
+                    est[_E_QCMD:_E_QCMD + 6] = est[_E_QREAL:_E_QREAL + 6]
                 time.sleep(dt)
                 t_dead, t_ult = time.perf_counter() + dt, None
                 continue
@@ -386,8 +456,11 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo):
             est[_E_CICLOS], est[_E_RETRASOS] = n_ciclos, n_retrasos
             est[_E_PER_MED], est[_E_PER_MAX] = per_med * 1e3, per_max * 1e3
             est[_E_SJ_MED], est[_E_SJ_MAX] = sj_med * 1e3, sj_max * 1e3
-            est[_E_QREAL:_E_QREAL + 6] = list(q_cmd)
+            est[_E_QCMD:_E_QCMD + 6] = list(q_cmd)
             est[_E_ESTADO] = ACERCANDO if acercando else ENVIANDO
+            if ahora - t_ult_lectura >= PERIODO_LECTURA_S:          # pose real
+                t_ult_lectura = ahora
+                _publicar_real(ahora)
 
             # 5) esperar al siguiente tick (plazos absolutos: el error no se acumula)
             t_dead += dt
@@ -451,8 +524,7 @@ def _main():
     if not fr5.iniciar():
         sys.exit(1)
     # pose real (°) → convenio del MJCF (rad): inversa de signo·deg(q) + offset
-    q0 = np.radians(np.asarray(fr5.estado()["q_deg"]) - np.asarray(fr5.p["FR5_OFFSET_DEG"])) \
-        * np.asarray(fr5.p["FR5_SIGNO"], float)
+    q0 = fr5.q_real_rad(max_edad_s=5.0)
     fr5.publicar(q0)
     fr5.habilitar(True)
     t0 = time.monotonic()

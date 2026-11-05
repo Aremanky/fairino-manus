@@ -134,7 +134,7 @@ from skill_shield.mano.retargeting import retarget_a_ctrl
 from skill_shield.vision.camara_oak import crear_pipeline_oak
 from skill_shield.simulacion.hilo_fisica import HiloFisica
 from skill_shield.mano.manus_guante import GuanteManus      # guantes MANUS (FUENTE_DEDOS)
-from skill_shield.hardware.fr5_servo import FR5Servo        # FR5 real: ServoJ cada 8 ms
+from skill_shield.hardware.fr5_servo import FR5Servo, sincronizar_mujoco   # FR5 real: ServoJ cada 8 ms
 from skill_shield.interfaz.perfil import PerfilBucle
 
 # ── Compatibilidad: nombres que main() no usa pero que antes se podían importar
@@ -330,6 +330,30 @@ def main():
     for i, v in enumerate(POSICION_STANDBY):
         ctrl_mano[i] = float(v)
     mujoco.mj_step(modelo, datos)
+
+    # — FR5 REAL (5-nov): el simulador NO es el estado real. Con el robot conectado, el brazo
+    #   de MuJoCo se pone en la postura LEÍDA del FR5 (al arrancar, al entrar en teleoperación y
+    #   en cada vuelta mientras está desarmado), así la IK y el generador suave salen de ahí. —
+    idx_ctrl_brazo = [mujoco.mj_name2id(modelo, mujoco.mjtObj.mjOBJ_ACTUATOR, f"act_{_j}")
+                      for _j in ARM_JOINTS]
+    if min(idx_ctrl_brazo) < 0:
+        idx_ctrl_brazo = list(range(6))
+
+    def _sincronizar_con_fr5(motivo=None):
+        """MuJoCo ← postura real del FR5. False si no hay lectura reciente."""
+        _q_real = fr5.q_real_rad() if fr5 is not None else None
+        if _q_real is None:
+            return False
+        sincronizar_mujoco(modelo, datos, _q_real, qpos_idx_brazo, dof_idx_brazo, idx_ctrl_brazo)
+        if motivo:
+            print(f"🔗 MuJoCo sincronizado con el FR5 real ({motivo}): q = ["
+                  + ", ".join(f"{_v:+.2f}" for _v in _q_real) + "] rad")
+        return True
+
+    if fr5 is not None:
+        with visor.lock():
+            if not _sincronizar_con_fr5("arranque"):
+                print("⚠ FR5: sin postura real → el simulador arranca en POSICION_STANDBY_BRAZO")
 
     # — Suavizadores —
     suav_dedos = SuavizadorND(n_dim=N_ACT - 1, ventana=4)  # ctrl[1..16]
@@ -1045,6 +1069,11 @@ def main():
                 estado["arriba"]    = None
                 estado["eje_codo"]  = None
 
+                # 5-nov: el generador (y la IK) arrancan de la postura REAL del FR5
+                if fr5 is not None:
+                    _sincronizar_con_fr5("entrar en teleoperación")
+                fr5_enviando = False          # ¿el FR5 real está recibiendo ServoJ?
+
                 # ── PASO 7 — brazo preciso y sin saltos ──
                 # 7.1: el generador suave escribe ctrl de joint1..3 y del giro de muñeca
                 #      antes de cada mj_step; el bucle solo le PUBLICA objetivos.
@@ -1113,12 +1142,10 @@ def main():
                     fisica.empezar()
                     print(f"⚙️  Física en tiempo real: hilo propio a {FISICA_HZ} Hz "
                           f"(paso {modelo.opt.timestep * 1000:.1f} ms)")
-                if fr5 is not None:
-                    if fisica is None:
-                        print("⚠ FR5: FISICA_EN_HILO = False → no se publican comandos; "
-                              "el FR5 se quedará quieto")
-                    fr5.publicar(datos.ctrl[_idx_ctrl_fr5])
-                    fr5.habilitar(True)      # ServoMoveStart desde la pose REAL del robot
+                if fr5 is not None and fisica is None:
+                    print("⚠ FR5: FISICA_EN_HILO = False → no se publican comandos; "
+                          "el FR5 se quedará quieto")
+                # (el ServoJ al FR5 se habilita en el bucle: con la v2, solo con el brazo ARMADO)
 
                 # — FLUIDEZ: MediaPipe Hands en su propio hilo (MANO_EN_PARALELO) y perfil —
                 pool_mano    = ThreadPoolExecutor(max_workers=1, thread_name_prefix="Hands") \
@@ -2019,6 +2046,25 @@ def main():
                         elif _ev_pedal == "desarmar":
                             teleop_v2.desarmar()
                             print("⏸ PEDAL: brazo DESARMADO → quieto")
+
+                    # 5-nov: FR5 real ↔ simulador. Mientras NO está armado, el robot no recibe
+                    # nada y MuJoCo (y el generador) se copian de su postura REAL en cada vuelta:
+                    # lo que ves es el robot de verdad. Al armar, se sincroniza una última vez y
+                    # empieza el ServoJ desde ahí (sin pinchar el robot y sin salto).
+                    if fr5 is not None and fr5.conectado:
+                        _armar_fr5 = teleop_v2 is None or (estado["camara_activa"] and teleop_v2.armado)
+                        if not _armar_fr5 or not fr5_enviando:
+                            if fr5_enviando:
+                                fr5.habilitar(False)
+                                fr5_enviando = False
+                            if _sincronizar_con_fr5() and gen_brazo is not None and gen_brazo.activo:
+                                _factor_gen = gen_brazo.factor   # (conserva el modo fino)
+                                gen_brazo.activar(datos)         # el generador sale de la postura real
+                                gen_brazo.factor = _factor_gen
+                            if _armar_fr5:
+                                fr5.publicar(datos.ctrl[_idx_ctrl_fr5])
+                                fr5.habilitar(True)              # ServoMoveStart desde la postura real
+                                fr5_enviando = True
 
                     if key == 32:  # 32 es el código ASCII del Espacio
                         estado["pinza_habilitada"] = not estado.get("pinza_habilitada", True)

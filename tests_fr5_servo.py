@@ -17,7 +17,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from skill_shield.hardware.fr5_servo import (
-    ENVIANDO, ERROR, ESPERA, FR5Servo, paso_limitado,
+    ENVIANDO, ERROR, ESPERA, FR5Servo, paso_limitado, sincronizar_mujoco,
 )
 
 POSE_REAL = [10.0, -90.0, 90.0, -90.0, 90.0, 0.0]   # grados, la que "tiene" el robot falso
@@ -30,6 +30,10 @@ _SDK_FALSO = textwrap.dedent('''
             self.llamadas = []
         def GetActualJointPosDegree(self, flag=0):
             return 0, %r
+        def GetRobotRealTimeState(self):
+            class Pkg: pass
+            pkg = Pkg(); pkg.jt_cur_pos = %r
+            return 0, pkg
         def ServoMoveStart(self, cmdType=0):
             self.llamadas.append(("start", time.perf_counter())); return 0
         def ServoMoveEnd(self, cmdType=0):
@@ -42,7 +46,7 @@ _SDK_FALSO = textwrap.dedent('''
         def CloseRPC(self):
             with open(os.environ["FR5_FALSO_LOG"], "w") as f:
                 json.dump(self.llamadas, f)
-''' % (POSE_REAL,))
+''' % (POSE_REAL, POSE_REAL))
 
 
 def _sdk_falso():
@@ -150,8 +154,55 @@ def test_simulacro_no_envia():
     assert json.load(open(log)) == []
 
 
+def test_pose_real_en_convenio_mjcf():
+    signo, offset = (1, -1, 1, 1, -1, 1), (0.0, 10.0, 0.0, -5.0, 0.0, 0.0)
+    fr5, log = _servo(FR5_SIGNO=signo, FR5_OFFSET_DEG=offset)
+    assert fr5.iniciar()
+    time.sleep(0.1)
+    q = fr5.q_real_rad()
+    assert q is not None
+    # q_FR5[°] = SIGNO · grados(q_MJCF) + OFFSET
+    assert np.allclose(np.array(signo) * np.degrees(q) + np.array(offset), POSE_REAL, atol=1e-9)
+    fr5.habilitar(True)                      # enviando: la pose real se sigue leyendo
+    time.sleep(0.2)
+    assert fr5.estado()["edad_real_s"] < 0.1
+    fr5.parar()
+    assert fr5.q_real_rad() is None          # sin proceso: no hay pose real
+
+
+def test_sincronizar_mujoco():
+    import types
+    llamadas = []
+    real = sys.modules.get("mujoco")         # (el de verdad no acepta datos falsos)
+    sys.modules["mujoco"] = types.SimpleNamespace(mj_forward=lambda m, d: llamadas.append(1))
+
+    class Datos:
+        qpos, qvel, ctrl = np.ones(20), np.ones(20), np.ones(30)
+    d = Datos()
+    q = np.array([0.1, -1.5, 2.0, 0.0, 1.57, -0.3])
+    qpos_idx, dof_idx, ctrl_idx = [7, 8, 9, 10, 11, 12], [6, 7, 8, 9, 10, 11], [0, 1, 2, 3, 4, 5]
+    try:
+        sincronizar_mujoco(None, d, q, qpos_idx, dof_idx, ctrl_idx)
+    finally:
+        if real is not None:
+            sys.modules["mujoco"] = real
+        else:
+            del sys.modules["mujoco"]
+    assert llamadas == [1]
+    assert np.allclose(d.qpos[qpos_idx], q) and np.allclose(d.ctrl[ctrl_idx], q)
+    assert np.allclose(d.qvel[dof_idx], 0.0)
+    assert d.qpos[0] == 1.0 and d.ctrl[10] == 1.0          # el resto no se toca
+
+
 def test_sin_sdk_da_error_y_no_se_cuelga():
-    fr5 = FR5Servo(FR5_SDK_RUTA="/no/existe", FR5_PRIORIDAD_RT=0)
+    # Un fairino/ que no carga, por delante del SDK real (si lo tienes en el proyecto, se
+    # usaría ese e intentaría conectar de verdad con el robot).
+    d = tempfile.mkdtemp(prefix="fairino_roto_")
+    os.makedirs(os.path.join(d, "fairino"))
+    open(os.path.join(d, "fairino", "__init__.py"), "w").close()
+    with open(os.path.join(d, "fairino", "Robot.py"), "w") as f:
+        f.write("raise ImportError('SDK simulado que no carga')\n")
+    fr5 = FR5Servo(FR5_SDK_RUTA=d, FR5_PRIORIDAD_RT=0)
     sys_mod = sys.modules.pop("fairino", None)
     try:
         t0 = time.monotonic()
