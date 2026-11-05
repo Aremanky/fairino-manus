@@ -1190,3 +1190,34 @@ TELEOP_FR5_EN_PARALELO = True
 # La parte de la IK se prueba sin hardware:  python -m skill_shield.teleop_fr5.diagnostico ik
 TELEOP_FR5_DIAG_S        = 10.0
 TELEOP_FR5_DIAG_ETIQUETA = "tpose"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FR5 REAL: proceso fr5_servo — ServoJ cada 8 ms (5-nov)
+# ═══════════════════════════════════════════════════════════════════════════
+# skill_shield/hardware/fr5_servo.py. Durante la teleoperación, el comando del brazo del
+# simulador (ctrl de joint1..6, ya suavizado por el generador del PASO 7.1) se publica en cada
+# mj_step y un PROCESO aparte lo manda al FR5 con ServoJ a ritmo fijo.
+#   · Al entrar en teleoperación arranca desde la pose REAL del robot; si el simulador está
+#     lejos, se acerca a FR5_VEL_APROX_DEG_S hasta estar a < FR5_DESFASE_MAX_DEG.
+#   · Al salir de teleoperación (IA, demo, [Q]) → ServoMoveEnd: el robot se queda quieto.
+# Probarlo SOLO, sin cámaras:  python -m skill_shield.hardware.fr5_servo [--real] [--oscilar 2]
+FR5_REAL_ACTIVO = False          # True = arrancar el proceso fr5_servo con Skill_Shield_Nivel_6
+FR5_SIMULACRO   = True           # True = conecta y lee la pose, pero NO manda ServoJ (1ª prueba)
+FR5_IP          = "192.168.58.2" # IP de fábrica de la controladora (el PC en 192.168.58.x)
+FR5_SDK_RUTA    = None           # carpeta que CONTIENE fairino/ (SDK oficial, no está en PyPI)
+FR5_PERIODO_S   = 0.008          # 8 ms entre ServoJ (es también el cmdT)
+FR5_CMD_TYPE    = 0              # 0 = XML-RPC · 1 = UDP (si ServoJ por XML-RPC tarda > 8 ms)
+FR5_VEL_MAX_DEG_S    = 60.0      # tope por joint al imitar (subir cuando todo esté probado)
+FR5_ACEL_MAX_DEG_S2  = 300.0
+FR5_VEL_APROX_DEG_S  = 10.0      # acercamiento inicial a la pose del simulador
+FR5_DESFASE_MAX_DEG  = 5.0
+FR5_MARGEN_LIMITES_DEG = 3.0     # margen respecto a los topes del FR5
+FR5_WATCHDOG_S  = 0.25           # sin comandos nuevos durante esto → mantiene la pose
+FR5_ERRORES_MAX = 10             # ServoJ fallidos seguidos → deja de enviar
+# MJCF → controladora: q_FR5[°] = SIGNO · grados(q_MJCF) + OFFSET. El MJCF sale del URDF
+# oficial (mismos rangos y sentidos que la DH, ver cinematica.py), así que debería ser la
+# identidad, pero HAY QUE COMPROBARLO joint a joint con el robot real en FR5_SIMULACRO.
+FR5_SIGNO       = (1, 1, 1, 1, 1, 1)
+FR5_OFFSET_DEG  = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+FR5_PRIORIDAD_RT = 50            # SCHED_FIFO si hay permisos (si no, prioridad normal)
+FR5_CPU          = None          # núcleo fijo para el proceso (None = cualquiera)

@@ -134,6 +134,7 @@ from skill_shield.mano.retargeting import retarget_a_ctrl
 from skill_shield.vision.camara_oak import crear_pipeline_oak
 from skill_shield.simulacion.hilo_fisica import HiloFisica
 from skill_shield.mano.manus_guante import GuanteManus      # guantes MANUS (FUENTE_DEDOS)
+from skill_shield.hardware.fr5_servo import FR5Servo        # FR5 real: ServoJ cada 8 ms
 from skill_shield.interfaz.perfil import PerfilBucle
 
 # ── Compatibilidad: nombres que main() no usa pero que antes se podían importar
@@ -214,6 +215,14 @@ def main():
         MODO_EJECUCION = "SIMULACION"
 
     print(f"🚀 Iniciando Skill Shield Nivel 6 en modo: {MODO_EJECUCION}")
+
+    # ── FR5 REAL (proceso fr5_servo, ServoJ cada 8 ms) ──
+    # Se arranca AQUÍ, antes del visor, las cámaras y los hilos: el proceso se crea con fork.
+    fr5 = None
+    if globals().get("FR5_REAL_ACTIVO", False):
+        fr5 = FR5Servo.desde_config(globals())
+        if not fr5.iniciar():
+            print("   El programa sigue SOLO en simulación (el FR5 no recibe nada).")
     # ─────────────────────────────────────────────────────────────────────────
     # ─────────────────────────────────────────────────────────
     # ────────────────────────────────────────────────────
@@ -1070,16 +1079,31 @@ def main():
                         gen_brazo.paso(m_, d_, dt_)
                     if guante is not None:
                         guante.escribir_ctrl(d_, dt_)
+                    if fr5 is not None:                  # FR5 real: último comando del brazo
+                        fr5.publicar(d_.ctrl[_idx_ctrl_fr5])
+
+                # ctrl de joint1..6 (act_joint1..6 del MJCF)
+                _idx_ctrl_fr5 = [mujoco.mj_name2id(modelo, mujoco.mjtObj.mjOBJ_ACTUATOR, f"act_{_j}")
+                                 for _j in ARM_JOINTS]
+                if min(_idx_ctrl_fr5) < 0:
+                    _idx_ctrl_fr5 = list(range(6))
 
                 fisica  = HiloFisica(modelo, datos, visor,
                                      antes_de_paso=_antes_de_paso
-                                     if (gen_brazo is not None or guante is not None) else None) \
+                                     if (gen_brazo is not None or guante is not None
+                                         or fr5 is not None) else None) \
                           if FISICA_EN_HILO else None
                 _soltar = fisica.soltar if fisica is not None else nullcontext
                 if fisica is not None:
                     fisica.empezar()
                     print(f"⚙️  Física en tiempo real: hilo propio a {FISICA_HZ} Hz "
                           f"(paso {modelo.opt.timestep * 1000:.1f} ms)")
+                if fr5 is not None:
+                    if fisica is None:
+                        print("⚠ FR5: FISICA_EN_HILO = False → no se publican comandos; "
+                              "el FR5 se quedará quieto")
+                    fr5.publicar(datos.ctrl[_idx_ctrl_fr5])
+                    fr5.habilitar(True)      # ServoMoveStart desde la pose REAL del robot
 
                 # — FLUIDEZ: MediaPipe Hands en su propio hilo (MANO_EN_PARALELO) y perfil —
                 pool_mano    = ThreadPoolExecutor(max_workers=1, thread_name_prefix="Hands") \
@@ -2387,6 +2411,8 @@ def main():
                 if pool_mano is not None:            # FLUIDEZ: cerrar el hilo de Hands
                     pool_mano.shutdown(wait=True)
                     pool_mano = None
+                if fr5 is not None:                  # FR5 real: ServoMoveEnd y quieto
+                    fr5.habilitar(False)
                 if fisica is not None:
                     fisica.parar()
                     fisica = None
@@ -2405,6 +2431,13 @@ def main():
         mano_real.desconectar()
     if guante is not None:
         guante.cerrar()
+    if fr5 is not None:
+        e_fr5 = fr5.estado()
+        fr5.parar()
+        print(f"🦾 fr5_servo: {e_fr5['ciclos']} ServoJ, periodo medio "
+              f"{e_fr5['periodo_medio_ms']:.2f} ms (máx {e_fr5['periodo_max_ms']:.2f}), "
+              f"ServoJ {e_fr5['servoj_medio_ms']:.2f} ms, retrasos {e_fr5['retrasos']}, "
+              f"errores {e_fr5['errores_servoj']}")
 
     # Destruimos la ventana de Tkinter de forma segura al cerrar la app
     try:
