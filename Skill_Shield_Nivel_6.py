@@ -10,11 +10,13 @@ Arquitectura:
 Controles de teclado:
   [A]  Activar control por cámara
   [S]  Standby (devuelve todos los actuadores a 0)
-  [G]  Toggle grabación — pide nombre de TAREA y guarda episodios en episodios/<tarea>/
-  [E]  Entrenar SOLO la última tarea grabada (modelos/<tarea>.pth) — rápido
-  [Shift+E]  Reentrenar TODAS las tareas grabadas (más lento, tras cambios grandes)
+  [G]  Empezar / terminar un episodio (BRAZO + MANO a 30 Hz) en episodios/<tarea>/.
+       La 1ª vez pide el nombre de la TAREA; [Shift+G] cambia de tarea.
+  [E]  Entrenar la tarea actual (modelos/<tarea>.pth) en OTRO proceso: la app sigue
+  [Shift+E]  Reentrenar TODAS las tareas grabadas (también en otro proceso)
   [P]  Spawnear / ocultar pelota de gomaespuma en MuJoCo
-  [I]  Modo IA real — muestra un menú para elegir qué TAREA reproducir
+  [I]  Modo IA — elige una TAREA y la reproduce (brazo + mano; con el FR5 conectado,
+       arranca y para con el PEDAL)
   [M]  Demo de maniobra autónoma con pinzas fijas + ruido (no usa la red)
   [3]  Mostrar / ocultar el ENTORNO DE TRABAJO (mesa con alicates, destornillador,
        bombilla y fusible — definido en mesa_trabajo.xml)
@@ -54,6 +56,7 @@ Uso:
 # config.py y orca_hardware.py siguen en la raíz, sin cambios.
 # ══════════════════════════════════════════════════════════════════════════════
 import os
+import sys
 import multiprocessing
 os.environ["QT_QPA_PLATFORM"] = "xcb"
 import cv2
@@ -384,8 +387,66 @@ def main():
     }
     # — Variables de dataset e IA —
     grabando        = False
-    buffer_episodio = []   # filas (qpos+ctrl) del episodio que se está grabando ahora
+    buffer_episodio = []   # (formato 1, ya no se usa: la grabadora guarda sus propias filas)
     tarea_actual    = None # nombre de la tarea/maniobra que se está grabando ahora
+    # 5-nov: grabadora BRAZO + MANO a ritmo fijo desde el hilo de la física (formato 2)
+    from skill_shield.ia.grabador import GrabadorEpisodio
+    grabador = GrabadorEpisodio.desde_modelo(
+        modelo, ARM_JOINTS, OFFSET_MANO, N_ACT, fps=float(globals().get("IA_FPS", 30.0)),
+        robot=str(globals().get("ROBOT_BRAZO", "?")),
+        recortar=bool(globals().get("IA_RECORTAR_QUIETOS", True)))
+
+    def _zenity(args):
+        """Diálogo de zenity (texto devuelto) o None si no hay zenity / se cancela."""
+        try:
+            r = subprocess.run(["zenity"] + args, capture_output=True, text=True, timeout=600)
+            return r.stdout.strip() if r.returncode == 0 else ""
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return None
+
+    def _pedir_tarea(actual):
+        """Nombre de la tarea a grabar (diálogo; si no hay zenity, por terminal)."""
+        ya = _listar_tareas_grabadas()
+        txt = _zenity(["--entry", "--title=Grabar tarea", "--width=420",
+                       "--text=Nombre de la tarea (ya grabadas: " + (", ".join(ya) or "ninguna") + ")",
+                       f"--entry-text={actual or ''}"])
+        if txt is None:                                   # sin zenity: por terminal
+            print(f"\n📝 Tareas ya grabadas: {', '.join(ya) or '(ninguna todavía)'}")
+            txt = input(f"   Nombre de la tarea [{actual or 'tarea_1'}]: ").strip()
+            return _nombre_seguro(txt) if txt else (actual or _nombre_seguro("tarea_1"))
+        return _nombre_seguro(txt) if txt else actual     # cancelar = la misma (o ninguna)
+
+    def _elegir(titulo, opciones):
+        """Una opción de la lista (diálogo; si no hay zenity, por terminal) o None."""
+        txt = _zenity(["--list", f"--title={titulo}", "--column=Tarea", "--height=400",
+                       "--width=360"] + list(opciones))
+        if txt is None:
+            for _k, _n in enumerate(opciones, start=1):
+                print(f"   [{_k}] {_n}")
+            e = input(f"   Elige nº (1-{len(opciones)}, vacío = cancelar): ").strip()
+            return opciones[int(e) - 1] if e.isdigit() and 1 <= int(e) <= len(opciones) else None
+        return txt.split("|")[0] if txt else None
+
+    def _entrenar_en_segundo_plano(args):
+        """Entrena en OTRO proceso (python -m skill_shield.ia.act …): la app sigue funcionando.
+        La salida va a la terminal y a modelos/entrenamiento_<…>.log."""
+        os.makedirs(MODELOS_DIR, exist_ok=True)
+        log = os.path.join(MODELOS_DIR, f"entrenamiento_{'_'.join(args).lstrip('-')}.log")
+        print(f"🧠 Entrenando en segundo plano: python -m skill_shield.ia.act {' '.join(args)}  "
+              f"(progreso en {log})")
+        with open(log, "w") as _f:
+            subprocess.Popen([sys.executable, "-m", "skill_shield.ia.act"] + list(args),
+                             stdout=_f, stderr=subprocess.STDOUT,
+                             cwd=os.path.dirname(os.path.abspath(__file__)))
+
+    def _parar_grabacion(motivo=""):
+        """Cierra el episodio en curso (si lo hay) y lo guarda en episodios/<tarea>/."""
+        if not grabador.activo:
+            return
+        _ruta, _n = grabador.parar(os.path.join(EPISODIOS_DIR, tarea_actual or "tarea_1"))
+        if _ruta:
+            print(f"💾 Episodio guardado{(' (' + motivo + ')') if motivo else ''}: {_ruta} "
+                  f"({_n} fotogramas, {_n / grabador.fps:.1f} s)")
     modo_autonomo = False
     modo_ia_real  = False
     modo_demo_taladro = False   # [5] demo automática: coger taladro y agujerear el techo
@@ -607,165 +668,187 @@ def main():
         # aunque la postura instantánea coincida.
         # ══════════════════════════════════════════════════
         elif modo_ia_real:
+            # 5-nov: BRAZO + MANO (modelos de formato 2) o solo mano (formato 1, como antes).
+            #  · La física avanza a TIEMPO REAL (antes 4 mj_step = 8 ms por fotograma de ~33 ms:
+            #    la mano iba 4 veces más lenta que al grabar y la red veía posturas retrasadas).
+            #  · Los comandos se interpolan entre fotogramas paso a paso de la física.
+            #  · Con el FR5 conectado: empieza PARADO, con el simulador copiando la postura real;
+            #    el PEDAL arranca (ServoJ desde la postura real) y para. Sin FR5: arranca solo y
+            #    el pedal pausa.
+            from skill_shield.ia.act import PoliticaACT
+            from skill_shield.teleop_fr5.pedal import Pedal
             cv2.destroyAllWindows()
             cv2.namedWindow("Modo IA Real", cv2.WINDOW_AUTOSIZE)
 
-            print("🧠 Modo IA real activo (ACT) — reproduciendo comportamiento aprendido, "
-                  "con ensamblado temporal.")
+            dt_objetivo = float(red_neuronal["dt_objetivo"])
+            n_sub = max(1, int(round(dt_objetivo / float(modelo.opt.timestep))))
+            politica = PoliticaACT(red_neuronal, peso_exp=float(globals().get("IA_PESO_EXP", 0.15)))
+
+            # — qué joint del simulador es cada columna del modelo —
+            _por_nombre = {n: (qa, ci) for n, qa, ci in zip(grabador.nombres, grabador.qadr, grabador.cidx)}
+            if red_neuronal.get("formato", 1) == 2:
+                _nombres_ia = [c[2:] for c in red_neuronal["col_estado"]]       # "q:joint1" → "joint1"
+                _acc_ia = [c[2:] for c in red_neuronal["col_accion"]]
+                _faltan = [n for n in set(_nombres_ia + _acc_ia) if n not in _por_nombre]
+            else:                                                              # solo mano
+                _nombres_ia = _acc_ia = list(grabador.nombres[len(ARM_JOINTS):])
+                _faltan = []
+            if _faltan:
+                print(f"❌ Modo IA: el modelo usa articulaciones que este robot no tiene: {_faltan}")
+                modo_ia_real = False
+                cv2.destroyWindow("Modo IA Real")
+                continue
+            qadr_ia = [_por_nombre[n][0] for n in _nombres_ia]
+            cidx_ia = np.array([_por_nombre[n][1] for n in _acc_ia])
+            es_brazo = np.array([n in ARM_JOINTS for n in _acc_ia])
+            lim_ia = np.array([LIMITES_CTRL_BRAZO[ARM_JOINTS.index(n)] if n in ARM_JOINTS
+                               else LIMITES_CTRL[int(c) - OFFSET_MANO] for n, c in zip(_acc_ia, cidx_ia)],
+                              dtype=float)
+            paso_max_brazo = float(globals().get("IA_V_MAX_BRAZO", 1.0)) * dt_objetivo
+            try:                                     # colisiones del brazo (las de la IK de teleop)
+                col_ia = teleop_v2.ik.col if teleop_v2 is not None else None
+            except NameError:
+                col_ia = None
+            con_brazo = bool(es_brazo.any())
+            print(f"🧠 Modo IA (ACT) — {'BRAZO + MANO' if con_brazo else 'solo MANO'}: "
+                  f"{len(_acc_ia)} articulaciones, {1 / dt_objetivo:.0f} Hz, {n_sub} pasos de física "
+                  "por fotograma (tiempo real).")
 
             usar_hardware_real = (MODO_EJECUCION == "HARDWARE_REAL"
-                                   and mano_real and mano_real.conectado)
+                                  and mano_real and mano_real.conectado)
+            ultimo_hardware_target = construir_hardware_target(datos) if usar_hardware_real else None
+            fr5_ia = fr5 if (fr5 is not None and fr5.conectado and con_brazo) else None
             if usar_hardware_real:
-                print("🤖 HARDWARE REAL activo — la mano física reproducirá "
-                      "la maniobra a la vez que la simulación.")
-                ultimo_hardware_target = construir_hardware_target(datos)
-            else:
-                ultimo_hardware_target = None
+                print("🤖 Mano física: reproduce lo mismo que la simulación.")
+            if fr5_ia is not None:
+                print("🦾 FR5 REAL conectado: la reproducción empieza PARADA. Pisa el PEDAL para "
+                      "arrancar (el robot sale de su postura real) y otra vez para parar.")
+            pedal_ia = Pedal(modo=globals().get("TELEOP_FR5_PEDAL", "tecla"),
+                             teclas=globals().get("TELEOP_FR5_PEDAL_TECLAS", (ord("p"), ord("P"))),
+                             dispositivo=globals().get("TELEOP_FR5_PEDAL_EVDEV"),
+                             codigo=globals().get("TELEOP_FR5_PEDAL_EVDEV_CODIGO"),
+                             hombre_muerto=globals().get("TELEOP_FR5_PEDAL_HOMBRE_MUERTO", True))
+            en_marcha = fr5_ia is None                   # sin FR5 arranca solo
+            fr5_ia_enviando = False
+            n_bloqueos = 0
 
-            modelo_ia = red_neuronal["modelo"]
-            mu_x, sigma_x = red_neuronal["mu_x"], red_neuronal["sigma_x"]
-            mu_y, sigma_y = red_neuronal["mu_y"], red_neuronal["sigma_y"]
-            ventana_k     = red_neuronal["ventana"]
-            chunk_h       = red_neuronal["chunk"]
-            dt_objetivo   = red_neuronal["dt_objetivo"]
-            print(f"   Ritmo de reproducción: {dt_objetivo*1000:.0f} ms/fotograma "
-                  f"(~{1/dt_objetivo:.1f} fps, el mismo ritmo al que se grabó).")
+            def _salir_ia():
+                if fr5_ia is not None:
+                    fr5_ia.habilitar(False)
+                pedal_ia.cerrar()
+                if usar_hardware_real:
+                    for _i, _v in enumerate(POSICION_STANDBY):
+                        ctrl_mano[_i] = float(_v)
+                    mano_real.enviar_posiciones(construir_hardware_target(datos))
+                cv2.destroyWindow("Modo IA Real")
 
-            # Historial de qpos: se inicializa repitiendo el primer fotograma real
-            # (los actuadores de mano empiezan en OFFSET_MANO, no en 0)
-            qpos_inicial = [
-                datos.qpos[modelo.jnt_qposadr[modelo.actuator_trnid[OFFSET_MANO + i, 0]]]
-                for i in range(N_ACT)
-            ]
-            historial = deque([qpos_inicial] * ventana_k, maxlen=ventana_k)
-
-            # — Ensamblado temporal (temporal ensembling, como en el paper de ACT) —
-            # En cada paso real se predice un bloque NUEVO completo. Se guardan los
-            # últimos 'chunk_h' bloques predichos; para decidir la acción del paso
-            # actual, se combinan (con pesos exponenciales, más peso a lo más
-            # reciente) todas las predicciones que distintos bloques hicieron para
-            # ESE mismo instante. Esto suaviza mucho la ejecución y evita saltos
-            # bruscos entre bloques consecutivos.
-            # PESO_EXP alto = las predicciones recientes pesan mucho más que las
-            # antiguas → el movimiento sigue de cerca lo que la red predice AHORA,
-            # en vez de mezclarse con predicciones de hace ~2s (que causaban el
-            # efecto de "cámara lenta" al promediarse casi por igual).
-            # Con chunk=30 y dt≈67ms: PESO_EXP=0.01 → decae solo hasta 0.75 en
-            # 2s (casi uniforme, mucha inercia). PESO_EXP=0.15 → decae hasta 0.01
-            # en 2s (prioriza fuertemente lo reciente, movimiento mucho más ágil).
-            PESO_EXP = 0.15   # 'm' del paper — más alto = confía más en lo reciente
-            buffer_bloques = deque(maxlen=chunk_h)  # cada elemento: bloque (chunk_h, N_ACT)
-            interrumpido = False
+            if fr5_ia is not None:
+                _sincronizar_con_fr5("modo IA")
+            politica.reiniciar([float(datos.qpos[a]) for a in qadr_ia])
 
             while modo_ia_real and not salir:
                 t_inicio_paso = time.perf_counter()
 
-                # — 1. Predecir un bloque nuevo a partir del historial actual —
-                entrada_t = torch.tensor([list(historial)], dtype=torch.float32)
-                entrada_norm = (entrada_t - mu_x) / sigma_x
-                with torch.no_grad():
-                    pred_norm, _, _ = modelo_ia(entrada_norm)   # z=0 (sin demostración)
-                bloque_ctrl = (pred_norm[0] * sigma_y + mu_y).numpy()  # (chunk_h, N_ACT)
-                buffer_bloques.append(bloque_ctrl)
-
-                # — 2. Ensamblar: recoger, de cada bloque guardado, la predicción
-                #      correspondiente al instante ACTUAL, y promediarlas con pesos
-                #      exponenciales (el bloque más reciente pesa más) —
-                predicciones_paso = []
-                for k, bloque_pasado in enumerate(reversed(buffer_bloques)):
-                    # k=0 → bloque recién predicho (usa su paso 0)
-                    # k=1 → bloque predicho un paso antes (usa su paso 1)... etc.
-                    if k < bloque_pasado.shape[0]:
-                        predicciones_paso.append((k, bloque_pasado[k]))
-
-                pesos = np.array([math.exp(-PESO_EXP * k) for k, _ in predicciones_paso])
-                pesos /= pesos.sum()
-                salida = sum(w * p for w, (_, p) in zip(pesos, predicciones_paso))
-
-                # — 3. Aplicar con clip de seguridad anatómica (el ensamblado ya
-                #      suaviza, así que aquí no hace falta el filtro exponencial
-                #      adicional que usábamos antes) —
-                for i, (lo, hi) in enumerate(LIMITES_CTRL):
-                    ctrl_mano[i] = float(np.clip(salida[i], lo, hi))
-
-                if visor.is_running():
-                    for _ in range(4):
-                        mujoco.mj_step(modelo, datos)
-                    visor.sync()
-                    _dibujar_logo_mujoco(visor, _logo_mj_px, _logo_mj_w, _logo_mj_h)
-                else:
-                    salir = True
-                    break
-
-                # — Enviar también a la mano física, si estamos en HARDWARE_REAL —
-                # (con límite de salto máximo: la IA puede predecir cambios más
-                # bruscos que una teleoperación humana, así que aquí SÍ se limita,
-                # a diferencia de la teleoperación manual)
-                if usar_hardware_real:
-                    objetivo_hw = construir_hardware_target(datos)
-                    objetivo_hw = limitar_salto_hardware(objetivo_hw, ultimo_hardware_target)
-                    mano_real.enviar_posiciones(objetivo_hw)
-                    ultimo_hardware_target = objetivo_hw
-
-                qpos_state = [
-                    datos.qpos[modelo.jnt_qposadr[modelo.actuator_trnid[OFFSET_MANO + i, 0]]]
-                    for i in range(N_ACT)
-                ]
-
-                # — Red de seguridad: si la predicción desestabiliza la física —
-                if not np.all(np.isfinite(qpos_state)) or np.max(np.abs(qpos_state)) > 10.0:
-                    print("⚠️  Modo IA real: la simulación se ha desestabilizado. "
-                          "Volviendo a STANDBY por seguridad.")
-                    modo_ia_real = False
-                    for i, v in enumerate(POSICION_STANDBY):
-                        ctrl_mano[i] = float(v)
-                    mujoco.mj_forward(modelo, datos)
-                    if usar_hardware_real:
-                        mano_real.enviar_posiciones(construir_hardware_target(datos))
-                    cv2.destroyWindow("Modo IA Real")
-                    break
-                historial.append(qpos_state)
-
-                # --- HUD ---
-                panel = np.zeros((150, 420, 3), dtype=np.uint8)
-                titulo_hud = "MODO IA REAL (ACT) - Ensamblado temporal"
-                if usar_hardware_real:
-                    titulo_hud += "  [HARDWARE REAL]"
-                cv2.putText(panel, titulo_hud, (10, 25),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 100, 255) if usar_hardware_real
-                            else (0, 255, 255), 2)
-                cv2.putText(panel, f"Historial: {ventana_k}  |  Bloque: {chunk_h}  |  "
-                                    f"Bloques activos: {len(buffer_bloques)}", (10, 60),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
-                cv2.putText(panel, f"Ritmo: {dt_objetivo*1000:.0f} ms/fotograma "
-                                    f"(~{1/dt_objetivo:.1f} fps, velocidad real)", (10, 85),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
-                cv2.putText(panel, "[S] Salir al teleop  |  [Q] Cerrar app", (10, 120),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                _superponer_logo(panel, _logo_bgr_sm, _logo_alpha_sm,
-                                  margen=5, posicion="bottom-right")
-                cv2.imshow("Modo IA Real", panel)
-
+                # — teclas y pedal —
                 key = cv2.waitKey(1) & 0xFF
+                _ev = pedal_ia.tecla(key) or pedal_ia.actualizar()
+                if _ev == "armar" and not en_marcha:
+                    if fr5_ia is not None:
+                        _sincronizar_con_fr5()           # parte EXACTAMENTE de la postura real
+                    politica.reiniciar([float(datos.qpos[a]) for a in qadr_ia])
+                    if fr5_ia is not None:
+                        fr5_ia.publicar(datos.ctrl[idx_ctrl_brazo])
+                        fr5_ia.habilitar(True)
+                        fr5_ia_enviando = True
+                    en_marcha = True
+                    print("▶ Modo IA: EN MARCHA")
+                elif _ev == "desarmar" and en_marcha:
+                    if fr5_ia is not None:
+                        fr5_ia.habilitar(False)
+                        fr5_ia_enviando = False
+                    en_marcha = False
+                    print("⏸ Modo IA: PARADO")
                 if key == ord("s"):
                     modo_ia_real = False
-                    if usar_hardware_real:
-                        for i, v in enumerate(POSICION_STANDBY):
-                            ctrl_mano[i] = float(v)
-                        mano_real.enviar_posiciones(construir_hardware_target(datos))
-                    cv2.destroyWindow("Modo IA Real")
-                elif key == ord("q"):
-                    if usar_hardware_real:
-                        for i, v in enumerate(POSICION_STANDBY):
-                            ctrl_mano[i] = float(v)
-                        mano_real.enviar_posiciones(construir_hardware_target(datos))
+                    _salir_ia()
+                    break
+                if key == ord("q"):
                     salir = True
+                    _salir_ia()
+                    break
+                if not visor.is_running():
+                    salir = True
+                    _salir_ia()
+                    break
 
-                # — Control de ritmo real: esperamos lo que haga falta para que
-                #   este fotograma dure lo mismo que duró al grabarlo. Si el
-                #   cálculo (predicción + física + render) ya ha tardado más que
-                #   eso, no esperamos nada (vamos lo más rápido que se pueda,
-                #   pero nunca más rápido que el ritmo real grabado) —
+                if en_marcha:
+                    # — 1. Predecir + ensamblado temporal —
+                    estado_ia = [float(datos.qpos[a]) for a in qadr_ia]
+                    accion = np.clip(politica.paso(estado_ia), lim_ia[:, 0], lim_ia[:, 1])
+                    ctrl_ant = np.array([float(datos.ctrl[c]) for c in cidx_ia])
+                    # — 2. Seguridad del brazo: velocidad limitada y sin colisiones —
+                    if con_brazo:
+                        accion[es_brazo] = ctrl_ant[es_brazo] + np.clip(
+                            accion[es_brazo] - ctrl_ant[es_brazo], -paso_max_brazo, paso_max_brazo)
+                        if col_ia is not None:
+                            _q_brazo = np.array([float(datos.ctrl[i]) for i in idx_ctrl_brazo])
+                            for _n, _v in zip(np.array(_acc_ia)[es_brazo], accion[es_brazo]):
+                                _q_brazo[ARM_JOINTS.index(_n)] = _v
+                            if not col_ia.libre(_q_brazo):
+                                accion[es_brazo] = ctrl_ant[es_brazo]      # no se mueve
+                                n_bloqueos += 1
+                    # — 3. Física a tiempo real, con el comando interpolado —
+                    for _k in range(1, n_sub + 1):
+                        _c = ctrl_ant + (accion - ctrl_ant) * (_k / n_sub)
+                        for _j, _ci in enumerate(cidx_ia):
+                            datos.ctrl[int(_ci)] = float(_c[_j])
+                        mujoco.mj_step(modelo, datos)
+                        if fr5_ia_enviando:
+                            fr5_ia.publicar(datos.ctrl[idx_ctrl_brazo])
+                    if usar_hardware_real:
+                        objetivo_hw = limitar_salto_hardware(construir_hardware_target(datos),
+                                                             ultimo_hardware_target)
+                        mano_real.enviar_posiciones(objetivo_hw)
+                        ultimo_hardware_target = objetivo_hw
+                    # — red de seguridad: la simulación se ha desestabilizado —
+                    _q_chk = np.array([float(datos.qpos[a]) for a in qadr_ia])
+                    if not np.all(np.isfinite(_q_chk)) or np.max(np.abs(_q_chk)) > 10.0:
+                        print("⚠️  Modo IA: la simulación se ha desestabilizado → STANDBY.")
+                        modo_ia_real = False
+                        for _i, _v in enumerate(POSICION_STANDBY):
+                            ctrl_mano[_i] = float(_v)
+                        mujoco.mj_forward(modelo, datos)
+                        _salir_ia()
+                        break
+                elif fr5_ia is not None:
+                    _sincronizar_con_fr5()                 # parado: el simulador = el robot real
+                visor.sync()
+                _dibujar_logo_mujoco(visor, _logo_mj_px, _logo_mj_w, _logo_mj_h)
+
+                # --- HUD ---
+                panel = np.zeros((175, 460, 3), dtype=np.uint8)
+                titulo_hud = f"MODO IA (ACT) - {'BRAZO + MANO' if con_brazo else 'MANO'}"
+                if fr5_ia is not None:
+                    titulo_hud += "  [FR5 REAL]"
+                if usar_hardware_real:
+                    titulo_hud += "  [MANO REAL]"
+                cv2.putText(panel, titulo_hud, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.46,
+                            (0, 100, 255) if (fr5_ia is not None or usar_hardware_real) else (0, 255, 255), 2)
+                cv2.putText(panel, "EN MARCHA" if en_marcha else "PARADO - pisa el PEDAL", (10, 55),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                            (0, 255, 0) if en_marcha else (0, 165, 255), 2)
+                cv2.putText(panel, f"Ritmo {dt_objetivo * 1000:.0f} ms | bloque {red_neuronal['chunk']} | "
+                                    f"historial {red_neuronal['ventana']}", (10, 85),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
+                if n_bloqueos:
+                    cv2.putText(panel, f"Brazo frenado por colision: {n_bloqueos} veces", (10, 110),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 255), 1)
+                cv2.putText(panel, "[P/pedal] marcha/paro  |  [S] Salir al teleop  |  [Q] Cerrar app",
+                            (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                _superponer_logo(panel, _logo_bgr_sm, _logo_alpha_sm, margen=5, posicion="bottom-right")
+                cv2.imshow("Modo IA Real", panel)
+
+                # — ritmo real: cada fotograma dura lo mismo que al grabar —
                 elapsed = time.perf_counter() - t_inicio_paso
                 if elapsed < dt_objetivo:
                     time.sleep(dt_objetivo - elapsed)
@@ -1132,6 +1215,7 @@ def main():
                         guante.escribir_ctrl(d_, dt_)
                     if fr5 is not None:                  # FR5 real: último comando del brazo
                         fr5.publicar(d_.ctrl[_idx_ctrl_fr5])
+                    grabador.muestrear(d_)               # 5-nov: grabación a ritmo fijo
 
                 # ctrl de joint1..6 (act_joint1..6 del MJCF)
                 _idx_ctrl_fr5 = [mujoco.mj_name2id(modelo, mujoco.mjtObj.mjOBJ_ACTUATOR, f"act_{_j}")
@@ -1139,11 +1223,8 @@ def main():
                 if min(_idx_ctrl_fr5) < 0:
                     _idx_ctrl_fr5 = list(range(6))
 
-                fisica  = HiloFisica(modelo, datos, visor,
-                                     antes_de_paso=_antes_de_paso
-                                     if (gen_brazo is not None or guante is not None
-                                         or fr5 is not None) else None) \
-                          if FISICA_EN_HILO else None
+                fisica  = HiloFisica(modelo, datos, visor, antes_de_paso=_antes_de_paso) \
+                          if FISICA_EN_HILO else None     # (5-nov: siempre: la grabadora va ahí)
                 _soltar = fisica.soltar if fisica is not None else nullcontext
                 if fisica is not None:
                     fisica.empezar()
@@ -1903,20 +1984,9 @@ def main():
                                 cv2.circle(frame_bgr, (px_tip, py_tip), 11, (0, 0, 255), -1)
                                 cv2.circle(frame_bgr, (px_tip, py_tip), 11, (255, 255, 255), 2)
 
-                        # Grabación de dataset para entrenamiento de IA
-                        # (fuera del bloque de "modo_pinza": debe grabar SIEMPRE que
-                        # 'grabando' esté activo, sea pinza, puño, o cualquier gesto)
-                        # Se acumula en memoria (buffer_episodio) y se guarda como un
-                        # episodio independiente al parar la grabación con [G].
-                        if grabando:
-                            qpos_state = [
-                                datos.qpos[modelo.jnt_qposadr[
-                                    modelo.actuator_trnid[OFFSET_MANO + i, 0]]]
-                                for i in range(N_ACT)
-                            ]
-                            fila = (qpos_state + [float(ctrl_mano[i]) for i in range(N_ACT)]
-                                    + [time.time()])
-                            buffer_episodio.append(fila)
+                        # (5-nov) La grabación ya no va aquí, dentro del "if" de MediaPipe: la hace
+                        # la grabadora (skill_shield/ia/grabador.py) desde el hilo de la física,
+                        # a ritmo fijo y con el brazo + la mano.
 
 
                         pct = int(min(100, max(0,
@@ -2151,13 +2221,7 @@ def main():
                             teleop_v2.desarmar()
                             if pedal_v2 is not None:
                                 pedal_v2.desarmar()
-                        if grabando and tarea_actual:
-                            ruta = guardar_episodio(
-                                buffer_episodio, os.path.join(EPISODIOS_DIR, tarea_actual))
-                            if ruta:
-                                print(f"💾 Episodio guardado antes de standby: {ruta} "
-                                      f"({len(buffer_episodio)} fotogramas).")
-                            buffer_episodio = []
+                        _parar_grabacion("antes de standby")
                         grabando = False
                         suav_dedos.reset()
                         # PASO 7.1: el brazo vuelve al reposo de forma continua (sin tirón)
@@ -2231,28 +2295,34 @@ def main():
                                   f"(T-pose, brazo estirado). [R] otra vez para cancelar.")
 
                     elif key == ord("g") and estado["camara_activa"]:
-                        grabando = not grabando
-                        if grabando:
-                            print(f"\n📝 Tareas ya grabadas: "
-                                  f"{', '.join(_listar_tareas_grabadas()) or '(ninguna todavía)'}")
-                            entrada = input(
-                                f"   Nombre de la tarea/maniobra "
-                                f"[{tarea_actual or 'nueva tarea'}]: ").strip()
-                            if entrada:
-                                tarea_actual = _nombre_seguro(entrada)
-                            elif tarea_actual is None:
-                                tarea_actual = _nombre_seguro("tarea_1")
-                            buffer_episodio = []
-                            print(f"🔴 GRABANDO... (tarea: '{tarea_actual}')")
-                        else:
-                            ruta_tarea = os.path.join(EPISODIOS_DIR, tarea_actual)
-                            ruta = guardar_episodio(buffer_episodio, ruta_tarea)
-                            if ruta:
-                                print(f"⏹ Grabación pausada. Episodio guardado: "
-                                      f"{ruta} ({len(buffer_episodio)} fotogramas).")
+                        # 5-nov: brazo + mano a ritmo fijo (grabador.py). El nombre de la tarea
+                        # se pide con la física SUELTA (antes input() la congelaba).
+                        if not grabador.activo:
+                            if fisica is None:
+                                print("⚠ [G] necesita FISICA_EN_HILO = True (la grabadora va en "
+                                      "el hilo de la física).")
                             else:
-                                print("⏹ Grabación pausada. (episodio vacío, no se guardó)")
-                            buffer_episodio = []
+                                if tarea_actual is None or not globals().get("IA_MISMA_TAREA", True):
+                                    with _soltar():
+                                        tarea_actual = _pedir_tarea(tarea_actual)
+                                if tarea_actual:
+                                    if teleop_v2 is not None and not teleop_v2.armado:
+                                        print("ℹ️  El brazo está DESARMADO: se grabará quieto "
+                                              "hasta que pises el pedal.")
+                                    grabador.iniciar(tarea_actual, datos)
+                                    print(f"🔴 GRABANDO brazo + mano a {grabador.fps:.0f} Hz "
+                                          f"(tarea '{tarea_actual}'). [G] para terminar el episodio.")
+                        else:
+                            _parar_grabacion()
+                        grabando = grabador.activo
+
+                    elif key == ord("G"):
+                        # 5-nov: [Shift+G] cambiar de tarea (las siguientes [G] graban en la nueva)
+                        _parar_grabacion("cambio de tarea")
+                        grabando = False
+                        with _soltar():
+                            tarea_actual = _pedir_tarea(tarea_actual)
+                        print(f"📝 Tarea para las próximas grabaciones: '{tarea_actual}'")
 
                     elif key == ord("e"):
                         # Entrena SOLO la última tarea usada (rápido, para iterar
@@ -2261,17 +2331,15 @@ def main():
                             print("❌ No hay ninguna tarea seleccionada todavía. "
                                   "Graba con [G] primero.")
                         else:
-                            os.makedirs(MODELOS_DIR, exist_ok=True)
-                            ruta_episodios = os.path.join(EPISODIOS_DIR, tarea_actual)
-                            ruta_pesos = os.path.join(MODELOS_DIR, f"{tarea_actual}.pth")
-                            print(f"\n▶ Entrenando solo la tarea actual: '{tarea_actual}'")
-                            entrenar_ia(ruta_episodios, ruta_pesos)
+                            # 5-nov: en otro proceso (antes congelaba cámaras y física minutos)
+                            _parar_grabacion("antes de entrenar")
+                            _entrenar_en_segundo_plano([tarea_actual])
 
                     elif key == ord("E"):
                         # Mayúscula: reentrena TODAS las tareas grabadas (más lento,
                         # útil tras cambiar algo estructural del modelo)
-                        print("\n📋 Reentrenando TODAS las tareas grabadas...")
-                        entrenar_todas_las_tareas()
+                        _parar_grabacion("antes de entrenar")
+                        _entrenar_en_segundo_plano(["--todas"])
 
                     elif key == ord("1"):
                         # [1] — Toggle pelota + soporte universal
@@ -2361,10 +2429,7 @@ def main():
                             print("⚠ La demo del taladro no está disponible (mira los avisos "
                                   "del arranque).")
                         else:
-                            if grabando and tarea_actual:
-                                guardar_episodio(
-                                    buffer_episodio, os.path.join(EPISODIOS_DIR, tarea_actual))
-                                buffer_episodio = []
+                            _parar_grabacion("antes de la demo")
                             grabando = False
                             estado["camara_activa"] = False
                             modo_demo_taladro = True
@@ -2394,10 +2459,7 @@ def main():
 
                     elif key == ord("m"):
                         # Demo programado: prueba pinzas fijas con ruido aleatorio
-                        if grabando and tarea_actual:
-                            guardar_episodio(
-                                buffer_episodio, os.path.join(EPISODIOS_DIR, tarea_actual))
-                            buffer_episodio = []
+                        _parar_grabacion("antes del modo autónomo")
                         modo_autonomo = True
                         grabando = False
                         estado["camara_activa"] = False
@@ -2410,23 +2472,14 @@ def main():
                             print("❌ No hay ninguna tarea entrenada todavía. "
                                   "Graba con [G] y entrena con [E] primero.")
                         else:
-                            print("\n📋 Tareas entrenadas disponibles:")
-                            for idx, nombre in enumerate(modelos_disponibles, start=1):
-                                print(f"   [{idx}] {nombre}")
-                            eleccion = input(
-                                f"   Elige nº de tarea a reproducir (1-{len(modelos_disponibles)}, "
-                                f"o vacío para cancelar): ").strip()
-                            if eleccion.isdigit() and 1 <= int(eleccion) <= len(modelos_disponibles):
-                                tarea_elegida = modelos_disponibles[int(eleccion) - 1]
+                            with _soltar():               # 5-nov: sin congelar la física
+                                tarea_elegida = _elegir("Tarea a reproducir", modelos_disponibles)
+                            if tarea_elegida:
                                 ruta_pesos = os.path.join(MODELOS_DIR, f"{tarea_elegida}.pth")
                                 red_neuronal = cargar_ia(ruta_pesos)
                                 if red_neuronal is not None:
                                     print(f"🎯 Tarea seleccionada: '{tarea_elegida}'")
-                                    if grabando:
-                                        guardar_episodio(
-                                            buffer_episodio,
-                                            os.path.join(EPISODIOS_DIR, tarea_actual))
-                                        buffer_episodio = []
+                                    _parar_grabacion("antes del modo IA")
                                     modo_ia_real = True
                                     grabando = False
                                     estado["camara_activa"] = False
@@ -2485,9 +2538,9 @@ def main():
                         cv2.putText(frame_bgr, _txt_g, (ANCHO_CAM - 290, 45),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                                     (0, 255, 0) if "OK" in _txt_g else (0, 165, 255), 1)
-                    if grabando:
+                    if grabador.activo:
                         cv2.circle(frame_bgr, (ANCHO_CAM - 20, 20), 8, (0, 0, 255), -1)
-                        cv2.putText(frame_bgr, "REC", (ANCHO_CAM - 60, 25),
+                        cv2.putText(frame_bgr, f"REC {grabador.segundos:4.1f}s", (ANCHO_CAM - 110, 25),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
                     cv2.imshow(
@@ -2534,6 +2587,8 @@ def main():
         mano_real.desconectar()
     if guante is not None:
         guante.cerrar()
+    _parar_grabacion("al salir")
+    grabador.esperar()                     # que terminen de escribirse los episodios
     if fr5 is not None:
         e_fr5 = fr5.estado()
         fr5.parar()

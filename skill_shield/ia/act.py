@@ -1,9 +1,24 @@
 """
 Cerebro IA: modelo ACT (Action Chunking Transformer), episodios, entrenamiento y carga.
 
-(Extraído de Skill_Shield_Nivel_6.py — código sin cambios, solo reubicado.)
+(Extraído de Skill_Shield_Nivel_6.py.)
+
+5-nov — BRAZO + MANO (formato 2): los episodios nuevos (skill_shield/ia/grabador.py) traen
+cabecera y guardan los 6 joints del FR5 + los 17 de la OrcaHand (posición simulada q:… y
+comando a:…) a ritmo fijo. La red es la misma (ACT "ciega": historial de posturas → bloque de
+comandos futuros) pero con 23 dimensiones, y el .pth guarda los nombres de las columnas para
+que la reproducción sepa qué joint es cada salida. Los episodios antiguos (formato 1: solo
+mano, sin cabecera) se siguen pudiendo entrenar como antes.
+
+Entrenar FUERA de la app (no congela cámaras ni física; [E] ahora lo lanza así también):
+    python -m skill_shield.ia.act <tarea>          # una tarea → modelos/<tarea>.pth
+    python -m skill_shield.ia.act --todas          # todas las tareas grabadas
 """
 import os
+import sys
+import json
+import math
+from collections import deque
 import numpy as np
 import csv
 import torch
@@ -49,6 +64,9 @@ N_CAPAS_DEC    = 1     # capas del decoder de acciones — LeRobot (implementaci
                        # funcionó en la práctica — lo replicamos en vez de "arreglarlo"
 BETA_KL        = 10.0  # peso del término KL en la pérdida (estándar en ACT: 10-20)
 
+IA_MAX_EPOCAS  = 8000  # tope de épocas del entrenamiento (las pruebas lo bajan)
+IA_PACIENCIA   = 200   # épocas sin mejorar en validación antes de parar
+
 EPISODIOS_DIR  = "episodios"  # cada TAREA tiene su propia subcarpeta: episodios/<tarea>/
                                # y dentro, cada grabación [G]...[G] es un episodio_XXXX.csv
 MODELOS_DIR    = "modelos"    # un modelo .pth entrenado por cada tarea: modelos/<tarea>.pth
@@ -88,13 +106,14 @@ class ACTModel(nn.Module):
                  chunk: int = CHUNK_IA, dim: int = DIM_MODELO,
                  n_heads: int = N_CABEZAS, n_capas_enc: int = N_CAPAS_ENC,
                  n_capas_ctx: int = N_CAPAS_CTX, n_capas_dec: int = N_CAPAS_DEC,
-                 dim_z: int = DIM_LATENTE):
+                 dim_z: int = DIM_LATENTE, dim_accion: int = None):
         super().__init__()
         self.ventana, self.chunk, self.dim_z = ventana, chunk, dim_z
+        dim_accion = n_joints if dim_accion is None else dim_accion   # 5-nov: pueden diferir
 
         # — Embeddings de entrada —
         self.embed_qpos   = nn.Linear(n_joints, dim)
-        self.embed_action = nn.Linear(n_joints, dim)
+        self.embed_action = nn.Linear(dim_accion, dim)
         self.cls_token     = nn.Parameter(torch.zeros(1, 1, dim))
         self.pos_embed_enc = nn.Parameter(torch.zeros(1, 2 + chunk, dim))  # CLS + qpos + chunk
 
@@ -116,7 +135,7 @@ class ACTModel(nn.Module):
             d_model=dim, nhead=n_heads, dim_feedforward=dim * 4, batch_first=True)
         self.policy_decoder = nn.TransformerDecoder(capa_pol_dec, num_layers=n_capas_dec)
 
-        self.cabeza_salida = nn.Linear(dim, n_joints)
+        self.cabeza_salida = nn.Linear(dim, dim_accion)
 
     def _codificar_estilo(self, qpos_actual: torch.Tensor, action_chunk: torch.Tensor):
         b = action_chunk.shape[0]
@@ -178,6 +197,48 @@ def _siguiente_numero_episodio(episodios_dir: str = EPISODIOS_DIR) -> int:
     return (max(numeros) + 1) if numeros else 1
 
 
+def leer_episodio(ruta):
+    """Lee un episodio de cualquier formato. Devuelve dict(estado (T, De), accion (T, Da),
+    tiempos (T,) o None, col_estado, col_accion, formato, fps) o None si no se puede leer.
+      · formato 2 (grabador.py): cabecera t, t_reloj, q:<joint>…, a:<joint>…
+      · formato 1 (antiguo, solo mano): 17 qpos + 17 ctrl [+ timestamp], sin cabecera"""
+    with open(ruta, "r") as f:
+        filas = list(csv.reader(f))
+    if not filas:
+        return None
+    if filas[0] and filas[0][0] == "t":                         # ── formato 2
+        cab = filas[0]
+        ie = [i for i, c in enumerate(cab) if c.startswith("q:")]
+        ia = [i for i, c in enumerate(cab) if c.startswith("a:")]
+        datos = np.array([[float(v) for v in r] for r in filas[1:] if len(r) == len(cab)],
+                         dtype=np.float64).reshape(-1, len(cab))
+        fps = None
+        meta = ruta[:-4] + ".json"
+        if os.path.exists(meta):
+            try:
+                with open(meta) as fm:
+                    fps = float(json.load(fm).get("fps"))
+            except Exception:
+                fps = None
+        return dict(estado=datos[:, ie], accion=datos[:, ia], tiempos=datos[:, 0],
+                    col_estado=[cab[i] for i in ie], col_accion=[cab[i] for i in ia],
+                    formato=2, fps=fps)
+    qpos, ctrl, tiempos = [], [], []                            # ── formato 1
+    for row in filas:
+        # 17 qpos + 17 ctrl + 1 timestamp = 35 · episodios aún más viejos: 34
+        if len(row) == 2 * N_ACT + 1:
+            vals = [float(v) for v in row]
+            qpos.append(vals[:N_ACT]); ctrl.append(vals[N_ACT:2 * N_ACT]); tiempos.append(vals[-1])
+        elif len(row) == 2 * N_ACT:
+            vals = [float(v) for v in row]
+            qpos.append(vals[:N_ACT]); ctrl.append(vals[N_ACT:])
+    if not qpos:
+        return None
+    return dict(estado=np.array(qpos), accion=np.array(ctrl),
+                tiempos=np.array(tiempos) if len(tiempos) == len(qpos) else None,
+                col_estado=None, col_accion=None, formato=1, fps=None)
+
+
 def guardar_episodio(buffer_filas, episodios_dir: str = EPISODIOS_DIR) -> str | None:
     """Guarda un episodio grabado (lista de filas qpos+ctrl) como un CSV independiente.
     Devuelve la ruta guardada, o None si el buffer estaba vacío."""
@@ -192,38 +253,39 @@ def guardar_episodio(buffer_filas, episodios_dir: str = EPISODIOS_DIR) -> str | 
     return ruta
 
 
-def entrenar_ia(episodios_dir: str = EPISODIOS_DIR, archivo_pesos: str = ARCHIVO_PESOS) -> bool:
-    """Entrena el modelo ACT (CVAE+Transformer) a partir de los episodios grabados."""
-    rutas = _listar_episodios(episodios_dir)
-    if not rutas:
-        print(f"❌ No hay episodios grabados en '{episodios_dir}/'. Pulsa [G] primero.")
-        return False
-
-    print(f"\n🧠 ENTRENANDO ACT (CVAE + Transformer) con {len(rutas)} episodio(s)... "
-          f"Por favor, espera.")
-
+def preparar_datos(rutas):
+    """Episodios → ventanas de entrenamiento (sin torch). Devuelve dict(x (N, ventana, De),
+    y (N, chunk, Da), episodio (N,), n_episodios, formato, col_estado, col_accion,
+    dt_objetivo) o None si no hay datos suficientes."""
     minimo_filas = VENTANA_IA + CHUNK_IA
     x_data, y_data, episodio_id_data = [], [], []
     episodios_usados, episodios_cortos = 0, 0
     deltas_tiempo = []   # diferencias reales entre fotogramas consecutivos (s)
 
-    for ruta in rutas:
-        qpos_seq, ctrl_seq, tiempos = [], [], []
-        with open(ruta, "r") as f:
-            for row in csv.reader(f):
-                # Formato nuevo: 17 qpos + 17 ctrl + 1 timestamp = 35
-                # Formato viejo (episodios grabados antes de este cambio): 34
-                if len(row) == 2 * N_ACT + 1:
-                    vals = [float(v) for v in row]
-                    qpos_seq.append(vals[:N_ACT])
-                    ctrl_seq.append(vals[N_ACT:2 * N_ACT])
-                    tiempos.append(vals[-1])
-                elif len(row) == 2 * N_ACT:
-                    vals = [float(v) for v in row]
-                    qpos_seq.append(vals[:N_ACT])
-                    ctrl_seq.append(vals[N_ACT:])
-                else:
-                    continue
+    # 5-nov: episodios de formato 2 (brazo + mano) y 1 (solo mano). No se pueden mezclar en
+    # un mismo modelo: si hay de los dos, se usan los NUEVOS (y se avisa).
+    leidos = [(r, leer_episodio(r)) for r in rutas]
+    leidos = [(r, e) for r, e in leidos if e is not None]
+    if any(e["formato"] == 2 for _, e in leidos):
+        viejos = sum(1 for _, e in leidos if e["formato"] != 2)
+        leidos = [(r, e) for r, e in leidos if e["formato"] == 2]
+        cols = (leidos[0][1]["col_estado"], leidos[0][1]["col_accion"])
+        distintos = [r for r, e in leidos if (e["col_estado"], e["col_accion"]) != cols]
+        leidos = [(r, e) for r, e in leidos if (e["col_estado"], e["col_accion"]) == cols]
+        if viejos:
+            print(f"⚠️  {viejos} episodio(s) del formato antiguo (solo mano) ignorados: "
+                  "este modelo es de brazo + mano.")
+        if distintos:
+            print(f"⚠️  {len(distintos)} episodio(s) con otras articulaciones ignorados.")
+        formato, col_estado, col_accion = 2, cols[0], cols[1]
+        fps_meta = leidos[0][1]["fps"]
+        print(f"🦾 Formato 2: {len(col_estado)} articulaciones (brazo + mano).")
+    else:
+        formato, col_estado, col_accion, fps_meta = 1, None, None, None
+
+    for ruta, ep in leidos:
+        qpos_seq, ctrl_seq = ep["estado"].tolist(), ep["accion"].tolist()
+        tiempos = [] if ep["tiempos"] is None else ep["tiempos"].tolist()
 
         if len(qpos_seq) <= minimo_filas:
             episodios_cortos += 1
@@ -235,7 +297,6 @@ def entrenar_ia(episodios_dir: str = EPISODIOS_DIR, archivo_pesos: str = ARCHIVO
             deltas_tiempo.extend(t2 - t1 for t1, t2 in zip(tiempos, tiempos[1:]))
 
         # Ventanas SOLO dentro de este episodio — nunca cruzan a otro episodio
-                # Ventanas SOLO dentro de este episodio — nunca cruzan a otro episodio
         for i in range(VENTANA_IA, len(qpos_seq) - CHUNK_IA + 1):
             ventana = qpos_seq[i - VENTANA_IA:i]
             bloque  = ctrl_seq[i:i + CHUNK_IA]
@@ -245,7 +306,9 @@ def entrenar_ia(episodios_dir: str = EPISODIOS_DIR, archivo_pesos: str = ARCHIVO
 
     # Mediana en vez de media: robusta frente a algún salto puntual de la cámara
     DT_POR_DEFECTO = 1.0 / 15.0   # ~15 fps, si no hay timestamps (episodios viejos)
-    if deltas_tiempo:
+    if fps_meta:                                     # formato 2: ritmo fijo de la grabadora
+        dt_objetivo = 1.0 / fps_meta
+    elif deltas_tiempo:
         dt_objetivo = float(np.median(deltas_tiempo))
         # Descartamos valores absurdos (p.ej. si hubo una pausa real en medio)
         if not (0.01 <= dt_objetivo <= 0.5):
@@ -261,10 +324,31 @@ def entrenar_ia(episodios_dir: str = EPISODIOS_DIR, archivo_pesos: str = ARCHIVO
 
     if not x_data:
         print("❌ Ningún episodio tiene suficientes fotogramas. Graba más datos.")
+        return None
+
+    return dict(x=np.array(x_data, dtype=np.float32),            # (N, ventana, De)
+                y=np.array(y_data, dtype=np.float32),            # (N, chunk, Da)
+                episodio=np.array(episodio_id_data), n_episodios=episodios_usados,
+                formato=formato, col_estado=col_estado, col_accion=col_accion,
+                dt_objetivo=dt_objetivo)
+
+
+def entrenar_ia(episodios_dir: str = EPISODIOS_DIR, archivo_pesos: str = ARCHIVO_PESOS) -> bool:
+    """Entrena el modelo ACT (CVAE+Transformer) a partir de los episodios grabados."""
+    rutas = _listar_episodios(episodios_dir)
+    if not rutas:
+        print(f"❌ No hay episodios grabados en '{episodios_dir}/'. Pulsa [G] primero.")
         return False
 
-    x_arr = np.array(x_data, dtype=np.float32)                 # (N, ventana, n_joints)
-    y_arr = np.array(y_data, dtype=np.float32)                 # (N, chunk, n_joints)
+    print(f"\n🧠 ENTRENANDO ACT (CVAE + Transformer) con {len(rutas)} episodio(s)... "
+          f"Por favor, espera.")
+
+    d = preparar_datos(rutas)
+    if d is None:
+        return False
+    x_arr, y_arr, dt_objetivo = d["x"], d["y"], d["dt_objetivo"]
+    episodio_id_data, episodios_usados = d["episodio"], d["n_episodios"]
+    formato, col_estado, col_accion = d["formato"], d["col_estado"], d["col_accion"]
 
     UMBRAL_MUESTRAS_MINIMO = 300
     if len(x_arr) < UMBRAL_MUESTRAS_MINIMO:
@@ -273,8 +357,11 @@ def entrenar_ia(episodios_dir: str = EPISODIOS_DIR, archivo_pesos: str = ARCHIVO
               f"repeticiones por gesto. Continuando de todas formas...")
 
     # — Normalización por articulación (compartida en qpos y en ctrl) —
-    mu_x, sigma_x = x_arr.mean(axis=(0, 1)), x_arr.std(axis=(0, 1)) + 1e-6
-    mu_y, sigma_y = y_arr.mean(axis=(0, 1)), y_arr.std(axis=(0, 1)) + 1e-6
+    # (5-nov) con un mínimo de 0,01 rad: una articulación que apenas se mueve en los episodios
+    # (p. ej. el brazo quieto en una tarea de dedos) no debe amplificar ×10⁶ cualquier
+    # diferencia al reproducir.
+    mu_x, sigma_x = x_arr.mean(axis=(0, 1)), np.maximum(x_arr.std(axis=(0, 1)), 1e-2)
+    mu_y, sigma_y = y_arr.mean(axis=(0, 1)), np.maximum(y_arr.std(axis=(0, 1)), 1e-2)
     x_norm = (x_arr - mu_x) / sigma_x
     y_norm = (y_arr - mu_y) / sigma_y
 
@@ -301,7 +388,7 @@ def entrenar_ia(episodios_dir: str = EPISODIOS_DIR, archivo_pesos: str = ARCHIVO
         idx_val, idx_train = idx[:n_val], idx[n_val:]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    modelo_ia   = ACTModel().to(device)
+    modelo_ia   = ACTModel(n_joints=x_arr.shape[2], dim_accion=y_arr.shape[2]).to(device)
     optimizador = optim.Adam(modelo_ia.parameters(), lr=1e-4)
 
     x_train = torch.tensor(x_norm[idx_train], dtype=torch.float32, device=device)
@@ -309,11 +396,11 @@ def entrenar_ia(episodios_dir: str = EPISODIOS_DIR, archivo_pesos: str = ARCHIVO
     x_val   = torch.tensor(x_norm[idx_val],   dtype=torch.float32, device=device)
     y_val   = torch.tensor(y_norm[idx_val],   dtype=torch.float32, device=device)
 
-    MAX_EPOCAS    = 8000  # los Transformers necesitan bastantes más iteraciones que
+    MAX_EPOCAS    = IA_MAX_EPOCAS  # (8000) los Transformers necesitan bastantes más iteraciones que
                           # un MLP para converger — LeRobot recomienda del orden de
                           # ~100.000 pasos de entrenamiento para ACT en su casos de uso
     TAM_LOTE      = 64
-    PACIENCIA     = 200   # mucho más margen que antes — un Transformer puede tardar
+    PACIENCIA     = IA_PACIENCIA   # (200) mucho más margen que antes — un Transformer puede tardar
                           # bastante en "arrancar" antes de que la validación mejore
                           # de forma consistente
     RUIDO_ENTRADA = 0.08
@@ -368,6 +455,11 @@ def entrenar_ia(episodios_dir: str = EPISODIOS_DIR, archivo_pesos: str = ARCHIVO
         "ventana": VENTANA_IA,
         "chunk": CHUNK_IA,
         "dt_objetivo": dt_objetivo,
+        "formato": formato,                 # 5-nov: 2 = brazo + mano
+        "col_estado": col_estado,           # p. ej. ["q:joint1", …, "q:right_wrist", …]
+        "col_accion": col_accion,           # p. ej. ["a:joint1", …]
+        "dim_estado": int(x_arr.shape[2]),
+        "dim_accion": int(y_arr.shape[2]),
     }, archivo_pesos)
 
     print(f"✅ ENTRENAMIENTO COMPLETADO (mejor Val={mejor_val:.5f}, "
@@ -409,7 +501,8 @@ def cargar_ia(archivo_pesos: str = ARCHIVO_PESOS):
         ventana = int(chk.get("ventana", VENTANA_IA))
         chunk   = int(chk.get("chunk", CHUNK_IA))
         dt_objetivo = float(chk.get("dt_objetivo", 1.0 / 15.0))
-        modelo_ia = ACTModel(ventana=ventana, chunk=chunk)
+        modelo_ia = ACTModel(n_joints=int(chk.get("dim_estado", N_ACT)), ventana=ventana, chunk=chunk,
+                             dim_accion=int(chk.get("dim_accion", N_ACT)))
         modelo_ia.load_state_dict(chk["state_dict"])
         modelo_ia.eval()
         print(f"✅ IA (ACT) cargada desde '{archivo_pesos}' "
@@ -423,7 +516,69 @@ def cargar_ia(archivo_pesos: str = ARCHIVO_PESOS):
             "ventana": ventana,
             "chunk":   chunk,
             "dt_objetivo": dt_objetivo,
+            "formato": int(chk.get("formato", 1)),
+            "col_estado": chk.get("col_estado"),
+            "col_accion": chk.get("col_accion"),
         }
     except Exception as e:
         print(f"❌ Error al cargar la IA: {e}")
         return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# REPRODUCCIÓN: historial + predicción + ensamblado temporal (5-nov, fuera del bucle)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class PoliticaACT:
+    """Envuelve el modelo cargado (cargar_ia): con cada estado nuevo predice un bloque y
+    devuelve la acción del instante actual combinando los bloques anteriores (temporal
+    ensembling, pesos exp(−peso_exp·k), más peso a lo más reciente)."""
+
+    def __init__(self, red, peso_exp=0.15):
+        self.red = red
+        self.peso_exp = float(peso_exp)
+        self.historial = None
+        self.bloques = deque(maxlen=int(red["chunk"]))
+
+    def reiniciar(self, estado0):
+        self.historial = deque([list(map(float, estado0))] * int(self.red["ventana"]),
+                               maxlen=int(self.red["ventana"]))
+        self.bloques.clear()
+
+    def paso(self, estado=None):
+        """estado: postura actual (se añade al historial antes de predecir; None = no
+        añadir). Devuelve la acción (np.ndarray) del instante actual."""
+        if self.historial is None:
+            self.reiniciar(estado)
+        elif estado is not None:
+            self.historial.append(list(map(float, estado)))
+        r = self.red
+        x = (torch.tensor([list(self.historial)], dtype=torch.float32) - r["mu_x"]) / r["sigma_x"]
+        with torch.no_grad():
+            pred, _, _ = r["modelo"](x)
+        self.bloques.append((pred[0] * r["sigma_y"] + r["mu_y"]).numpy())
+        preds = [(k, b[k]) for k, b in enumerate(reversed(self.bloques)) if k < b.shape[0]]
+        w = np.array([math.exp(-self.peso_exp * k) for k, _ in preds])
+        w /= w.sum()
+        return sum(wi * p for wi, (_, p) in zip(w, preds))
+
+
+def _main(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser(description="Entrenar ACT con los episodios grabados ([G])")
+    ap.add_argument("tarea", nargs="?", help="nombre de la tarea (carpeta de episodios/)")
+    ap.add_argument("--todas", action="store_true", help="entrenar todas las tareas")
+    a = ap.parse_args(argv)
+    if a.todas:
+        entrenar_todas_las_tareas()
+    elif a.tarea:
+        os.makedirs(MODELOS_DIR, exist_ok=True)
+        ok = entrenar_ia(os.path.join(EPISODIOS_DIR, a.tarea), os.path.join(MODELOS_DIR, f"{a.tarea}.pth"))
+        sys.exit(0 if ok else 1)
+    else:
+        print("Tareas grabadas:", ", ".join(_listar_tareas_grabadas()) or "(ninguna)")
+        ap.print_help()
+
+
+if __name__ == "__main__":
+    _main()

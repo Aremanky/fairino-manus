@@ -1296,3 +1296,17 @@ FR5_SIGNO       = (1, 1, 1, 1, 1, 1)
 FR5_OFFSET_DEG  = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 FR5_PRIORIDAD_RT = 50            # SCHED_FIFO si hay permisos (si no, prioridad normal)
 FR5_CPU          = None          # núcleo fijo para el proceso (None = cualquiera)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# IA: GRABAR BRAZO + MANO, ENTRENAR Y REPRODUCIR (5-nov)
+# ═══════════════════════════════════════════════════════════════════════════
+# [G] graba un episodio de la SIMULACIÓN (6 joints del FR5 + 17 de la OrcaHand: posición y
+# comando) a ritmo fijo, desde el hilo de la física (skill_shield/ia/grabador.py). [E] entrena
+# en otro proceso (python -m skill_shield.ia.act <tarea>). [I] reproduce en la simulación y,
+# si están conectados y ARMADOS, en el FR5 y la mano reales. La IA es "ciega": aprende el
+# movimiento (historial de posturas → comandos siguientes), no ve objetos.
+IA_FPS              = 30.0    # fotogramas por segundo de la grabación (y de la reproducción)
+IA_RECORTAR_QUIETOS = True    # quitar el rato quieto del principio y del final de cada episodio
+IA_MISMA_TAREA      = True    # [G] no vuelve a pedir el nombre: [Shift+G] para cambiar de tarea
+IA_V_MAX_BRAZO      = 1.0     # rad/s: tope por joint del brazo al reproducir (además de fr5_servo)
+IA_PESO_EXP         = 0.15    # ensamblado temporal: más alto = más peso a la predicción reciente
