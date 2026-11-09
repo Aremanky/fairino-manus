@@ -7,7 +7,7 @@ echo "⚙️ Configurando el entorno virtual y descargando dependencias..."
 python3.12 -m venv venv_nivel6
 source venv_nivel6/bin/activate
 pip install -r requirements.txt
-pip install opencv-python depthai==2.32.0.0 mediapipe==0.10.14 mujoco torch lib
+pip install opencv-python depthai==2.32.0.0 mediapipe==0.10.14 evdev mujoco torch lib
 echo "✅ Entorno listo."
 fi
 

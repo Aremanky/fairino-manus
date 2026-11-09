@@ -60,6 +60,8 @@ MEDIDAS = dict(
     tal_r          = 0.0045,
     gusset_esp     = 0.006,   # chapas triangulares de los lados de cada ala
     hombro_grados  = 45.0,    # inclinación de las placas de los hombros
+    giro_base_grados = 0.0,   # 9-nov: giro de la base del FR5 sobre la placa (eje de joint1), como
+                              # está atornillada de verdad; medirlo con diagnosticos/ajustar_gemelo.py
     disco          = (0.085, 0.006),   # adaptador entre placa y base del FR5 (radio, espesor)
 )
 
@@ -134,6 +136,11 @@ def geometria(M=MEDIDAS):
     # ATRÁS, la dirección que el brazo humano casi no usa.
     x = (0.0, 1.0, 0.0)
     y = (n[1] * x[2] - n[2] * x[1], n[2] * x[0] - n[0] * x[2], n[0] * x[1] - n[1] * x[0])
+    # 9-nov: base girada sobre la placa (alrededor de n = eje de joint1): x' = x·cos + y·sin
+    g = math.radians(M.get("giro_base_grados", 0.0))
+    if g:
+        x, y = (tuple(math.cos(g) * x[i] + math.sin(g) * y[i] for i in range(3)),
+                tuple(-math.sin(g) * x[i] + math.cos(g) * y[i] for i in range(3)))
     R = [[x[0], y[0], n[0]], [x[1], y[1], n[1]], [x[2], y[2], n[2]]]
     return dict(th=th, n=n, u_in=u_in, base=base, cara=cara, cara_in=cara_in, I=I, O=O,
                 x_col=x_col, z_o=z_o, z_top=z_top, z_suelo=z_suelo, base_quat=_mat2quat(R))

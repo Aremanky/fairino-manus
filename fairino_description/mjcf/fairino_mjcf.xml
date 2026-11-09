@@ -175,7 +175,7 @@
          postura. Los meshes son los del modelo antiguo: los de wrist1_Link se bajan 27,9 mm
          (pos de cada geom) para que la muñeca siga encajando; la parte que solapa queda
          dentro del alojamiento del joint4 del antebrazo. -->
-    <body name="base_link" pos="0.109601551 0 0.264601551" quat="0.27059805 -0.653281482 -0.653281482 0.27059805">
+    <body name="base_link" pos="0.109601551 0 0.264601551" quat="0.382683432 -1.11022302e-16 -0.923879532 2.77555756e-17">
       <geom type="mesh" mesh="fr5_vis_base_0" material="fr5e_carcasa" contype="0" conaffinity="0" group="2"/>
       <geom type="mesh" mesh="fr5_vis_base_1" material="fr5e_tapa" contype="0" conaffinity="0" group="2"/>
       <geom type="mesh" mesh="fr5_vis_base_2" material="fr5e_oscuro" contype="0" conaffinity="0" group="2"/>

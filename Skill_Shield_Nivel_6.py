@@ -237,15 +237,20 @@ def main():
 
     # ── FR5 REAL (proceso fr5_servo, ServoJ cada 8 ms) ──
     # Se arranca AQUÍ, antes del visor, las cámaras y los hilos: el proceso se crea con fork.
-    # 9-nov: en GEMELO_SLIDERS se arranca aunque FR5_REAL_ACTIVO sea False (es para lo que
-    # sirve el modo), con su propio simulacro y velocidad máxima (SLIDERS_FR5_* en config.py).
+    # 9-nov: en los dos modos con hardware se arranca aunque FR5_REAL_ACTIVO sea False, cada uno
+    # con su simulacro y velocidad máxima:
+    #   · GEMELO_SLIDERS → SLIDERS_FR5_*   (se arma con ARMAR en la ventana de sliders)
+    #   · HARDWARE_REAL  → TELEOP_REAL_*   (teleoperación con cámaras; se arma con el PEDAL)
+    # En SIMULACION solo si FR5_REAL_ACTIVO = True (como antes).
     fr5 = None
     _cfg_fr5 = dict(globals())
-    if modo_sliders:
-        _cfg_fr5["FR5_SIMULACRO"] = bool(globals().get("SLIDERS_FR5_SIMULACRO", False))
+    _pref_fr5 = {"GEMELO_SLIDERS": "SLIDERS", "HARDWARE_REAL": "TELEOP_REAL"}.get(MODO_EJECUCION)
+    _fr5_por_modo = _pref_fr5 is not None and bool(globals().get(f"{_pref_fr5}_CON_FR5", True))
+    if _fr5_por_modo:
+        _cfg_fr5["FR5_SIMULACRO"] = bool(globals().get(f"{_pref_fr5}_FR5_SIMULACRO", False))
         _cfg_fr5["FR5_VEL_MAX_DEG_S"] = min(float(globals().get("FR5_VEL_MAX_DEG_S", 60.0)),
-                                            float(globals().get("SLIDERS_FR5_VEL_MAX_DEG_S", 30.0)))
-    if globals().get("FR5_REAL_ACTIVO", False) or (modo_sliders and globals().get("SLIDERS_CON_FR5", True)):
+                                            float(globals().get(f"{_pref_fr5}_FR5_VEL_MAX_DEG_S", 30.0)))
+    if globals().get("FR5_REAL_ACTIVO", False) or _fr5_por_modo:
         fr5 = FR5Servo.desde_config(_cfg_fr5)
         if not fr5.iniciar():
             print("   El programa sigue SOLO en simulación (el FR5 no recibe nada).")
@@ -392,6 +397,18 @@ def main():
         with visor.lock():
             if not _sincronizar_con_fr5("arranque"):
                 print("⚠ FR5: sin postura real → el simulador arranca en POSICION_STANDBY_BRAZO")
+
+    # — 9-nov: brazo FANTASMA (objetivo) + puntas objetivo/real en el visor (solo visual) —
+    fantasma = None
+    _t_debug_gemelo = [0.0]    # último print del diagnóstico del gemelo
+    if globals().get("FANTASMA_ACTIVO", True):
+        try:
+            from skill_shield.interfaz.fantasma import FantasmaBrazo
+            fantasma = FantasmaBrazo(modelo, ARM_JOINTS,
+                                     cuerpo_punta=globals().get("FANTASMA_CUERPO_PUNTA", "mano_mount"))
+        except Exception as _e_f:
+            print(f"⚠ Brazo fantasma desactivado ({_e_f})")
+            fantasma = None
 
     # — Suavizadores —
     suav_dedos = SuavizadorND(n_dim=N_ACT - 1, ventana=4)  # ctrl[1..16]
@@ -762,7 +779,9 @@ def main():
                              teclas=globals().get("TELEOP_FR5_PEDAL_TECLAS", (ord("p"), ord("P"))),
                              dispositivo=globals().get("TELEOP_FR5_PEDAL_EVDEV"),
                              codigo=globals().get("TELEOP_FR5_PEDAL_EVDEV_CODIGO"),
-                             hombre_muerto=globals().get("TELEOP_FR5_PEDAL_HOMBRE_MUERTO", True))
+                             hombre_muerto=globals().get("TELEOP_FR5_PEDAL_HOMBRE_MUERTO", True),
+                             exclusivo=globals().get("TELEOP_FR5_PEDAL_EXCLUSIVO", True),
+                             codigo_teclado=globals().get("TELEOP_FR5_PEDAL_TECLADO_CODIGO", 25))
             en_marcha = fr5_ia is None                   # sin FR5 arranca solo
             fr5_ia_enviando = False
             n_bloqueos = 0
@@ -1145,7 +1164,9 @@ def main():
                                      teclas=globals().get("TELEOP_FR5_PEDAL_TECLAS", (ord("p"), ord("P"))),
                                      dispositivo=globals().get("TELEOP_FR5_PEDAL_EVDEV"),
                                      codigo=globals().get("TELEOP_FR5_PEDAL_EVDEV_CODIGO"),
-                                     hombre_muerto=globals().get("TELEOP_FR5_PEDAL_HOMBRE_MUERTO", True))
+                                     hombre_muerto=globals().get("TELEOP_FR5_PEDAL_HOMBRE_MUERTO", True),
+                                     exclusivo=globals().get("TELEOP_FR5_PEDAL_EXCLUSIVO", True),
+                                     codigo_teclado=globals().get("TELEOP_FR5_PEDAL_TECLADO_CODIGO", 25))
                     print(f"🦶 Armado del brazo: {pedal_v2.descripcion}; entrada a "
                           f"{globals().get('TELEOP_FR5_V_ENTRADA', 0.15)} rad/s")
                 # 28-oct (fluidez): la v2 en un hilo aparte, solapada con la cámara y MediaPipe
@@ -1198,6 +1219,15 @@ def main():
                 # 5-nov: el generador (y la IK) arrancan de la postura REAL del FR5
                 if fr5 is not None:
                     _sincronizar_con_fr5("entrar en teleoperación")
+                    # 9-nov: avisar si con esta configuración el FR5 real no se va a poder armar
+                    if sliders is None and fr5.conectado and (teleop_v2 is None or pedal_v2 is None
+                                                               or pedal_v2.modo is None):
+                        print("⚠ FR5 real conectado, pero NO se armará: hace falta TELEOP_FR5_V2 = True "
+                              "y un pedal (TELEOP_FR5_PEDAL = \"tecla\" o \"evdev\") en config.py.")
+                    elif sliders is None and fr5.conectado:
+                        print(f"🦾 FR5 REAL listo para teleoperar"
+                              f"{' (SIMULACRO: no se mueve)' if fr5.p.get('FR5_SIMULACRO') else ''}: "
+                              f"[A] + T-pose para calibrar → {pedal_v2.descripcion} para ARMAR / DESARMAR.")
                 fr5_enviando = False          # ¿el FR5 real está recibiendo ServoJ?
 
                 # ── PASO 7 — brazo preciso y sin saltos ──
@@ -1256,6 +1286,25 @@ def main():
                 lim_humanos   = LimitesHumanos()   # 7-oct: tu postura dentro del rango anatómico
 
                 # — Física en tiempo real en su propio hilo (ver HiloFisica) —
+                # 9-nov: GEMELO DIGITAL de verdad. Con el FR5 conectado, el brazo de MuJoCo enseña
+                # la pose REAL leída del robot (fr5_servo la lee a 50 Hz), no el comando: se
+                # escribe en qpos (con velocidad 0) antes de cada mj_step. El comando (ctrl) y la
+                # IK no cambian; el OBJETIVO se ve en el brazo fantasma.
+                _pose_real = {"t": -1.0, "q": None}
+
+                def _brazo_a_pose_real(d_):
+                    if fr5 is None or not globals().get("GEMELO_POSE_REAL", True):
+                        return
+                    if d_.time - _pose_real["t"] >= 0.01:        # leerla a ~100 Hz basta
+                        _pose_real["t"] = d_.time
+                        _pose_real["q"] = fr5.q_real_rad(max_edad_s=0.3)
+                    _q_r = _pose_real["q"]
+                    if _q_r is None:                             # sin lectura reciente: simulado
+                        return
+                    for _k in range(6):
+                        d_.qpos[qpos_idx_brazo[_k]] = float(_q_r[_k])
+                        d_.qvel[dof_idx_brazo[_k]] = 0.0
+
                 def _antes_de_paso(m_, d_, dt_):
                     """Antes de cada mj_step: brazo continuo (PASO 7.1) + dedos del guante."""
                     if gen_brazo is not None:
@@ -1264,6 +1313,7 @@ def main():
                         guante.escribir_ctrl(d_, dt_)
                     if fr5 is not None:                  # FR5 real: último comando del brazo
                         fr5.publicar(d_.ctrl[_idx_ctrl_fr5])
+                        _brazo_a_pose_real(d_)           # 9-nov: el gemelo enseña el robot REAL
                     grabador.muestrear(d_)               # 5-nov: grabación a ritmo fijo
 
                 # ctrl de joint1..6 (act_joint1..6 del MJCF)
@@ -2162,7 +2212,7 @@ def main():
                     # 5-nov: PEDAL — arma / desarma el brazo (solo cuenta con la cámara activa)
                     if pedal_v2 is not None:
                         _ev_pedal = pedal_v2.tecla(key) or pedal_v2.actualizar()
-                        if _ev_pedal is not None and pedal_v2.modo == "tecla":
+                        if pedal_v2.modo in ("tecla", "teclado") and key in pedal_v2.teclas:
                             key = -1                     # la tecla del pedal no hace nada más
                         if _ev_pedal == "armar":
                             if estado["camara_activa"] and teleop_v2.calibrado:
@@ -2229,7 +2279,11 @@ def main():
                         if sliders is not None:
                             _armar_fr5 = sliders.armado     # GEMELO_SLIDERS: ARMAR de la ventana
                         else:
-                            _armar_fr5 = teleop_v2 is None or (estado["camara_activa"] and teleop_v2.armado)
+                            # 9-nov: con el FR5 real SOLO se arma con la teleop v2 + PEDAL. Antes, sin
+                            # v2 (pipeline antiguo del ARCTOS) se armaba siempre: ya no.
+                            _armar_fr5 = (teleop_v2 is not None and pedal_v2 is not None
+                                          and pedal_v2.modo is not None
+                                          and estado["camara_activa"] and teleop_v2.armado)
                         if not _armar_fr5 or not fr5_enviando:
                             if fr5_enviando:
                                 fr5.habilitar(False)
@@ -2242,6 +2296,38 @@ def main():
                                 fr5.publicar(datos.ctrl[_idx_ctrl_fr5])
                                 fr5.habilitar(True)              # ServoMoveStart desde la postura real
                                 fr5_enviando = True
+
+                    # 9-nov: brazo FANTASMA = OBJETIVO (lo que la IK / los sliders le piden al
+                    # generador) y puntas objetivo (verde) / real (roja). El brazo sólido es el
+                    # robot REAL (con el FR5 conectado) o el simulado.
+                    if fantasma is not None:
+                        _q_f = [float(datos.ctrl[_i]) for _i in _idx_ctrl_fr5]
+                        if gen_brazo is not None and gen_brazo.activo:
+                            for _k_g, _i_g in enumerate(gen_brazo.idx):
+                                if _i_g in _idx_ctrl_fr5:
+                                    _q_f[_idx_ctrl_fr5.index(_i_g)] = float(gen_brazo.obj_fin[_k_g])
+                        try:
+                            _d_f = fantasma.dibujar(visor, _q_f, punta_real=datos.xpos[fantasma.punta].copy())
+                            if _d_f is not None and _d_f > 0.01:
+                                cv2.putText(frame_bgr, f"objetivo - real: {100 * _d_f:4.1f} cm",
+                                            (10, ALTO_CAM - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                                            (0, 255, 255), 1)
+                        except Exception as _e_f:
+                            print(f"⚠ Brazo fantasma desactivado ({_e_f})")
+                            fantasma = None
+
+                    # 9-nov: diagnóstico del gemelo — real (FR5) vs simulador vs comando, en grados
+                    if fr5 is not None and globals().get("GEMELO_DEBUG", True) \
+                            and time.perf_counter() - _t_debug_gemelo[0] >= 2.0:
+                        _t_debug_gemelo[0] = time.perf_counter()
+                        _e_g = fr5.estado()
+                        _fmt_g = lambda _v: "[" + ", ".join(f"{_x:7.1f}" for _x in _v) + "]"
+                        _edad_g = _e_g["edad_real_s"]
+                        print(f"[GEMELO] {_e_g['texto']}"
+                              f"{'' if _edad_g is None else f' (lectura de hace {1000 * _edad_g:.0f} ms)'}"
+                              f"\n   real FR5 (°): {_fmt_g(_e_g['q_real_deg'])}"
+                              f"\n   simulador(°): {_fmt_g([math.degrees(datos.qpos[_a]) for _a in qpos_idx_brazo])}"
+                              f"\n   comando  (°): {_fmt_g([math.degrees(datos.ctrl[_i]) for _i in _idx_ctrl_fr5])}")
 
                     if key == 32:  # 32 es el código ASCII del Espacio
                         estado["pinza_habilitada"] = not estado.get("pinza_habilitada", True)
@@ -2669,6 +2755,8 @@ def main():
                     pool_mano = None
                 if fr5 is not None:                  # FR5 real: ServoMoveEnd y quieto
                     fr5.habilitar(False)
+                if fantasma is not None:             # fuera de teleoperación no hay objetivo
+                    fantasma.ocultar(visor)
                 if sliders is not None and sliders.armado:   # al volver, hay que ARMAR de nuevo
                     sliders.desarmar("Has salido de la teleoperación → DESARMADO.")
                 if pedal_v2 is not None:

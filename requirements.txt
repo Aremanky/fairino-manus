@@ -157,3 +157,4 @@ opencv-python
 mujoco
 torch
 python-mbedtls
+evdev

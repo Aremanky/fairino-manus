@@ -56,6 +56,12 @@ Lo más probable es que falle, pero es bueno para ir depurando el .txt
 | 🤖 Mano Física + Gemelo Digital | guante/cámara → mano real por USB | cámaras |
 | 🎚️ Gemelo Digital (sliders) | guante/cámara → mano real por USB | **ventana de sliders** |
 
+### Mano Física + Gemelo Digital (teleoperación con el FR5 físico)
+- Arranca el FR5 real (bloque `TELEOP_REAL_*` de `config.py`; `TELEOP_REAL_FR5_SIMULACRO = True` para probar sin que se mueva).
+- **[A]** + T-pose: calibra. El robot **no** se mueve.
+- **Pedal** (o tecla **P** con `TELEOP_FR5_PEDAL = "tecla"`): ARMA → el FR5 entra despacio hacia tu postura y te sigue. Otra pisada, **[S]**, **[A]**, **[I]** o **[Q]** → desarmado y quieto.
+- Sin pedal configurado (`TELEOP_FR5_PEDAL = None`) el FR5 real no se arma nunca.
+
 ### Gemelo Digital (sliders)
 - Se abre una ventana con un slider por articulación, en **grados de la controladora** (los mismos que la WebApp del FR5).
 - **[A]** en la ventana de la cámara activa la mano (como siempre). El brazo NO sigue a las cámaras.

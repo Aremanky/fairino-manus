@@ -1143,11 +1143,18 @@ TELEOP_FR5_SUAVE_ACEL = 20.0
 # (solo para el simulador). Ver skill_shield/teleop_fr5/pedal.py.
 TELEOP_FR5_V_ENTRADA         = 0.15     # rad/s (≈ 8,6 °/s): pedido 0,1-0,2
 TELEOP_FR5_ENTRADA_FIN_RAD   = 0.05     # rad (≈ 3°) por joint: aquí acaba la entrada lenta
-TELEOP_FR5_PEDAL             = "tecla"  # "tecla" | "evdev" | None
+# 9-nov: HOMBRE MUERTO → el brazo se mueve SOLO mientras se pisa / se mantiene la tecla.
+#   "teclado": mantener la P en la ventana de la cámara (mientras no haya pedal físico)
+#   "evdev":   pedal USB físico (TELEOP_FR5_PEDAL_EVDEV)
+#   "tecla":   cada pulsación alterna (OpenCV no ve cuándo se suelta): solo como reserva
+TELEOP_FR5_PEDAL             = "teclado"  # "teclado" | "evdev" | "tecla" | None
 TELEOP_FR5_PEDAL_TECLAS      = (ord("p"), ord("P"), 112)   # modo "tecla": códigos de cv2.waitKeyEx
-TELEOP_FR5_PEDAL_EVDEV       = None     # modo "evdev": "/dev/input/by-id/..." o parte del nombre
+TELEOP_FR5_PEDAL_EVDEV       = None     # modo "evdev": "/dev/input/by-id/...", parte del nombre,
+                                        # o None = buscarlo solo (nombre con "pedal", "foot"...)
 TELEOP_FR5_PEDAL_EVDEV_CODIGO = None    # código de la tecla del pedal (None = cualquiera)
 TELEOP_FR5_PEDAL_HOMBRE_MUERTO = True   # modo "evdev": armado solo MIENTRAS se pisa
+TELEOP_FR5_PEDAL_EXCLUSIVO   = True     # modo "evdev": tomarlo en exclusiva (no escribe teclas)
+TELEOP_FR5_PEDAL_TECLADO_CODIGO = 25    # modo "teclado": código evdev de la tecla (25 = KEY_P)
 
 # ── OBSTÁCULOS Y ZONAS PROHIBIDAS DE LA IK (5-nov) ─────────────────────────────────────
 # Antes la IK solo evitaba el suelo y el soporte de hombros. Ahora también estas CAJAS
@@ -1276,7 +1283,8 @@ TELEOP_FR5_DIAG_ETIQUETA = "tpose"
 #     FR5_VEL_APROX_DEG_S hasta estar a < FR5_DESFASE_MAX_DEG.
 #   · Desarmar, [S], [A] o salir de teleoperación (IA, demo, [Q]) → ServoMoveEnd: quieto.
 # Probarlo SOLO, sin cámaras:  python -m skill_shield.hardware.fr5_servo [--real] [--oscilar 2]
-FR5_REAL_ACTIVO = False          # True = arrancar el proceso fr5_servo con Skill_Shield_Nivel_6
+FR5_REAL_ACTIVO = False          # True = arrancar fr5_servo también en SIMULACION (en los modos con
+                                 # hardware se arranca solo: TELEOP_REAL_* / SLIDERS_* más abajo)
 FR5_SIMULACRO   = True           # True = conecta y lee la pose, pero NO manda ServoJ (1ª prueba)
 FR5_IP          = "192.168.58.2" # IP de fábrica de la controladora (el PC en 192.168.58.x)
 FR5_SDK_RUTA    = None           # carpeta que CONTIENE fairino/ (SDK oficial, no está en PyPI)
@@ -1296,6 +1304,28 @@ FR5_SIGNO       = (1, 1, 1, 1, 1, 1)
 FR5_OFFSET_DEG  = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 FR5_PRIORIDAD_RT = 50            # SCHED_FIFO si hay permisos (si no, prioridad normal)
 FR5_CPU          = None          # núcleo fijo para el proceso (None = cualquiera)
+
+# ── MODO HARDWARE_REAL (9-nov): teleoperación con cámaras + FR5 FÍSICO ──────────────────────
+# "Mano Física (USB) + Gemelo Digital" del menú. El FR5 se arranca en este modo aunque
+# FR5_REAL_ACTIVO sea False. Seguridad, igual que hasta ahora con el pedal:
+#   [A] + T-pose calibra (el robot NO se mueve) → PEDAL arma: entra despacio
+#   (TELEOP_FR5_V_ENTRADA) hacia tu postura y te sigue → PEDAL otra vez, [S], [A], [I], [Q]
+#   o salir de la teleoperación → desarmado (ServoMoveEnd, quieto).
+# Con el FR5 real el brazo SOLO se arma con TELEOP_FR5_V2 = True y un pedal ("tecla"/"evdev");
+# con TELEOP_FR5_PEDAL = None no se arma nunca.
+TELEOP_REAL_CON_FR5           = True    # arrancar fr5_servo en este modo
+TELEOP_REAL_FR5_SIMULACRO     = False   # True = conecta y lee, pero NO manda ServoJ (prueba en seco)
+TELEOP_REAL_FR5_VEL_MAX_DEG_S = 30.0    # tope de fr5_servo en este modo (°/s, por joint);
+                                        # subir hacia FR5_VEL_MAX_DEG_S cuando esté probado
+
+# ── GEMELO DIGITAL Y BRAZO FANTASMA (9-nov) ───────────────────────────────────────────────
+# Con el FR5 conectado, el brazo de MuJoCo enseña la pose REAL del robot (no el comando) y
+# un brazo FANTASMA translúcido enseña el OBJETIVO (IK de teleoperación o sliders), con la
+# punta objetivo en verde y la punta real en rojo. Sin FR5: brazo simulado + fantasma.
+GEMELO_POSE_REAL      = True          # brazo de MuJoCo = pose leída del FR5
+FANTASMA_ACTIVO       = True          # dibujar el brazo fantasma y las dos puntas
+FANTASMA_CUERPO_PUNTA = "mano_mount"  # cuerpo del MJCF que se usa como punta del brazo
+GEMELO_DEBUG          = True          # cada 2 s: pose real vs simulador vs comando (terminal)
 
 # ── MODO GEMELO_SLIDERS (9-nov): mano con guante + BRAZO con una ventana de sliders ─────────
 # Se elige en el menú de arranque. La mano funciona igual que en HARDWARE_REAL; el brazo NO
