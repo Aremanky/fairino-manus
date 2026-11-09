@@ -518,7 +518,7 @@ def main():
 
     print("\n  Controles: [A] Activar | [S] Standby | [G] Grabar | "
           "[E] Entrenar tarea actual | [Shift+E] Entrenar todas | [P] Pelota ON/OFF | [I] Modo IA (red neuronal) | "
-          "[M] Demo Maniobra Autónoma | [4] Taladro | [5] Demo taladro | [R] Diagnóstico T-pose (v2) | [Q] Salir\n")
+          "[M] Demo Maniobra Autónoma | [4] Taladro | [5] Demo taladro | [R] Diagnóstico T-pose (v2) | [X] Reset errores FR5 | [Q] Salir\n")
 
     # Asegurar que el destornillador empieza oculto (fuera de escena)
     _ocultar_destornillador(modelo, datos)
@@ -2231,11 +2231,12 @@ def main():
                     # bloque del FR5 de abajo arma / desarma el ServoJ igual que con el pedal.
                     if sliders is not None:
                         _fr5_ok = fr5 is not None and fr5.conectado
-                        _q_real_sl = fr5.q_real_rad() if _fr5_ok else None
+                        _en_linea_sl = fr5 is not None and fr5.en_linea   # (también en ERROR)
+                        _q_real_sl = fr5.q_real_rad() if _en_linea_sl else None
                         if _q_real_sl is not None:
                             _q_vis_sl = sliders.a_grados(_q_real_sl)
                             sliders.publicar_real(_q_vis_sl, de_fr5=True)
-                        elif not _fr5_ok:
+                        elif not _en_linea_sl:
                             _q_vis_sl = sliders.a_grados([datos.ctrl[_i] for _i in _idx_ctrl_fr5])
                             sliders.publicar_real(_q_vis_sl, de_fr5=False)
                         else:
@@ -2275,6 +2276,24 @@ def main():
                     # nada y MuJoCo (y el generador) se copian de su postura REAL en cada vuelta:
                     # lo que ves es el robot de verdad. Al armar, se sincroniza una última vez y
                     # empieza el ServoJ desde ahí (sin pinchar el robot y sin salto).
+                    # 9-nov: FR5 en ERROR (colisión, fallo de ServoJ…) → todo desarmado; [X] lo recupera
+                    if fr5 is not None and fr5.en_error:
+                        if fr5_enviando:
+                            fr5_enviando = False
+                            if teleop_v2 is not None:
+                                teleop_v2.desarmar()
+                            if pedal_v2 is not None:
+                                pedal_v2.desarmar()
+                            _c_err = fr5.estado()["codigo"]
+                            print(f"⚠ FR5 en ERROR (código {_c_err[0]}/{_c_err[1]}) → DESARMADO. "
+                                  "Pulsa [X] (o RESET en los sliders) para borrar el error.")
+                        cv2.putText(frame_bgr, "FR5 ERROR " + "/".join(str(_v) for _v in fr5.estado()["codigo"])
+                                    + "  -  [X] reset", (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    if sliders is not None and sliders.pide_reset() and fr5 is not None:
+                        fr5.resetear()
+                        fr5_enviando = False
+                        print("🔄 RESET del FR5 pedido desde los sliders")
+
                     if fr5 is not None and fr5.conectado:
                         if sliders is not None:
                             _armar_fr5 = sliders.armado     # GEMELO_SLIDERS: ARMAR de la ventana
@@ -2399,6 +2418,21 @@ def main():
                             estado["punto_neutro_brazo"] = tuple(datos.xpos[mano_mount_id])
                         print("✅ Cámara ACTIVA — muñeca calibrada en posición neutra "
                               "(el brazo parte de su posición actual).")
+
+                    elif key in (ord("x"), ord("X")):
+                        # 9-nov: recuperación rápida tras una colisión (falsa o no) o un fallo
+                        if fr5 is not None and fr5.en_linea:
+                            fr5.resetear()
+                            fr5_enviando = False
+                            if teleop_v2 is not None:
+                                teleop_v2.desarmar()
+                            if pedal_v2 is not None:
+                                pedal_v2.desarmar()
+                            if sliders is not None:
+                                sliders.desarmar("RESET del FR5: vuelve a ARMAR.")
+                            print("🔄 [X] RESET del FR5 (ResetAllError) → vuelve a armar")
+                        else:
+                            print("ℹ [X] No hay FR5 conectado")
 
                     elif key == ord("s"):
                         estado["camara_activa"] = False

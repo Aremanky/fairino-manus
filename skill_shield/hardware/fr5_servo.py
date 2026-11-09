@@ -69,6 +69,13 @@ PARAMETROS_POR_DEFECTO = dict(
     FR5_TIMEOUT_CONEXION_S=5.0,
     FR5_FIJAR_LIMITES_BLANDOS=False,  # escribir los límites blandos en la controladora al conectar
     FR5_LIMITES_BLANDOS_DEG=None,     # ((min, max) × 6) en grados; None = no tocar
+    # 9-nov: detección de colisiones (None = no tocar lo que tenga la controladora)
+    FR5_CARGA_KG=None,                # masa de lo que cuelga de la brida (mano + adaptador), kg
+    FR5_CARGA_CDM_MM=None,            # su centro de masas en el marco de la brida (x, y, z) mm
+    FR5_ANGULO_INSTALACION=None,      # (inclinación, giro) en grados, como en la WebApp
+    FR5_NIVEL_COLISION=None,          # 6 niveles 1-10 (más alto = hace falta más fuerza)
+    FR5_ESTRATEGIA_COLISION=None,     # 0 pausa con error · 2 para con error · (ver SDK)
+    FR5_PARAR_SI_COLISION=True,       # colisión/fallo durante el ServoJ → dejar de enviar YA
 )
 
 # Índices de la memoria compartida de estado
@@ -76,7 +83,8 @@ _E_ESTADO, _E_CICLOS, _E_RETRASOS, _E_ERR, _E_PER_MED, _E_PER_MAX, _E_SJ_MED, _E
 _E_QCMD = 8           # 8..13: último comando enviado (o pose real si no se envía), grados
 _E_QREAL = 14         # 14..19: pose REAL leída del robot (grados)
 _E_TREAL = 20         # time.monotonic() de esa lectura
-_N_ESTADO = 21
+_E_MAIN, _E_SUB, _E_COLIS, _E_RSTATE = 21, 22, 23, 24   # 9-nov: códigos de fallo de la controladora
+_N_ESTADO = 25
 PERIODO_LECTURA_S = 0.02    # pose real: 50 Hz (del paquete de estado en tiempo real, sin RPC)
 
 
@@ -96,6 +104,7 @@ class FR5Servo:
         self._obj = self._ctx.Array("d", 8)      # q0..q5 (rad), t_publicación, nº de secuencia
         self._est = self._ctx.Array("d", _N_ESTADO)
         self._habilitado = self._ctx.Value("i", 0)
+        self._reset = self._ctx.Value("i", 0)    # 9-nov: petición de ResetAllError
         self._salir = self._ctx.Event()
         self._listo = self._ctx.Event()          # el hijo ya intentó conectar
         self._proc = None
@@ -110,7 +119,7 @@ class FR5Servo:
         """Arranca el proceso y (opcionalmente) espera a saber si conectó. Devuelve True si OK."""
         self._proc = self._ctx.Process(
             target=_proceso_fr5_servo, name="fr5_servo", daemon=True,
-            args=(self.p, self._obj, self._est, self._habilitado, self._salir, self._listo))
+            args=(self.p, self._obj, self._est, self._habilitado, self._salir, self._listo, self._reset))
         self._proc.start()
         if esperar:
             self._listo.wait(self.p["FR5_TIMEOUT_CONEXION_S"] + 2.0)
@@ -131,10 +140,27 @@ class FR5Servo:
         """True: empieza a mandar ServoJ (desde la pose real) · False: ServoMoveEnd y espera."""
         self._habilitado.value = 1 if si else 0
 
+    def resetear(self):
+        """9-nov: ServoMoveEnd + ResetAllError en la controladora (tras una colisión o un fallo).
+        El brazo queda DESARMADO: hay que volver a armar (pedal / ARMAR)."""
+        self._habilitado.value = 0
+        self._reset.value = 1
+
     @property
     def conectado(self):
+        """Conectado y SIN error: se le pueden mandar comandos."""
         return self._proc is not None and self._proc.is_alive() and \
             int(self._est[_E_ESTADO]) in (ESPERA, ACERCANDO, ENVIANDO)
+
+    @property
+    def en_linea(self):
+        """Conectado, aunque esté en ERROR (la pose real se sigue leyendo)."""
+        return self._proc is not None and self._proc.is_alive() and \
+            int(self._est[_E_ESTADO]) in (ESPERA, ACERCANDO, ENVIANDO, ERROR)
+
+    @property
+    def en_error(self):
+        return self.en_linea and int(self._est[_E_ESTADO]) == ERROR
 
     def estado(self):
         e = list(self._est[:])
@@ -144,12 +170,15 @@ class FR5Servo:
                     periodo_medio_ms=e[_E_PER_MED], periodo_max_ms=e[_E_PER_MAX],
                     servoj_medio_ms=e[_E_SJ_MED], servoj_max_ms=e[_E_SJ_MAX],
                     q_deg=e[_E_QCMD:_E_QCMD + 6], q_real_deg=e[_E_QREAL:_E_QREAL + 6],
-                    edad_real_s=(time.monotonic() - e[_E_TREAL]) if e[_E_TREAL] else None)
+                    edad_real_s=(time.monotonic() - e[_E_TREAL]) if e[_E_TREAL] else None,
+                    codigo=(int(e[_E_MAIN]), int(e[_E_SUB])), colision=bool(e[_E_COLIS]),
+                    estado_robot=int(e[_E_RSTATE]))
 
     def q_real_rad(self, max_edad_s=0.3):
         """Pose REAL del FR5 en el convenio del MJCF (rad), o None si no hay lectura reciente.
-        Inversa de q_FR5[°] = SIGNO · grados(q_MJCF) + OFFSET."""
-        if not self.conectado:
+        Inversa de q_FR5[°] = SIGNO · grados(q_MJCF) + OFFSET. (También en ERROR: el gemelo
+        sigue enseñando el robot.)"""
+        if not self.en_linea:
             return None
         e = self._est[:]
         if not e[_E_TREAL] or time.monotonic() - e[_E_TREAL] > max_edad_s:
@@ -322,6 +351,63 @@ def _ret(r):
     return r[0] if isinstance(r, (tuple, list)) else r
 
 
+def _leer_codigos(robot):
+    """(main_code, sub_code, colisión, estado del robot) del paquete de estado (sin RPC)."""
+    try:
+        r = robot.GetRobotRealTimeState()
+        pkg = r[1] if isinstance(r, (tuple, list)) else r
+        return (int(pkg.main_code), int(pkg.sub_code), int(getattr(pkg, "collisionState", 0)),
+                int(pkg.robot_state))
+    except Exception:
+        return None
+
+
+def _configurar_colisiones(robot, p):
+    """9-nov: enseña (y si config lo pide, ESCRIBE) lo que decide las colisiones falsas:
+    carga en la brida, ángulo de instalación, niveles y estrategia de colisión."""
+    try:
+        r = robot.GetRobotInstallAngle()
+        if _ret(r) == 0:
+            print(f"  fr5_servo: ángulo de instalación en la controladora: inclinación "
+                  f"{float(r[1][0]):.1f}°, giro {float(r[1][1]):.1f}°")
+    except Exception:
+        pass
+    try:
+        r = robot.GetRobotRealTimeState()
+        pkg = r[1] if isinstance(r, (tuple, list)) else r
+        print("  fr5_servo: niveles de colisión en la controladora: "
+              + " ".join(f"j{i + 1}={int(v)}" for i, v in enumerate(list(pkg.collisionLevel)[:6])))
+    except Exception:
+        pass
+    ordenes = []
+    if p.get("FR5_CARGA_KG") is not None:
+        ordenes.append(("carga", lambda: robot.SetLoadWeight(0, float(p["FR5_CARGA_KG"])),
+                        f"{float(p['FR5_CARGA_KG']):.2f} kg"))
+    if p.get("FR5_CARGA_CDM_MM") is not None:
+        x, y, z = (float(v) for v in p["FR5_CARGA_CDM_MM"])
+        ordenes.append(("centro de masas", lambda: robot.SetLoadCoord(x, y, z, 0), f"({x:.0f}, {y:.0f}, {z:.0f}) mm"))
+    if p.get("FR5_ANGULO_INSTALACION") is not None:
+        ya, za = (float(v) for v in p["FR5_ANGULO_INSTALACION"])
+        ordenes.append(("ángulo de instalación", lambda: robot.SetRobotInstallAngle(ya, za),
+                        f"inclinación {ya:.1f}°, giro {za:.1f}°"))
+    if p.get("FR5_NIVEL_COLISION") is not None:
+        niv = [float(v) for v in p["FR5_NIVEL_COLISION"]]
+        ordenes.append(("niveles de colisión", lambda: robot.SetAnticollision(0, niv, 0),
+                        " ".join(f"{v:.0f}" for v in niv)))
+    if p.get("FR5_ESTRATEGIA_COLISION") is not None:
+        est = int(p["FR5_ESTRATEGIA_COLISION"])
+        ordenes.append(("estrategia de colisión", lambda: robot.SetCollisionStrategy(est), str(est)))
+    for nombre, f, txt in ordenes:
+        if p["FR5_SIMULACRO"]:
+            print(f"  fr5_servo [SIMULACRO]: pondría {nombre} = {txt}")
+            continue
+        try:
+            rc = _ret(f())
+        except Exception as e:
+            rc = f"excepción: {e}"
+        print(f"  fr5_servo: {nombre} = {txt} → " + ("✓" if rc == 0 else f"⚠ código {rc}"))
+
+
 def paso_limitado(q, v, objetivo, v_max, a_max, dt):
     """
     Un paso hacia `objetivo` con |v| ≤ v_max y |a| ≤ a_max, frenando a tiempo para no
@@ -340,7 +426,7 @@ def paso_limitado(q, v, objetivo, v_max, a_max, dt):
     return q_nuevo, v
 
 
-def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo):
+def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
     est[_E_ESTADO] = INICIANDO
     ppid = os.getppid()
     robot = None
@@ -372,6 +458,7 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo):
         print(f"✓ fr5_servo: FR5 conectado, pose real (°) = "
               f"[{', '.join(f'{v:.1f}' for v in q_real[:6])}]")
         lim_blandos = _limites_blandos(robot, p, q_real)
+        _configurar_colisiones(robot, p)
         listo.set()
         _prioridad_tiempo_real(p)
 
@@ -397,6 +484,7 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo):
         t_dead = time.perf_counter() + dt
         t_ult_lectura = 0.0
         leer_real = _LectorPoseReal(robot)
+        t_ult_codigos = 0.0
 
         def _publicar_real(ahora_):
             q_ = leer_real(ahora_)
@@ -410,6 +498,53 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo):
                 print("⚠ fr5_servo: el proceso principal ha desaparecido → paro")
                 break
             ahora = time.perf_counter()
+
+            # 9-nov: códigos de fallo / colisión (paquete de estado, sin RPC) cada 0,1 s
+            if ahora - t_ult_codigos >= 0.1:
+                t_ult_codigos = ahora
+                c_ = _leer_codigos(robot)
+                if c_ is not None:
+                    est[_E_MAIN], est[_E_SUB], est[_E_COLIS], est[_E_RSTATE] = c_
+                    if enviando and p.get("FR5_PARAR_SI_COLISION", True) and (c_[2] or c_[0]):
+                        print(f"✗ fr5_servo: la controladora marca "
+                              f"{'COLISIÓN' if c_[2] else 'FALLO'} (código {c_[0]}/{c_[1]}) → dejo de "
+                              "enviar. [X] / RESET para borrar el error y volver a armar")
+                        try:
+                            robot.ServoMoveEnd()
+                        except Exception:
+                            pass
+                        enviando = False
+                        habilitado.value = 0
+                        est[_E_ESTADO] = ERROR
+
+            # 9-nov: recuperación rápida (ResetAllError) a petición del programa
+            if reset is not None and reset.value:
+                reset.value = 0
+                habilitado.value = 0
+                if enviando and not p["FR5_SIMULACRO"]:
+                    try:
+                        robot.ServoMoveEnd()
+                    except Exception:
+                        pass
+                enviando = False
+                try:
+                    rc = _ret(robot.ResetAllError())
+                except Exception as e:
+                    rc = f"excepción: {e}"
+                time.sleep(0.3)
+                c_ = _leer_codigos(robot)
+                if c_ is not None:
+                    est[_E_MAIN], est[_E_SUB], est[_E_COLIS], est[_E_RSTATE] = c_
+                errores_seg = 0
+                if rc == 0 and (c_ is None or (c_[0] == 0 and not c_[2])):
+                    est[_E_ESTADO] = ESPERA
+                    print("🔄 fr5_servo: errores borrados (ResetAllError) → en espera; vuelve a armar")
+                else:
+                    print(f"⚠ fr5_servo: ResetAllError → {rc}; código {c_[:2] if c_ else '?'}. Si sigue, "
+                          "puede que haya que sacarlo del tope o rearmarlo en la WebApp")
+                    est[_E_ESTADO] = ERROR if (c_ and (c_[0] or c_[2])) else ESPERA
+                t_dead, t_ult = time.perf_counter() + dt, None
+                continue
 
             if not habilitado.value:
                 if enviando:

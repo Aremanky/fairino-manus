@@ -31,7 +31,7 @@ import time
 # Estado del FR5 que el principal enseña en la ventana
 SIN_FR5, FR5_ESPERA, FR5_ENVIANDO, FR5_ERROR = range(4)
 TEXTO_FR5 = {SIN_FR5: "sin FR5: solo simulador", FR5_ESPERA: "FR5 conectado (quieto)",
-             FR5_ENVIANDO: "FR5 recibiendo ServoJ", FR5_ERROR: "FR5 con ERROR (mira la terminal)"}
+             FR5_ENVIANDO: "FR5 recibiendo ServoJ", FR5_ERROR: "FR5 con ERROR: pulsa RESET errores FR5"}
 
 _N_MSG = 256
 
@@ -67,6 +67,7 @@ class SlidersBrazo:
         self._armado = self._ctx.Value("i", 0)
         self._vel = self._ctx.Value("d", float(velocidad))
         self._fr5 = self._ctx.Value("i", SIN_FR5)
+        self._reset = self._ctx.Value("i", 0)      # 9-nov: botón RESET errores FR5
         self._msg = self._ctx.Array("c", _N_MSG)
         self._salir = self._ctx.Event()
         self._proc = None
@@ -90,7 +91,7 @@ class SlidersBrazo:
         self._proc = self._ctx.Process(
             target=_proceso_sliders, name="sliders_brazo", daemon=True,
             args=(self.lim, self._obj, self._real, self._armado, self._vel, self._fr5,
-                  self._msg, self._salir))
+                  self._msg, self._salir, self._reset))
         self._proc.start()
         print("🎚️  Sliders del brazo: ventana abierta (ARMAR para mover el brazo). Rangos (°): "
               + "  ".join(f"j{i + 1}[{a:.0f},{b:.0f}]" for i, (a, b) in enumerate(self.lim)))
@@ -147,6 +148,13 @@ class SlidersBrazo:
     def armado(self):
         return self.vivo and bool(self._armado.value)
 
+    def pide_reset(self):
+        """True (una vez) si se ha pulsado RESET errores FR5 en la ventana."""
+        if self._reset.value:
+            self._reset.value = 0
+            return True
+        return False
+
     def recien_armado(self):
         """True solo en la primera llamada tras pulsar ARMAR."""
         a = self.armado
@@ -170,7 +178,7 @@ class SlidersBrazo:
 # PROCESO DE LA VENTANA
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _proceso_sliders(lim, obj, real, armado, vel, fr5, msg, salir):
+def _proceso_sliders(lim, obj, real, armado, vel, fr5, msg, salir, reset=None):
     ppid = os.getppid()
     try:
         import tkinter as tk
@@ -182,7 +190,8 @@ def _proceso_sliders(lim, obj, real, armado, vel, fr5, msg, salir):
     except Exception as e:     # sin pantalla, etc.
         print(f"✗ sliders_brazo: no puedo abrir la ventana ({e})")
         return
-    _VentanaSliders(root, lim, obj, real, armado, vel, fr5, msg, salir, ppid)
+    v = _VentanaSliders(root, lim, obj, real, armado, vel, fr5, msg, salir, ppid)
+    v.reset_v = reset
     try:
         root.mainloop()
     finally:
@@ -240,6 +249,8 @@ class _VentanaSliders:
         tk.Button(barra, text="STOP", width=10, font=("TkDefaultFont", 12, "bold"),
                   bg="#c62828", fg="white", command=self.stop).pack(side="left", padx=10)
         tk.Button(barra, text="Objetivo = pose real", command=self.copiar_real).pack(side="left", padx=4)
+        tk.Button(barra, text="Imprimir pose", command=self.imprimir_pose).pack(side="left", padx=4)
+        tk.Button(barra, text="RESET errores FR5", command=self.pedir_reset).pack(side="left", padx=4)
 
         self.lbl_estado = tk.Label(f, text="", anchor="w", justify="left", font=("TkDefaultFont", 10))
         self.lbl_estado.grid(row=8, column=0, columnspan=7, sticky="w")
@@ -311,6 +322,25 @@ class _VentanaSliders:
     def stop(self):
         self.armado_v.value = 0
         self._aplicar_estado_widgets(False)
+
+    def pedir_reset(self):
+        """9-nov: borra el error del FR5 (colisión, fallo) sin reiniciar nada. Queda DESARMADO."""
+        self.stop()
+        if getattr(self, "reset_v", None) is not None:
+            self.reset_v.value = 1
+            self._aviso("RESET pedido: cuando desaparezca el error, vuelve a ARMAR.")
+
+    def imprimir_pose(self):
+        """9-nov: escribe en la terminal la pose REAL como una línea de episodio_poses.txt."""
+        q, de_fr5, t = self._pose_real()
+        if not t:
+            self._aviso("Aún no hay pose real que imprimir.")
+            return
+        self._n_impresas = getattr(self, "_n_impresas", 0) + 1
+        linea = ", ".join(f"{v:.1f}" for v in q)
+        print(f"\n📋 pose{self._n_impresas}: {linea}"
+              f"    # {'FR5 real' if de_fr5 else 'simulador'} (cópiala en episodio_poses.txt)", flush=True)
+        self._aviso(f"Pose {self._n_impresas} impresa en la terminal.")
 
     def copiar_real(self):
         q, _, t = self._pose_real()

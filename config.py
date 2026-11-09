@@ -1304,6 +1304,20 @@ FR5_SIGNO       = (1, 1, 1, 1, 1, 1)
 FR5_OFFSET_DEG  = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 FR5_PRIORIDAD_RT = 50            # SCHED_FIFO si hay permisos (si no, prioridad normal)
 FR5_CPU          = None          # núcleo fijo para el proceso (None = cualquiera)
+# ── COLISIONES FALSAS (9-nov) ──────────────────────────────────────────────────────────
+# La controladora detecta una colisión cuando el par que mide en un joint no cuadra con el que
+# espera según su modelo. Ese modelo necesita saber CUÁNTO PESA lo que cuelga de la brida y
+# CÓMO está montada la base respecto a la gravedad: si cree que el robot está en el suelo sin
+# carga y en realidad está inclinado 135° con la mano puesta, con el brazo estirado J2 da
+# "colisión" sin tocar nada. Valores en diagnosticos/ajustar_gemelo.py (apartado 3).
+# None = no tocar lo que ya tenga la controladora. Solo se escriben fuera de SIMULACRO.
+# Comprobación: en modo arrastre de la WebApp, al soltar el brazo debe quedarse QUIETO.
+FR5_CARGA_KG            = None    # p. ej. 1.8 (pesad la mano + adaptador)
+FR5_CARGA_CDM_MM        = None    # p. ej. (0, 10, 60): centro de masas en la brida, mm
+FR5_ANGULO_INSTALACION  = None    # (inclinación, giro) en grados, p. ej. (135.0, 90.0)
+FR5_NIVEL_COLISION      = None    # 6 niveles 1-10, más alto = menos sensible, p. ej. (5, 7, 5, 4, 4, 4)
+FR5_ESTRATEGIA_COLISION = None    # 0 = pausa con error (lo normal) · 2 = para con error
+FR5_PARAR_SI_COLISION   = True    # colisión/fallo con el ServoJ en marcha → dejar de enviar YA
 
 # ── MODO HARDWARE_REAL (9-nov): teleoperación con cámaras + FR5 FÍSICO ──────────────────────
 # "Mano Física (USB) + Gemelo Digital" del menú. El FR5 se arranca en este modo aunque
@@ -1326,6 +1340,11 @@ GEMELO_POSE_REAL      = True          # brazo de MuJoCo = pose leída del FR5
 FANTASMA_ACTIVO       = True          # dibujar el brazo fantasma y las dos puntas
 FANTASMA_CUERPO_PUNTA = "mano_mount"  # cuerpo del MJCF que se usa como punta del brazo
 GEMELO_DEBUG          = True          # cada 2 s: pose real vs simulador vs comando (terminal)
+
+# ── EPISODIO POR POSES (9-nov): episodio_poses.py ───────────────────────────────────────
+# Brazo de pose en pose con Enter (poses en episodio_poses.txt) + mano con el guante MANUS.
+EPISODIO_FR5_VEL_MAX_DEG_S = 20.0   # °/s por joint (la 1ª ida a la inicial va a FR5_VEL_APROX_DEG_S)
+EPISODIO_FR5_SIMULACRO     = False  # True = conecta y lee, pero NO mueve el FR5
 
 # ── MODO GEMELO_SLIDERS (9-nov): mano con guante + BRAZO con una ventana de sliders ─────────
 # Se elige en el menú de arranque. La mano funciona igual que en HARDWARE_REAL; el brazo NO

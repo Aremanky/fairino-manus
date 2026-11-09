@@ -1,0 +1,7 @@
+# Episodio de ejemplo: una pose por línea, 6 ángulos en grados de la CONTROLADORA
+# (los de la WebApp / la ventana de sliders: botón "Imprimir pose").
+# La 1ª es la posición INICIAL; cada Enter lleva a la siguiente.
+# ⚠ SUSTITUYE ESTOS VALORES por poses tuyas comprobadas con los sliders.
+inicial:  65.2, -60.8, 69.8, -8.2, 97.4, 2.0
+aproximar: 65.2, -55.8, 74.8, -8.2, 97.4, 2.0
+coger:    65.2, -50.8, 79.8, -8.2, 97.4, 2.0

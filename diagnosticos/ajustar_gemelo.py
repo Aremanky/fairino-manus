@@ -175,6 +175,39 @@ def comprobar_cadena(gem, q_fr5, brida_mm):
     return base[0] < 0.010
 
 
+def carga_e_instalacion(gem, robot=None):
+    """9-nov: lo que la controladora necesita para no ver colisiones FALSAS: el peso de la mano
+    (y su centro de masas) y cómo está montada la base respecto a la gravedad."""
+    m, d = gem.m, gem.d
+    mujoco.mj_forward(m, d)
+    print("\n── 3) CARGA E INSTALACIÓN (para la detección de colisiones) ──")
+    mm = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, getattr(cfg, "FANTASMA_CUERPO_PUNTA", "mano_mount"))
+    if mm >= 0:
+        R3 = d.xmat[gem.w3].reshape(3, 3)
+        p_brida = d.xpos[gem.w3] + R3[:, 2] * D6_BRIDA
+        cdm = R3.T @ (d.subtree_com[mm] - p_brida) * 1000.0
+        print(f"   Mano + adaptador según el modelo: {m.body_subtreemass[mm]:.2f} kg, centro de masas en la "
+              f"brida ≈ ({cdm[0]:.0f}, {cdm[1]:.0f}, {cdm[2]:.0f}) mm")
+        print("   → mejor PESAR la mano de verdad; el centro de masas sirve de punto de partida")
+    Rb = d.xmat[gem.base].reshape(3, 3)
+    inclin = math.degrees(math.acos(float(np.clip(Rb[:, 2] @ np.array([0, 0, 1.0]), -1, 1))))
+    g_b = Rb.T @ np.array([0, 0, -1.0])
+    giro = math.degrees(math.atan2(-g_b[1], g_b[0])) % 360.0
+    print(f"   Base del FR5 (modelo): inclinación {inclin:.0f}° (0 = suelo, 90 = pared, 180 = techo); "
+          f"gravedad en ejes de la base ({g_b[0]:+.2f}, {g_b[1]:+.2f}, {g_b[2]:+.2f})")
+    print(f"   → giro de instalación probable ≈ {giro:.0f}° (el convenio del giro de FAIRINO no está "
+          "documentado: compruébalo con la prueba del modo arrastre)")
+    if robot is not None:
+        try:
+            r = robot.GetRobotInstallAngle()
+            if isinstance(r, (tuple, list)) and r[0] == 0:
+                print(f"   Controladora AHORA: inclinación {float(r[1][0]):.1f}°, giro {float(r[1][1]):.1f}°"
+                      + ("   ⚠ la cree en el SUELO: con la base inclinada verá colisiones falsas"
+                         if abs(float(r[1][0])) < 1.0 and inclin > 5 else ""))
+        except Exception as e:
+            print(f"   (no puedo leer el ángulo de instalación: {e})")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Ajustar el gemelo digital al FR5 real (solo lectura)")
     ap.add_argument("--ip", default=getattr(cfg, "FR5_IP", "192.168.58.2"))
@@ -200,6 +233,8 @@ def main():
             comprobar_cadena(gem, lector.q, lector.brida)
         else:
             print("⚠ La controladora no da la pose de la brida: me salto la comprobación de la cadena")
+
+    carga_e_instalacion(gem, lector.robot if lector is not None else None)
 
     estado = {"giro": 0.0, "salir": False}
     print("\n── 2) MONTAJE: compara el visor con el robot real ──")
