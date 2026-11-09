@@ -188,16 +188,16 @@ def main():
     # porque escribe su etiqueta en stdout.
     import subprocess
     global MODO_EJECUCION
-    _BOTON_SLIDERS = "🎚️  Gemelo Digital (sliders)"
+    _BOTON_SIMULACION = "💻  Simulación Virtual (MuJoCo)"
     try:
         resultado = subprocess.run(
             [
                 'zenity', '--question',
                 '--title=Skill Shield Nivel 6',
                 '--text=¿Qué modo de operación deseas iniciar?',
-                '--ok-label=💻  Simulación Virtual (MuJoCo)',
-                '--cancel-label=🤖  Mano Física (USB) + Gemelo Digital',
-                f'--extra-button={_BOTON_SLIDERS}',
+                f'--extra-button={_BOTON_SIMULACION}',                  # 1º (arriba)
+                '--ok-label=🎚️  Gemelo Digital (sliders)',              # 2º (en medio)
+                '--cancel-label=🤖  Mano Física (USB) + Gemelo Digital', # 3º (abajo)
                 '--width=420',
                 '--height=50',
             ],
@@ -206,14 +206,14 @@ def main():
         stderr_txt = resultado.stderr.decode(errors="ignore").strip() if resultado.stderr else ""
         stdout_txt = resultado.stdout.decode(errors="ignore").strip() if resultado.stdout else ""
 
-        if resultado.returncode == 0:
-            # Botón OK pulsado → Simulación
+        if resultado.returncode == 1 and stdout_txt == _BOTON_SIMULACION:
+            # Botón extra (arriba) → Simulación
             MODO_EJECUCION = "SIMULACION"
-        elif resultado.returncode == 1 and stdout_txt == _BOTON_SLIDERS:
-            # Botón extra → gemelo digital con el brazo en sliders
+        elif resultado.returncode == 0:
+            # Botón OK (en medio) → gemelo digital con el brazo en sliders
             MODO_EJECUCION = "GEMELO_SLIDERS"
         elif resultado.returncode == 1 and not stdout_txt and not stderr_txt:
-            # Botón Cancel pulsado limpiamente, sin errores → el usuario eligió Hardware real
+            # Botón Cancelar (abajo) → mano física + gemelo digital normal
             MODO_EJECUCION = "HARDWARE_REAL"
         else:
             # Cualquier otro código, o zenity escribió algo en stderr → no sabemos si el
