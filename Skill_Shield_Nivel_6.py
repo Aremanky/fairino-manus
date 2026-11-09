@@ -178,44 +178,49 @@ def main():
     # ── MENÚ DE ARRANQUE CON ZENITY (compatible con Wayland/GNOME) ──────────
     # zenity es la herramienta de diálogos nativa de GNOME, siempre visible.
     # Si no está instalada: sudo apt install zenity
-    # 9-nov: lista con 3 modos (antes una pregunta de 2 botones):
-    #   SIMULACION     → todo en MuJoCo
-    #   HARDWARE_REAL  → mano física (USB) + gemelo digital, brazo con las cámaras
-    #   GEMELO_SLIDERS → mano física + guante igual que HARDWARE_REAL, pero el BRAZO se
-    #                    mueve con la ventana de sliders (skill_shield/interfaz/sliders_brazo.py)
+    # 9-nov: la misma pregunta de siempre con un TERCER botón (--extra-button):
+    #   [OK]     💻 Simulación            → SIMULACION
+    #   [Cancel] 🤖 Mano Física + Gemelo  → HARDWARE_REAL
+    #   [Extra]  🎚️ Gemelo (sliders)       → GEMELO_SLIDERS: mano física + guante igual que
+    #            HARDWARE_REAL, pero el BRAZO se mueve con la ventana de sliders
+    #            (skill_shield/interfaz/sliders_brazo.py)
+    # zenity devuelve 1 tanto para Cancel como para el botón extra; el extra se distingue
+    # porque escribe su etiqueta en stdout.
     import subprocess
     global MODO_EJECUCION
-    _OPCIONES_MODO = {
-        "💻  Simulación Virtual (MuJoCo)": "SIMULACION",
-        "🤖  Mano Física (USB) + Gemelo Digital": "HARDWARE_REAL",
-        "🎚️  Gemelo Digital (sliders): mano con guante + brazo con sliders": "GEMELO_SLIDERS",
-    }
+    _BOTON_SLIDERS = "🎚️  Gemelo Digital (sliders)"
     try:
-        _filas = []
-        for _k, _txt_op in enumerate(_OPCIONES_MODO):
-            _filas += ["TRUE" if _k == 0 else "FALSE", _txt_op]
         resultado = subprocess.run(
             [
-                'zenity', '--list', '--radiolist',
+                'zenity', '--question',
                 '--title=Skill Shield Nivel 6',
                 '--text=¿Qué modo de operación deseas iniciar?',
-                '--column=Elegir', '--column=Modo',
-                '--width=560',
-                '--height=260',
-            ] + _filas,
+                '--ok-label=💻  Simulación Virtual (MuJoCo)',
+                '--cancel-label=🤖  Mano Física (USB) + Gemelo Digital',
+                f'--extra-button={_BOTON_SLIDERS}',
+                '--width=420',
+                '--height=50',
+            ],
             capture_output=True
         )
         stderr_txt = resultado.stderr.decode(errors="ignore").strip() if resultado.stderr else ""
-        _elegido = resultado.stdout.decode(errors="ignore").strip() if resultado.stdout else ""
+        stdout_txt = resultado.stdout.decode(errors="ignore").strip() if resultado.stdout else ""
 
-        if resultado.returncode == 0 and _elegido in _OPCIONES_MODO:
-            MODO_EJECUCION = _OPCIONES_MODO[_elegido]
+        if resultado.returncode == 0:
+            # Botón OK pulsado → Simulación
+            MODO_EJECUCION = "SIMULACION"
+        elif resultado.returncode == 1 and stdout_txt == _BOTON_SLIDERS:
+            # Botón extra → gemelo digital con el brazo en sliders
+            MODO_EJECUCION = "GEMELO_SLIDERS"
+        elif resultado.returncode == 1 and not stdout_txt and not stderr_txt:
+            # Botón Cancel pulsado limpiamente, sin errores → el usuario eligió Hardware real
+            MODO_EJECUCION = "HARDWARE_REAL"
         else:
-            # Cancelar, cerrar la ventana, otro código o zenity escribió algo en stderr →
-            # no sabemos qué quería el usuario. Por seguridad, NUNCA asumimos hardware real.
-            if stderr_txt and resultado.returncode == 0:
+            # Cualquier otro código, o zenity escribió algo en stderr → no sabemos si el
+            # usuario llegó a ver la ventana. Por seguridad, NUNCA asumimos hardware real.
+            if stderr_txt:
                 print(f"⚠️  Zenity no pudo mostrar la ventana correctamente: {stderr_txt}")
-            print("   Sin modo elegido → por seguridad, arrancando en SIMULACION.")
+            print("   Por seguridad, arrancando en SIMULACION.")
             MODO_EJECUCION = "SIMULACION"
     except FileNotFoundError:
         print("⚠️  zenity no encontrado → arrancando en SIMULACION por defecto.")
