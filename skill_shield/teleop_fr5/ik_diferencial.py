@@ -162,9 +162,26 @@ class ControlIKDiferencial:
             # y con el soporte inclinado deja fuera posturas humanas (brazo colgando: q2 ≈ −110°
             # o −174°). Aquí el hombro solo tiene los límites del FR5; codo y muñeca, la caja
             # humana como coste + margen_duro_deg como tope.
-            for i_, (a_, b_) in ((0, self.pd.banda_q1_deg), (1, self.pd.banda_q2_deg)):
+            # 9-nov: la banda de q1 se midió con la base montada como en el diseño del soporte
+            # (brazo hacia DELANTE con q1 = 0). Si la base real está girada sobre la placa
+            # (giro_base_grados, diagnosticos/ajustar_gemelo.py), la misma postura humana
+            # necesita otro q1: la banda se desplaza lo que haga falta para que "delante" siga
+            # cayendo donde caía.
+            q1_delante = self.postura.q12_para_direccion(np.asarray(self.par.ejes[2], float))[0]
+            desplaz = math.degrees(math.atan2(math.sin(q1_delante), math.cos(q1_delante)))
+            banda_q1 = (self.pd.banda_q1_deg[0] + desplaz, self.pd.banda_q1_deg[1] + desplaz)
+            for i_, (a_, b_) in ((0, banda_q1), (1, self.pd.banda_q2_deg)):
                 self.lo_h[i_] = max(lo[i_], math.radians(a_))
                 self.hi_h[i_] = min(hi[i_], math.radians(b_))
+            if abs(desplaz) > 1.0:
+                fuera_lim = (max(0.0, math.radians(banda_q1[1]) - hi[0])
+                             + max(0.0, lo[0] - math.radians(banda_q1[0])))
+                print(f"🔄 IK: base girada {desplaz:+.0f}° respecto al diseño del soporte → banda de q1 "
+                      f"[{banda_q1[0]:.0f}, {banda_q1[1]:.0f}]°")
+                if fuera_lim > math.radians(1.0):
+                    print(f"⚠ IK: {math.degrees(fuera_lim):.0f}° de la banda humana de q1 quedan FUERA del "
+                          f"recorrido del joint1 (±{math.degrees(hi[0]):.0f}°): el robot NO podrá seguir esas "
+                          "posturas. Gira el FR5 sobre la placa hasta que ajustar_gemelo.py dé 0°.")
             md = math.radians(self.pd.margen_duro_deg)
             self.lo = np.maximum(lo, self.lo_h - md)
             self.hi = np.minimum(hi, self.hi_h + md)
