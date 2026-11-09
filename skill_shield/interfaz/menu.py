@@ -35,9 +35,16 @@ def mostrar_menu_grafico(cola_retorno):
         modo_elegido = "HARDWARE_REAL"
         ventana.quit()
 
+    def set_sliders():
+        nonlocal modo_elegido
+        modo_elegido = "GEMELO_SLIDERS"
+        ventana.quit()
+
+    ventana.geometry("420x190")
     tk.Label(ventana, text="¿Qué modo de operación deseas iniciar?", font=("Arial", 11, "bold")).pack(pady=15)
-    tk.Button(ventana, text="💻 Solo Simulación Virtual (MuJoCo)", command=set_simulacion, width=35, bg="#e0f7fa").pack(pady=5)
-    tk.Button(ventana, text="🤖 Mano Física (USB) + Gemelo Digital", command=set_hardware, width=35, bg="#e8f5e9").pack(pady=5)
+    tk.Button(ventana, text="💻 Solo Simulación Virtual (MuJoCo)", command=set_simulacion, width=40, bg="#e0f7fa").pack(pady=5)
+    tk.Button(ventana, text="🤖 Mano Física (USB) + Gemelo Digital", command=set_hardware, width=40, bg="#e8f5e9").pack(pady=5)
+    tk.Button(ventana, text="🎚️ Gemelo Digital (sliders): brazo con sliders", command=set_sliders, width=40, bg="#fff3e0").pack(pady=5)
     
     ventana.mainloop()
     ventana.destroy()

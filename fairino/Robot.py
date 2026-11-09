@@ -3192,7 +3192,7 @@ class RPC():
             time.sleep(0.1)
 
         error = 0
-        sdk = ["SDK:V2.2.8", "Robot:V4.0.1"]
+        sdk = ["SDK:V2.2.8", "Robot:V4.0.0"]
         return error, sdk
 
     """   
@@ -3982,26 +3982,20 @@ class RPC():
     """
     @brief  伺服运动开始，配合ServoJ、ServoCart指令使用
     @param  [in] cmdType 命令传输类型，0=XML-RPC，1=UDP透传
-    @param  [in] filtertime 滤波时间，单位ms，默认0
-    @param  [in] gain 位置环增益数组，长度应为6，依次对应J1~J6关节位置环增益；传None时使用默认值[-1.0, -1.0, -1.0, -1.0, -1.0, -1.0]
     @return 错误码 成功-0  失败-错误码
     """
+
     @log_call
     @xmlrpc_timeout
-    def ServoMoveStart(self, cmdType=0, filtertime=0, gain=[-1.0, -1.0, -1.0, -1.0, -1.0, -1.0]):
+    def ServoMoveStart(self, cmdType=0):
         while self.reconnect_flag:
             time.sleep(0.1)
-        if self.GetSafetyCode() != 0:
-            return self.GetSafetyCode()
-
-        filtertime = int(filtertime)
-        gain = list(map(float, gain))
 
         if cmdType == 0:
             flag = True
             while flag:
                 try:
-                    error = self.robot.ServoMoveStart(filtertime, gain[0], gain[1], gain[2], gain[3], gain[4], gain[5])
+                    error = self.robot.ServoMoveStart()
                     flag = False
                 except socket.error as e:
                     flag = True
@@ -4009,22 +4003,34 @@ class RPC():
 
         elif cmdType == 1:
             try:
+                # 获取下一个计数
                 count = self._get_next_udp_count()
+
+                # 构建UDP帧数据，内容直接为ServoMoveStart()
                 cmd_str = "ServoMoveStart()"
                 content_len = len(cmd_str)
+
+                # 使用固定命令ID，
                 cmd_id = 689
                 udp_data = "/f/bIII{}III{}III{}III{}III/b/f".format(
                     count, cmd_id, content_len, cmd_str
                 )
+
+                # print("UDP发送 - 计数:{} 命令ID:{} 长度:{}".format(count, cmd_id, content_len))
+
                 success = self.SendUDPFrame(udp_data)
+
                 if success:
                     return 0
                 else:
-                    return RobotError.ERR_SOCKET_SEND_FAILED
+                    return -1
+
             except Exception as e:
-                return RobotError.ERR_SOCKET_SEND_FAILED
+                print("UDP发送异常: {}".format(e))
+                return -2
 
         else:
+            print("不支持的cmdType: {}".format(cmdType))
             return RobotError.ERR_PARAM_VALUE
 
     """   
@@ -6139,7 +6145,7 @@ class RPC():
         if error == 0:
             return error, [_error[1], _error[2], _error[3], _error[4], _error[5], _error[6]]
         else:
-            return error,None
+            return error
         # return 0,[self.robot_state_pkg.jt_cur_pos[0],self.robot_state_pkg.jt_cur_pos[1],self.robot_state_pkg.jt_cur_pos[2],
         #           self.robot_state_pkg.jt_cur_pos[3],self.robot_state_pkg.jt_cur_pos[4],self.robot_state_pkg.jt_cur_pos[5]]
 
@@ -7982,7 +7988,7 @@ class RPC():
     @brief  获取夹爪运动状态
     @param  [in] NULL
     @return 错误码 成功- 0, 失败-错误码
-    @return 返回值（调用成功返回）[fault,status]：夹爪运动状态，fault:0-无错误，1-有错误；status:0-运动未完成，1-运动完成 2-运动完成检测到物体 3-运动完成检测到物体掉落   
+    @return 返回值（调用成功返回）[fault,status]：夹爪运动状态，fault:0-无错误，1-有错误；status:0-运动未完成，1-运动完成    
     """
 
     @log_call
@@ -14121,7 +14127,7 @@ class RPC():
 
         return error
 
-    """   
+        """   
     @brief 关闭RPC
     @return 错误码 成功- 0, 失败-错误码
     """
@@ -20038,7 +20044,7 @@ class RPC():
 
     """
     @brief 等待夹爪运动状态
-    @param [in] status 0-运动未完成，1-运动完成未检测到物体，2-运动完成检测到物体  3-运动完成检测到物体掉落
+    @param [in] status 0-运动未完成，1-运动完成未检测到物体，2-运动完成检测到物体
     @param [in] timeout 超时时间（ms），-1永久等待
     @param [in] strategy 0-停止报错，1-继续运行
     @param [in] type 0-平行夹爪，1-旋转夹爪
@@ -20344,93 +20350,4 @@ class RPC():
             return error, enable
         else:
             self.log_error(f"execute GetTLSEnableState fail {error}")
-            return error, None
-
-    """
-    @brief 数据备份包上传升级
-    @param [in] filePath 上传数据备份包文件路径；D://zUP/fr_user_data.tar.gz
-    @return 错误码
-    """
-
-    @log_call
-    @xmlrpc_timeout
-    def DataPackageUpgrade(self, filePath):
-        while self.reconnect_flag:
-            time.sleep(0.1)
-
-        filePath = str(filePath)
-        errcode = self.__FileUpLoad(7, filePath)
-        if errcode == 0:
-            flag = True
-            while flag:
-                try:
-                    _error = self.robot.DataPackageUpgrade()
-                    flag = False
-                except socket.error as e:
-                    flag = True
-
-            error = _error[0]
-            if error != 0:
-                print(f"DataPackageUpgrade failed error code is: {error}")
-            return error
-        else:
-            print(f"DataPackageUpgrade upload file fail. errcode is: {errcode}")
-        return errcode
-
-    """
-    @brief 获取数据备份包升级进度百分比
-    @param [out] progress 升级进度百分比[0-100], -1:升级失败
-    @return 错误码
-    """
-
-    @log_call
-    @xmlrpc_timeout
-    def GetDataPackageUpgradeProgress(self):
-        while self.reconnect_flag:
-            time.sleep(0.1)
-
-        progress = 0
-        flag = True
-        while flag:
-            try:
-                _error = self.robot.GetDataPackageUpgradeProgress()
-                flag = False
-            except socket.error as e:
-                flag = True
-
-        error = _error[0]
-        if error == 0:
-            progress = int(_error[1])
-            return error, progress
-        else:
-            print(f"execute GetDataPackageUpgradeProgress fail {error}")
-            return error, None
-
-    """
-    @brief 获取关节全参数升级进度百分比
-    @param [out] progress 升级进度百分比[0-100], -1:升级失败
-    @return 错误码
-    """
-
-    @log_call
-    @xmlrpc_timeout
-    def GetJointAllParamUpgradeProgress(self):
-        while self.reconnect_flag:
-            time.sleep(0.1)
-
-        progress = 0
-        flag = True
-        while flag:
-            try:
-                _error = self.robot.GetJointAllParamUpgradeProgress()
-                flag = False
-            except socket.error as e:
-                flag = True
-
-        error = _error[0]
-        if error == 0:
-            progress = int(_error[1])
-            return error, progress
-        else:
-            print(f"execute GetJointAllParamUpgradeProgress fail {error}")
             return error, None

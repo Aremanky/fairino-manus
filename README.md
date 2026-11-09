@@ -46,3 +46,24 @@ Lo más probable es que falle, pero es bueno para ir depurando el .txt
 > ```bash
 > sudo apt update && sudo apt install libcairo2-dev libgirepository1.0-dev
 > ```
+
+---
+## Modos de arranque (menú del principio)
+
+| Modo | Mano (OrcaHand) | Brazo |
+|---|---|---|
+| 💻 Simulación Virtual | solo MuJoCo | cámaras (solo MuJoCo) |
+| 🤖 Mano Física + Gemelo Digital | guante/cámara → mano real por USB | cámaras |
+| 🎚️ Gemelo Digital (sliders) | guante/cámara → mano real por USB | **ventana de sliders** |
+
+### Gemelo Digital (sliders)
+- Se abre una ventana con un slider por articulación, en **grados de la controladora** (los mismos que la WebApp del FR5).
+- **[A]** en la ventana de la cámara activa la mano (como siempre). El brazo NO sigue a las cámaras.
+- **ARMAR** en la ventana de sliders: el brazo (simulado y FR5 real) sigue a los sliders, con velocidad limitada.
+  Solo se arma si el robot está dentro del rango de los sliders (si no, llévalo con la WebApp).
+- **STOP / Esc / Espacio / cerrar la ventana** → desarmado: el FR5 deja de recibir ServoJ. La seta física sigue siendo la parada de verdad.
+- Ajustes en `config.py`, bloque `SLIDERS_*` (simulacro, velocidades, rangos).
+- Necesita Tkinter en el entorno: `sudo apt install python3.12-tk`.
+- Probar la ventana sola, sin robot: `python -m skill_shield.interfaz.sliders_brazo`
+
+SDK de FAIRINO en `fairino/Robot.py`: versión V4.0.0 (SDK V2.2.8), la del controlador V4.0.0.x.

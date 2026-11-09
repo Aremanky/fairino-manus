@@ -10,7 +10,7 @@ import math
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ── CONFIGURACIÓN DE ENTORNO Y RUTAS ──────────────────────────────────────────
-MODO_EJECUCION = "SIMULACION"  # Opciones: "SIMULACION" | "HARDWARE_REAL"
+MODO_EJECUCION = "SIMULACION"  # Opciones: "SIMULACION" | "HARDWARE_REAL" | "GEMELO_SLIDERS" (lo elige el menú)
 
 # Puerto mano
 PUERTO_HARDWARE = "/dev/ttyUSB0"
@@ -1296,6 +1296,21 @@ FR5_SIGNO       = (1, 1, 1, 1, 1, 1)
 FR5_OFFSET_DEG  = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 FR5_PRIORIDAD_RT = 50            # SCHED_FIFO si hay permisos (si no, prioridad normal)
 FR5_CPU          = None          # núcleo fijo para el proceso (None = cualquiera)
+
+# ── MODO GEMELO_SLIDERS (9-nov): mano con guante + BRAZO con una ventana de sliders ─────────
+# Se elige en el menú de arranque. La mano funciona igual que en HARDWARE_REAL; el brazo NO
+# sale de las cámaras sino de skill_shield/interfaz/sliders_brazo.py. Los sliders van en
+# grados de la controladora (como la WebApp). Flujo: [A] activa la mano; ARMAR en la ventana
+# mueve el brazo; STOP / Esc / Espacio / cerrar la ventana → desarmado (FR5 quieto).
+# El FR5 se arranca en este modo aunque FR5_REAL_ACTIVO sea False (si SLIDERS_CON_FR5).
+SLIDERS_CON_FR5           = True    # arrancar fr5_servo en este modo
+SLIDERS_FR5_SIMULACRO     = False   # True = conecta y lee, pero NO manda ServoJ (prueba en seco)
+SLIDERS_FR5_VEL_MAX_DEG_S = 30.0    # tope de fr5_servo en este modo (°/s, por joint)
+SLIDERS_SUAVE_VEL         = 0.6     # GeneradorSuave: rad/s por joint (~34 °/s) × % de la ventana
+SLIDERS_SUAVE_ACEL        = 3.0     # rad/s²
+SLIDERS_VELOCIDAD_INICIAL = 0.3     # % de velocidad con el que abre la ventana (0.05-1.0)
+SLIDERS_MARGEN_DEG        = 5.0     # margen respecto a los topes del FR5 / límites blandos
+SLIDERS_LIMITES_DEG       = None    # ((min, max) × 6) en grados para fijarlos a mano; None = auto
 
 # ═══════════════════════════════════════════════════════════════════════════
 # IA: GRABAR BRAZO + MANO, ENTRENAR Y REPRODUCIR (5-nov)

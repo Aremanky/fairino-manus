@@ -178,35 +178,44 @@ def main():
     # ── MENÚ DE ARRANQUE CON ZENITY (compatible con Wayland/GNOME) ──────────
     # zenity es la herramienta de diálogos nativa de GNOME, siempre visible.
     # Si no está instalada: sudo apt install zenity
+    # 9-nov: lista con 3 modos (antes una pregunta de 2 botones):
+    #   SIMULACION     → todo en MuJoCo
+    #   HARDWARE_REAL  → mano física (USB) + gemelo digital, brazo con las cámaras
+    #   GEMELO_SLIDERS → mano física + guante igual que HARDWARE_REAL, pero el BRAZO se
+    #                    mueve con la ventana de sliders (skill_shield/interfaz/sliders_brazo.py)
     import subprocess
     global MODO_EJECUCION
+    _OPCIONES_MODO = {
+        "💻  Simulación Virtual (MuJoCo)": "SIMULACION",
+        "🤖  Mano Física (USB) + Gemelo Digital": "HARDWARE_REAL",
+        "🎚️  Gemelo Digital (sliders): mano con guante + brazo con sliders": "GEMELO_SLIDERS",
+    }
     try:
+        _filas = []
+        for _k, _txt_op in enumerate(_OPCIONES_MODO):
+            _filas += ["TRUE" if _k == 0 else "FALSE", _txt_op]
         resultado = subprocess.run(
             [
-                'zenity', '--question',
+                'zenity', '--list', '--radiolist',
                 '--title=Skill Shield Nivel 6',
                 '--text=¿Qué modo de operación deseas iniciar?',
-                '--ok-label=💻  Simulación Virtual (MuJoCo)',
-                '--cancel-label=🤖  Mano Física (USB) + Gemelo Digital',
-                '--width=420',
-                '--height=50',
-            ],
+                '--column=Elegir', '--column=Modo',
+                '--width=560',
+                '--height=260',
+            ] + _filas,
             capture_output=True
         )
         stderr_txt = resultado.stderr.decode(errors="ignore").strip() if resultado.stderr else ""
+        _elegido = resultado.stdout.decode(errors="ignore").strip() if resultado.stdout else ""
 
-        if resultado.returncode == 0:
-            # Botón OK pulsado → Simulación
-            MODO_EJECUCION = "SIMULACION"
-        elif resultado.returncode == 1 and not stderr_txt:
-            # Botón Cancel pulsado limpiamente, sin errores → el usuario eligió Hardware real
-            MODO_EJECUCION = "HARDWARE_REAL"
+        if resultado.returncode == 0 and _elegido in _OPCIONES_MODO:
+            MODO_EJECUCION = _OPCIONES_MODO[_elegido]
         else:
-            # Cualquier otro código, o zenity escribió algo en stderr → no sabemos si el
-            # usuario llegó a ver la ventana. Por seguridad, NUNCA asumimos hardware real.
-            if stderr_txt:
+            # Cancelar, cerrar la ventana, otro código o zenity escribió algo en stderr →
+            # no sabemos qué quería el usuario. Por seguridad, NUNCA asumimos hardware real.
+            if stderr_txt and resultado.returncode == 0:
                 print(f"⚠️  Zenity no pudo mostrar la ventana correctamente: {stderr_txt}")
-            print("   Por seguridad, arrancando en SIMULACION.")
+            print("   Sin modo elegido → por seguridad, arrancando en SIMULACION.")
             MODO_EJECUCION = "SIMULACION"
     except FileNotFoundError:
         print("⚠️  zenity no encontrado → arrancando en SIMULACION por defecto.")
@@ -218,14 +227,35 @@ def main():
         MODO_EJECUCION = "SIMULACION"
 
     print(f"🚀 Iniciando Skill Shield Nivel 6 en modo: {MODO_EJECUCION}")
+    modo_sliders = MODO_EJECUCION == "GEMELO_SLIDERS"
+    mano_fisica  = MODO_EJECUCION in ("HARDWARE_REAL", "GEMELO_SLIDERS")   # OrcaHand por USB
 
     # ── FR5 REAL (proceso fr5_servo, ServoJ cada 8 ms) ──
     # Se arranca AQUÍ, antes del visor, las cámaras y los hilos: el proceso se crea con fork.
+    # 9-nov: en GEMELO_SLIDERS se arranca aunque FR5_REAL_ACTIVO sea False (es para lo que
+    # sirve el modo), con su propio simulacro y velocidad máxima (SLIDERS_FR5_* en config.py).
     fr5 = None
-    if globals().get("FR5_REAL_ACTIVO", False):
-        fr5 = FR5Servo.desde_config(globals())
+    _cfg_fr5 = dict(globals())
+    if modo_sliders:
+        _cfg_fr5["FR5_SIMULACRO"] = bool(globals().get("SLIDERS_FR5_SIMULACRO", False))
+        _cfg_fr5["FR5_VEL_MAX_DEG_S"] = min(float(globals().get("FR5_VEL_MAX_DEG_S", 60.0)),
+                                            float(globals().get("SLIDERS_FR5_VEL_MAX_DEG_S", 30.0)))
+    if globals().get("FR5_REAL_ACTIVO", False) or (modo_sliders and globals().get("SLIDERS_CON_FR5", True)):
+        fr5 = FR5Servo.desde_config(_cfg_fr5)
         if not fr5.iniciar():
             print("   El programa sigue SOLO en simulación (el FR5 no recibe nada).")
+
+    # ── GEMELO_SLIDERS: ventana de sliders del brazo (proceso aparte, también con fork) ──
+    sliders = None
+    if modo_sliders:
+        from skill_shield.interfaz.sliders_brazo import (
+            SlidersBrazo, SIN_FR5, FR5_ESPERA, FR5_ENVIANDO, FR5_ERROR)
+        sliders = SlidersBrazo.desde_config(globals())
+        if not sliders.iniciar():
+            print("   GEMELO_SLIDERS sin ventana: la mano funciona, el brazo NO se mueve.")
+        elif fr5 is None or not fr5.conectado:
+            sliders.mensaje("Sin conexión con el FR5: los sliders solo mueven el simulador.")
+    fr5_al_inicio = fr5 is not None and fr5.conectado   # (si falla luego, los sliders desarman)
     # ─────────────────────────────────────────────────────────────────────────
     # ─────────────────────────────────────────────────────────
     # ────────────────────────────────────────────────────
@@ -250,7 +280,7 @@ def main():
 
     # ── INICIALIZACIÓN DEL HARDWARE REAL ──
     mano_real = None
-    if MODO_EJECUCION == "HARDWARE_REAL":
+    if mano_fisica:
         mano_real = OrcaHardwareWrapper(puerto=PUERTO_HARDWARE)
         mano_real.conectar()
     # ───────────────────────────────────────
@@ -714,7 +744,7 @@ def main():
                   f"{len(_acc_ia)} articulaciones, {1 / dt_objetivo:.0f} Hz, {n_sub} pasos de física "
                   "por fotograma (tiempo real).")
 
-            usar_hardware_real = (MODO_EJECUCION == "HARDWARE_REAL"
+            usar_hardware_real = (mano_fisica
                                   and mano_real and mano_real.conectado)
             ultimo_hardware_target = construir_hardware_target(datos) if usar_hardware_real else None
             fr5_ia = fr5 if (fr5 is not None and fr5.conectado and con_brazo) else None
@@ -1009,7 +1039,8 @@ def main():
                 # una cámara, límites humanos reales, IK analítica (8 configuraciones) y cambio
                 # de configuración planificado cuando la actual no puede seguir.
                 teleop_v2 = None
-                if globals().get("TELEOP_FR5_V2", False) and MODO_BRAZO == "imitacion":
+                # (GEMELO_SLIDERS: el brazo NO sale de las cámaras → ni v2 ni pipeline antiguo)
+                if globals().get("TELEOP_FR5_V2", False) and MODO_BRAZO == "imitacion" and sliders is None:
                     from skill_shield.teleop_fr5.teleop_brazo import TeleopBrazoFR5, ConfigTeleop
                     from skill_shield.teleop_fr5.fusion_muneca_codo import (
                         Camara as _CamV2, Intrinsecos as _IntrV2, ObservacionCamara as _ObsV2,
@@ -1168,7 +1199,16 @@ def main():
                 # 7.1: el generador suave escribe ctrl de joint1..3 y del giro de muñeca
                 #      antes de cada mj_step; el bucle solo le PUBLICA objetivos.
                 gen_brazo = None
-                if SUAVE_ACTIVO and MODO_BRAZO == "imitacion":
+                if sliders is not None:
+                    # GEMELO_SLIDERS: los 6 joints con velocidad moderada; la ventana la escala
+                    # (gen_brazo.factor = % de velocidad de los sliders)
+                    _v_sl = float(globals().get("SLIDERS_SUAVE_VEL", 0.6))
+                    _a_sl = float(globals().get("SLIDERS_SUAVE_ACEL", 3.0))
+                    gen_brazo = GeneradorSuave((0, 1, 2, 3, 4, 5), (_v_sl,) * 6, (_a_sl,) * 6)
+                    gen_brazo.activar(datos)
+                    print(f"🎚️  Brazo con SLIDERS: vel. máx {_v_sl} rad/s, acel. máx {_a_sl} rad/s² "
+                          "(× el % de velocidad de la ventana)")
+                elif SUAVE_ACTIVO and MODO_BRAZO == "imitacion":
                     # 9-oct: también joint4/joint5 (la pose de [A] los mueve): sin tirones
                     _extra_suave = [_i for _i in (3, 4) if _i != prono_idx]
                     if teleop_v2 is not None:
@@ -1187,8 +1227,12 @@ def main():
                     print(f"🧈 Comando continuo del brazo activo (vel. máx {SUAVE_VEL_MAX} rad/s, "
                           f"acel. máx {SUAVE_ACEL_MAX} rad/s²)")
 
-                def _enviar_brazo(indices, valores):
-                    """Objetivos del brazo: al generador suave (si está activo) o directos."""
+                def _enviar_brazo(indices, valores, de_sliders=False):
+                    """Objetivos del brazo: al generador suave (si está activo) o directos.
+                    GEMELO_SLIDERS: solo cuentan los de la ventana de sliders; el resto (cámaras,
+                    [A], [S], joint5 fijo...) se ignora para que nada más mueva el brazo."""
+                    if sliders is not None and not de_sliders:
+                        return
                     if gen_brazo is not None and gen_brazo.activo:
                         gen_brazo.enviar(datos, indices, valores)
                     else:
@@ -1341,7 +1385,7 @@ def main():
                     # — Ángulos del brazo humano (paso 3: solo calcular y mostrar) —
                     # 28-oct: con TELEOP_FR5_V2 el brazo lo mueve teleop_fr5 y este pipeline antiguo
                     # (FusorBrazo, ángulos, PASOS 4-7) solo duplicaba trabajo en cada fotograma.
-                    if resultado_pose.pose_world_landmarks and resultado_pose.pose_landmarks \
+                    if resultado_pose.pose_world_landmarks and resultado_pose.pose_landmarks and sliders is None \
                             and (teleop_v2 is None or not globals().get("TELEOP_FR5_SIN_PIPELINE_ANTIGUO", True)):
                         _calib_antes = est_brazo.calibrando   # ¿estamos aún en la T-pose de calibración?
                         _ang_mp = calcular_angulos_brazo_humano(
@@ -1719,7 +1763,8 @@ def main():
                                           f"peso={peso_hib:.2f}")
 
                     # — Estado de la calibración de huesos / imitación (HUD) —  (v2: su propio HUD)
-                    if MODO_BRAZO == "imitacion" and estado["camara_activa"] and teleop_v2 is None:
+                    if MODO_BRAZO == "imitacion" and estado["camara_activa"] and teleop_v2 is None \
+                            and sliders is None:
                         if est_brazo.calibrando:
                             cv2.putText(frame_bgr,
                                         f"CALIBRANDO HUESOS {est_brazo.progreso}/{est_brazo.n_objetivo}"
@@ -1927,7 +1972,8 @@ def main():
                                       f"dedo={estado.get('dedo_bloqueado')}  "
                                       f"habilitada={estado.get('pinza_habilitada', True)}  "
                                       f"mano de: {origen_mano}")
-                            if MODO_BRAZO == "ik" and estado["neutro_camara_brazo"] is not None:
+                            if MODO_BRAZO == "ik" and estado["neutro_camara_brazo"] is not None \
+                                    and sliders is None:
                                 estado["objetivo_brazo"] = mapear_muneca_a_objetivo_brazo(
                                     x_m, y_m, z, estado["neutro_camara_brazo"],
                                     punto_neutro_brazo=estado["punto_neutro_brazo"])
@@ -2124,12 +2170,61 @@ def main():
                             teleop_v2.desarmar()
                             print("⏸ PEDAL: brazo DESARMADO → quieto")
 
+                    # ══ GEMELO_SLIDERS (9-nov): el brazo sigue a la ventana de sliders ══
+                    # La ventana enseña la pose REAL (FR5, o simulador si no hay FR5) y, ARMADA,
+                    # publica el objetivo. Aquí solo se valida y se pasa al generador suave; el
+                    # bloque del FR5 de abajo arma / desarma el ServoJ igual que con el pedal.
+                    if sliders is not None:
+                        _fr5_ok = fr5 is not None and fr5.conectado
+                        _q_real_sl = fr5.q_real_rad() if _fr5_ok else None
+                        if _q_real_sl is not None:
+                            _q_vis_sl = sliders.a_grados(_q_real_sl)
+                            sliders.publicar_real(_q_vis_sl, de_fr5=True)
+                        elif not _fr5_ok:
+                            _q_vis_sl = sliders.a_grados([datos.ctrl[_i] for _i in _idx_ctrl_fr5])
+                            sliders.publicar_real(_q_vis_sl, de_fr5=False)
+                        else:
+                            _q_vis_sl = None              # FR5 conectado pero sin lectura reciente
+                        if not fr5_al_inicio:
+                            sliders.estado_fr5(SIN_FR5)
+                        elif not _fr5_ok:
+                            sliders.estado_fr5(FR5_ERROR)
+                            if sliders.armado:            # el FR5 ha fallado: el gemelo no sigue solo
+                                sliders.desarmar("FR5 desconectado o con error → DESARMADO (mira la terminal).")
+                        else:
+                            sliders.estado_fr5(FR5_ENVIANDO if fr5_enviando else FR5_ESPERA)
+
+                        if sliders.recien_armado():
+                            if _q_vis_sl is None:
+                                sliders.desarmar("No se arma: no hay lectura reciente de la pose del FR5.")
+                            elif sliders.fuera_de_rango(_q_vis_sl):
+                                sliders.desarmar("No se arma: " + ", ".join(f"J{_j}" for _j in sliders.fuera_de_rango(_q_vis_sl)) + " fuera "
+                                                 "del rango de los sliders (muévelo con la WebApp).")
+                            else:
+                                _simul = _fr5_ok and fr5.p.get("FR5_SIMULACRO", True)
+                                sliders.mensaje("ARMADO en SIMULACRO: el FR5 real NO se mueve "
+                                                "(SLIDERS_FR5_SIMULACRO en config.py)." if _simul else "")
+                                print("🟠 SLIDERS: brazo ARMADO"
+                                      + (" (FR5 en simulacro)" if _simul else
+                                         " → el FR5 real sigue a los sliders" if _fr5_ok else
+                                         " (solo simulador)"))
+                        if sliders.armado:
+                            gen_brazo.factor = sliders.velocidad
+                            _enviar_brazo(range(6), sliders.objetivo_rad(), de_sliders=True)
+                        cv2.putText(frame_bgr,
+                                    "BRAZO: SLIDERS " + ("ARMADO" if sliders.armado else "DESARMADO (quieto)"),
+                                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                                    (0, 165, 255) if sliders.armado else (200, 200, 200), 2)
+
                     # 5-nov: FR5 real ↔ simulador. Mientras NO está armado, el robot no recibe
                     # nada y MuJoCo (y el generador) se copian de su postura REAL en cada vuelta:
                     # lo que ves es el robot de verdad. Al armar, se sincroniza una última vez y
                     # empieza el ServoJ desde ahí (sin pinchar el robot y sin salto).
                     if fr5 is not None and fr5.conectado:
-                        _armar_fr5 = teleop_v2 is None or (estado["camara_activa"] and teleop_v2.armado)
+                        if sliders is not None:
+                            _armar_fr5 = sliders.armado     # GEMELO_SLIDERS: ARMAR de la ventana
+                        else:
+                            _armar_fr5 = teleop_v2 is None or (estado["camara_activa"] and teleop_v2.armado)
                         if not _armar_fr5 or not fr5_enviando:
                             if fr5_enviando:
                                 fr5.habilitar(False)
@@ -2162,7 +2257,9 @@ def main():
                         refs_tpose = []
                         tpose_med  = None
                         roll_ref, refs_roll, d_prev = None, [], 0.0
-                        if MODO_BRAZO == "imitacion":
+                        if sliders is not None:
+                            print("✋ [A] Mano ACTIVA (guante → OrcaHand). El brazo va con los sliders.")
+                        elif MODO_BRAZO == "imitacion":
                             est_brazo.iniciar_calibracion()
                             if teleop_v2 is not None:
                                 # v2: calibra los huesos con su propia fusión y arranca la IK desde
@@ -2498,7 +2595,7 @@ def main():
                     # — Paso de simulación MuJoCo —
                     if visor.is_running():
                         # Si estamos en modo hardware, enviamos los datos a los servos
-                        if MODO_EJECUCION == "HARDWARE_REAL" and mano_real and mano_real.conectado:
+                        if mano_fisica and mano_real and mano_real.conectado:
                             hardware_target = construir_hardware_target(datos)
                             mano_real.enviar_posiciones(hardware_target)
                         # Escenario taladro: agarre asistido (si está visible)
@@ -2567,6 +2664,8 @@ def main():
                     pool_mano = None
                 if fr5 is not None:                  # FR5 real: ServoMoveEnd y quieto
                     fr5.habilitar(False)
+                if sliders is not None and sliders.armado:   # al volver, hay que ARMAR de nuevo
+                    sliders.desarmar("Has salido de la teleoperación → DESARMADO.")
                 if pedal_v2 is not None:
                     pedal_v2.cerrar()
                 if fisica is not None:
@@ -2589,6 +2688,8 @@ def main():
         guante.cerrar()
     _parar_grabacion("al salir")
     grabador.esperar()                     # que terminen de escribirse los episodios
+    if sliders is not None:
+        sliders.parar()
     if fr5 is not None:
         e_fr5 = fr5.estado()
         fr5.parar()
