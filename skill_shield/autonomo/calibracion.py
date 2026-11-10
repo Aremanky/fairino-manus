@@ -272,14 +272,19 @@ GIROS_EXPLORAR_DEG = [  # (joint, grados) relativos a la postura de inicio
 class Colisiones:
     """Envuelve ModeloColision: una postura vale si no aparece NINGUNA colisión nueva respecto a
     la postura de inicio y las que ya hubiera no empeoran (el modelo es conservador: si la
-    postura de inicio ya «choca» en el modelo, es que el modelo no cuadra del todo)."""
+    postura de inicio ya «choca» en el modelo, es que el modelo no cuadra del todo).
+    Además, si se da 'mano', la mano (+ tablero) tiene que quedar SIEMPRE a más de su holgura del
+    antebrazo y del giro del J4 (eso no se tolera nunca: rompe la mano)."""
 
-    def __init__(self, modelo, q_inicio, tolerancia=0.005):
+    def __init__(self, modelo, q_inicio, tolerancia=0.005, mano=None):
         self.m = modelo
         self.base = {(a, b): p for a, b, p in modelo.colisiones(np.asarray(q_inicio, float))}
         self.tol = float(tolerancia)
+        self.mano = mano                     # choque_mano.ChoqueManoBrazo: mano vs antebrazo/J4 (sin tolerancias)
 
     def libre(self, q):
+        if self.mano is not None and not self.mano.ok(q):
+            return False
         for a, b, p in self.m.colisiones(np.asarray(q, float)):
             if (a, b) not in self.base or p > self.base[(a, b)] + self.tol:
                 return False

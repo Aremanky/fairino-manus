@@ -61,6 +61,16 @@ def catalogo(cfg):
     return out
 
 
+def ids_del_tablero(g, diccionario):
+    """Ids de los marcadores del tablero ChArUco de calibración si usa el MISMO diccionario que
+    las herramientas (un ChArUco de nx × ny cuadros lleva nx·ny // 2 marcadores: ids 0, 1, …)."""
+    t = g.get("CALIB_ROBOT_TABLERO") or {}
+    if t.get("diccionario") != diccionario:
+        return set()
+    nx, ny = t.get("cuadros", (0, 0))
+    return set(range(int(nx) * int(ny) // 2))
+
+
 def crear_detector(diccionario=DICCIONARIO):
     dic = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, diccionario))
     p = cv2.aruco.DetectorParameters()
@@ -210,6 +220,7 @@ class DetectorHerramientas:
         self.n_estable = int(g.get("AUTONOMO_HERRAMIENTAS_N_ESTABLE", n_estable))
         self.olvido_s = float(g.get("AUTONOMO_HERRAMIENTAS_OLVIDO_S", olvido_s))
         self.max_error_px = float(max_error_px)
+        self.ignorar = ids_del_tablero(g, g.get("AUTONOMO_HERRAMIENTAS_DICCIONARIO", DICCIONARIO))
         self.seg = {}                                    # id → _Seguimiento
         self.desconocidos = {}                           # id → hora (marcadores fuera del catálogo)
         self.T_mundo_cam, self._mtime, self._t_calib = None, None, 0.0
@@ -242,6 +253,8 @@ class DetectorHerramientas:
             return
         for c, i in zip(esquinas, ids.ravel()):
             i = int(i)
+            if i in self.ignorar and i not in self.cat:  # marcadores del tablero de calibración
+                continue
             e = self.cat.get(i)
             if e is None:
                 self.desconocidos[i] = ahora

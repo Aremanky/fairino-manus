@@ -23,6 +23,9 @@ Uso (cierra antes el modo autónomo / la teleoperación: la cámara y el robot t
 El robot solo se mueve MIENTRAS se mantiene el pedal de hombre muerto (TELEOP_FR5_PEDAL =
 "teclado": tecla P con la ventana delante, o "evdev"); al soltarlo se queda quieto. Velocidad
 máxima CALIB_ROBOT_VEL_MAX_DEG_S. Q/Esc en la ventana: parar y salir.
+Si la controladora marca una colisión (falsa, casi siempre, por el peso de la mano + tablero),
+se borra sola como en la WebApp (Clear → disable → enable; CALIB_AUTO_RESET) o con la tecla X;
+para seguir, suelta la P y vuelve a pulsarla. Tres colisiones en la misma postura → se salta.
 
 Calibración automática, por dentro:
   1. EXPLORAR (~1 min): pequeños giros de la muñeca y del brazo desde la postura de inicio →
@@ -69,6 +72,7 @@ N_VERIFICAR = int(getattr(cfg, "CALIB_ROBOT_VERIFICAR_N", 4))
 N_AUTO = int(getattr(cfg, "CALIB_AUTO_POSTURAS", 20))
 RADIO_MANO = float(getattr(cfg, "CALIB_AUTO_RADIO_MANO", 0.11))
 AMPLITUD = tuple(getattr(cfg, "CALIB_AUTO_AMPLITUD_DEG", (30, 20, 25, 45, 45, 70)))
+AUTO_RESET = bool(getattr(cfg, "CALIB_AUTO_RESET", True))   # colisión → Clear, disable, enable solo
 FOTOS_POR_MUESTRA = 5           # se promedia la pose del tablero en 5 imágenes seguidas
 QUIETO_DEG = 0.05               # el robot cuenta como quieto si en 0,6 s se mueve menos que esto
 LLEGADA_DEG = 0.3               # postura alcanzada
@@ -168,6 +172,10 @@ def arrancar_fr5(mover):
     c["FR5_VEL_MAX_DEG_S"] = min(float(c.get("FR5_VEL_MAX_DEG_S", 60.0)), VEL_MAX)
     fr5 = FR5Servo.desde_config(c)
     if not fr5.iniciar():
+        if fr5.estado()["texto"] == "iniciando":         # conecta pero la controladora no contesta
+            fr5.parar()
+            sys.exit("✗ La controladora del FR5 no contesta (se ha quedado colgada). Apágala y enciéndela, "
+                     "espera a que la WebApp funcione y vuelve a probar.")
         sys.exit("✗ Sin conexión con el FR5 (o con error). Revisa la red/WebApp y vuelve a probar.")
     return fr5
 
@@ -194,6 +202,18 @@ def modelo_colision(cadena, T_mundo_cam=None):
     (lleva el tablero) y, si ya se sabe, la cámara de cabeza como obstáculo."""
     from skill_shield.autonomo.mapa import modelo_colision as _mc
     return _mc(cadena, cfg, T_mundo_cam, radio_mano=RADIO_MANO)
+
+
+def choque_mano(cadena, T_brida_tablero=None):
+    """Comprobación mano (+ tablero) contra antebrazo y giro del J4, con las piezas del gemelo."""
+    from skill_shield.autonomo.choque_mano import desde_config
+    return desde_config(cadena, cfg, T_brida_tablero)
+
+
+def _texto_mano(ch, q):
+    d, donde = ch.distancia(q)
+    sitio = "del giro del J4" if donde == "wrist1_Link" else "del antebrazo" if donde == "forearm_Link" else "del brazo"
+    return f"la mano queda a {d * 100:.1f} cm {sitio} (mínimo {ch.holgura * 100:.1f} cm)"
 
 
 class Robot:
@@ -238,6 +258,12 @@ class Sesion:
         self.K, self.dist = self.info["K"], self.info["dist"]
         self.P = C.puntos_tablero(TABLERO["cuadros"], TABLERO["lado"])
         self.armado = False
+        self._t_reset = -10.0
+        self._en_error = False
+        self._avisado_webapp = False
+        self.n_colisiones = 0
+        self.mano = None                                 # ChoqueManoBrazo (lo pone cada modo)
+        self.peligro_mano = False
         self.q = None
         self.T_ct, self.txt_tab = None, ""
         self.mensaje, self.t_mensaje = "", 0.0
@@ -257,13 +283,46 @@ class Sesion:
         self.mensaje, self.t_mensaje = txt, time.monotonic()
         print("   " + txt)
 
+    def _reiniciar(self, motivo):
+        """Lo mismo que se hace a mano en la WebApp: Clear → disable → enable (fr5_servo.resetear).
+        No mueve el robot: para seguir hay que soltar y volver a pisar el pedal."""
+        if time.monotonic() - self._t_reset < 3.0:       # ya se está reiniciando
+            return
+        self._t_reset = time.monotonic()
+        self.fr5.resetear()
+        if self.pedal is not None:
+            self.pedal.desarmar()
+        self.armado = False
+        self.avisar(f"{motivo}: borrando el error (Clear, disable, enable)... suelta la P y vuelve a pulsarla")
+
+    def _vigilar_errores(self, key):
+        """Colisión / fallo de la controladora: se reinicia solo (CALIB_AUTO_RESET) o con la X."""
+        if key in (ord("x"), ord("X")) and self.fr5.en_linea:
+            self._reiniciar("X pulsada")
+        if self.fr5.en_error:
+            if not self._en_error:
+                self._en_error = True
+                self.n_colisiones += 1
+                print(f"✗ El FR5 marca colisión/fallo (nº {self.n_colisiones}). "
+                      + ("Lo reinicio solo." if AUTO_RESET else "Pulsa X para borrarlo."))
+                if self.pedal is not None:
+                    self.pedal.desarmar()
+                self.armado = False
+                if AUTO_RESET:                           # una vez por colisión; si no se borra, X
+                    self._reiniciar("Colisión")
+            elif time.monotonic() - self._t_reset > 8.0 and not self._avisado_webapp:
+                self._avisado_webapp = True
+                self.avisar("No se borra el error: pulsa X otra vez o bórralo en la WebApp (Clear, Disable, "
+                            "Enable); el programa lo notará solo")
+        else:
+            self._avisado_webapp = False
+            self._en_error = False
+
     def _pedal(self, key, puede):
         self.pedal.tecla(key)
         self.pedal.actualizar()
-        nuevo = bool(self.pedal.armado) and not self.fr5.en_error and puede
-        if self.fr5.en_error and self.armado:
-            self.pedal.desarmar()
-            print("✗ El FR5 marca un error: desarmado. Bórralo (WebApp o web) y vuelve a pisar.")
+        nuevo = bool(self.pedal.armado) and not self.fr5.en_error and puede \
+            and time.monotonic() - self._t_reset > 2.0         # dejar acabar el reinicio
         if nuevo != self.armado:
             self.armado = nuevo
             self.fr5.habilitar(nuevo)
@@ -281,6 +340,7 @@ class Sesion:
         if pkt is None:
             key = cv2.waitKeyEx(3)
             if self.mover:
+                self._vigilar_errores(key)
                 self._pedal(key, objetivo is not None)
             if key in (27, ord("q"), ord("Q")):
                 raise Cancelado()
@@ -298,7 +358,8 @@ class Sesion:
                               TABLERO["lado"] * 2)
         lineas = list(hud) + [
             "robot: " + ("sin lectura" if self.q is None else ("quieto" if self.robot.quieto else "en movimiento"))
-            + (("  |  PEDAL PISADO" if self.armado else "  |  pedal suelto (P)") if self.mover else ""),
+            + ((("  |  COLISION: reiniciando..." if self.fr5.en_error or time.monotonic() - self._t_reset < 2.0
+                  else "  |  PEDAL PISADO" if self.armado else "  |  pedal suelto (P)")) if self.mover else ""),
             "tablero: " + self.txt_tab]
         if self.mensaje and time.monotonic() - self.t_mensaje < 4:
             lineas.append(self.mensaje)
@@ -311,6 +372,7 @@ class Sesion:
         cv2.imshow(self.ventana, img)
         key = cv2.waitKeyEx(1)
         if self.mover:
+            self._vigilar_errores(key)
             self._pedal(key, objetivo is not None)
         if key in (27, ord("q"), ord("Q")):
             raise Cancelado()
@@ -339,15 +401,28 @@ class Sesion:
                     tablero=self.txt_tab, t=time.time())
 
     def ir_a(self, q_obj, hud=()):
-        """Lleva el robot a q_obj (solo con el pedal) y espera a que esté quieto allí."""
+        """Lleva el robot a q_obj (solo con el pedal) y espera a que esté quieto allí.
+        False si al intentarlo salta la colisión 3 veces (esa postura se salta)."""
         q_obj = np.asarray(q_obj, float)
+        if self.mano is not None:                       # última barrera: nunca acercar la mano al J4
+            while self.q is None:
+                self.vuelta(None, hud=hud)
+            camino = C.simular_camino(np.array(self.q), q_obj, VEL_MAX)
+            malo = next((q for q in camino if not self.mano.ok(q)), None)
+            if malo is not None:
+                self.avisar("NO voy a esa postura: " + _texto_mano(self.mano, malo))
+                self.peligro_mano = True
+                return False
         t_llegada = None
+        n0 = self.n_colisiones
         while True:
+            if self.n_colisiones - n0 >= 3:
+                return False
             self.vuelta(q_obj, hud=hud)
             cerca = self.q is not None and float(np.degrees(np.max(np.abs(self.q - q_obj)))) < LLEGADA_DEG
             t_llegada = (t_llegada or time.monotonic()) if cerca else None
             if t_llegada and time.monotonic() - t_llegada >= ESPERA_S and self.robot.quieto:
-                return
+                return True
 
     def recorrer(self, posturas, titulo, cada=None):
         """Recorre las posturas ({q, capturar}) y captura donde toque. Devuelve las muestras."""
@@ -356,10 +431,26 @@ class Sesion:
         for k, p in enumerate(posturas):
             hud = [titulo, f"postura {sum(x['capturar'] for x in posturas[:k + 1])}/{n_cap}"
                    + ("" if p["capturar"] else " (paso intermedio)") + f" · muestras {len(muestras)}"]
-            self.ir_a(p["q"], hud=hud)
+            m, llegado = None, True
+            for _ in range(2):                         # si la colisión salta mientras captura, se repite
+                n_col = self.n_colisiones
+                if not self.ir_a(p["q"], hud=hud):
+                    llegado = False
+                    break
+                if not p["capturar"]:
+                    break
+                m = self.capturar(hud=hud, objetivo=np.asarray(p["q"], float))
+                if m is not None or self.n_colisiones == n_col:
+                    break
+            if not llegado:
+                if self.peligro_mano:
+                    self.peligro_mano = False
+                    self.avisar(f"postura {k + 1}: la mano pasaría demasiado cerca del J4 → la salto")
+                else:
+                    self.avisar(f"postura {k + 1}: 3 colisiones seguidas yendo a ella → la salto")
+                continue
             if not p["capturar"]:
                 continue
-            m = self.capturar(hud=hud, objetivo=np.asarray(p["q"], float))
             if m is None:
                 self.avisar(f"postura {k + 1}: no se ve bien el tablero → la salto")
                 continue
@@ -394,7 +485,11 @@ def modo_auto():
         print("\n① Pon el robot (arrastre en la WebApp) donde la cámara vea el tablero entero y de frente.")
         s.esperar_tablero(["AUTO: coloca el robot donde la camara vea el tablero", "Q = salir"])
         q0 = np.array(s.q)
-        col = C.Colisiones(modelo_colision(s.cadena), q0)
+        s.mano = choque_mano(s.cadena)                   # sin tablero todavía (no se sabe dónde está)
+        if not s.mano.ok(q0):
+            sys.exit("✗ En la postura de inicio " + _texto_mano(s.mano, q0) + ". Endereza la muñeca "
+                     "(arrastre en la WebApp) y vuelve a probar.")
+        col = C.Colisiones(modelo_colision(s.cadena), q0, mano=s.mano)
         if col.base:
             print(f"⚠️  El modelo de colisión ya ve choques en la postura de inicio {list(col.base)}: o el modelo "
                   "del soporte no cuadra con el real o el robot está muy cerca. Se tolera, pero no pueden empeorar.")
@@ -415,7 +510,8 @@ def modo_auto():
               f"(cámara en {np.round(aprox['T_mundo_cam'][:3, 3], 3).tolist()} m)")
 
         print("\n③ Planificando posturas (sin moverse)…")
-        col = C.Colisiones(modelo_colision(s.cadena, aprox["T_mundo_cam"]), q0)
+        s.mano = choque_mano(s.cadena, aprox["T_brida_tablero"]).fijar_inicio(q0)   # ya con el tablero
+        col = C.Colisiones(modelo_colision(s.cadena, aprox["T_mundo_cam"]), q0, mano=s.mano)
         plan, info = C.planificar_posturas(q0, s.cadena, col, aprox["T_mundo_cam"], aprox["T_brida_tablero"],
                                            s.K, s.info["ancho"], s.info["alto"], s.P, n=N_AUTO,
                                            amplitud_deg=AMPLITUD, v_max_deg=VEL_MAX)
@@ -473,10 +569,21 @@ def modo_repetir_o_verificar(verificar, aqui=False):
                 s.vuelta(None, hud=["leyendo la postura del robot..."])
             q_act = np.array(s.q)
             modelo = modelo_colision(s.cadena)
-            if not C.Colisiones(modelo, q_act).camino_libre(q_act, posturas[0]["q"], VEL_MAX):
+            try:
+                T_bt = C.cargar(ARCHIVO)["T_brida_tablero"]   # para contar también con el tablero
+            except Exception:
+                T_bt = None
+            s.mano = choque_mano(s.cadena, T_bt).fijar_inicio(posturas[0]["q"])
+            cerca = [k + 1 for k, p in enumerate(posturas) if not s.mano.ok(p["q"])]
+            if cerca:
+                sys.exit(f"✗ En las posturas guardadas {cerca} la mano queda demasiado cerca del antebrazo / "
+                         "giro del J4. Borra calib_posturas.json y vuelve a calibrar con --auto.")
+            if not s.mano.ok(q_act):
+                sys.exit("✗ Ahora mismo " + _texto_mano(s.mano, q_act) + ". Endereza la muñeca y vuelve a probar.")
+            if not C.Colisiones(modelo, q_act, mano=s.mano).camino_libre(q_act, posturas[0]["q"], VEL_MAX):
                 sys.exit("✗ El trayecto desde la postura actual hasta la primera postura guardada podría chocar. "
                          "Lleva el robot (arrastre) cerca de esa postura de inicio y vuelve a probar.")
-            col = C.Colisiones(modelo, posturas[0]["q"])  # los demás trayectos, también
+            col = C.Colisiones(modelo, posturas[0]["q"], mano=s.mano)  # los demás trayectos, también
             malos = [k + 1 for k in range(len(posturas) - 1)
                      if not col.camino_libre(posturas[k]["q"], posturas[k + 1]["q"], VEL_MAX)]
             if malos:
@@ -513,6 +620,8 @@ def modo_repetir_o_verificar(verificar, aqui=False):
 def modo_manual():
     s = Sesion(mover=False)
     muestras = []
+    s.mano = choque_mano(s.cadena)
+    t_aviso = 0.0
     if os.path.exists(MUESTRAS):
         os.replace(MUESTRAS, MUESTRAS + ".bak")
     try:
@@ -520,6 +629,9 @@ def modo_manual():
             key, _ = s.vuelta(None, hud=["MANUAL: mueve el robot (arrastre en la WebApp), ESPACIO = capturar",
                                          f"muestras {len(muestras)} (min. {MIN_MUESTRAS})",
                                          "D = quitar ultima   C = calcular   Q = terminar"])
+            if s.q is not None and time.monotonic() - t_aviso > 3.0 and not s.mano.ok(s.q):
+                s.avisar("¡CUIDADO! " + _texto_mano(s.mano, s.q))
+                t_aviso = time.monotonic()
             if key == 32:
                 m = s.capturar() if s.listo else None
                 if m is None:

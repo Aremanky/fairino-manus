@@ -35,6 +35,7 @@ import math
 import multiprocessing as mp
 import os
 import sys
+import threading
 import time
 
 import numpy as np
@@ -356,6 +357,61 @@ def _ret(r):
     return r[0] if isinstance(r, (tuple, list)) else r
 
 
+_TIMEOUT = "SIN RESPUESTA"
+
+
+def _proxy_directo(ip, timeout=3.0):
+    """Conexión XML-RPC suelta con la controladora (puerto 20003), con tiempo máximo y SIN pasar
+    por la clase RPC del SDK. Crear otro Robot.RPC no vale: abre una segunda conexión de estado
+    (CNDE, puerto 20005) que la controladora rechaza, y al fallar el SDK marca RPC.is_connect =
+    False para TODO el proceso (todas las llamadas devuelven -4). Los nombres de los métodos
+    XML-RPC son los mismos que los del SDK (ResetAllError, RobotEnable, ServoMoveEnd…)."""
+    import xmlrpc.client
+
+    class _Transporte(xmlrpc.client.Transport):
+        def make_connection(self, host):
+            c = super().make_connection(host)
+            c.timeout = timeout
+            return c
+    return xmlrpc.client.ServerProxy(f"http://{ip}:20003", transport=_Transporte())
+
+
+def _directo(proxy, metodo, *args):
+    """Código de error de una llamada XML-RPC directa (o el texto del fallo)."""
+    try:
+        return _ret(getattr(proxy, metodo)(*args))
+    except Exception as e:                       # noqa: BLE001 (timeout, conexión rechazada…)
+        return f"{type(e).__name__}: {e}"
+
+
+def _renovar_xmlrpc(robot, ip):
+    """Cambia la conexión XML-RPC interna del SDK por una nueva (la vieja puede tener una
+    petición colgada). La conexión de estado del SDK (CNDE) no se toca."""
+    import xmlrpc.client
+    robot.robot = xmlrpc.client.ServerProxy(f"http://{ip}:20003")
+
+
+def _rpc(f, *args, timeout=2.0):
+    """Llama al SDK sin quedarse colgado (10-nov): tras una colisión la controladora puede no
+    contestar (p. ej. a ServoMoveEnd) y el SDK espera para siempre. La llamada va en un hilo; si
+    no vuelve en `timeout` s, devuelve _TIMEOUT y el bucle de fr5_servo sigue vivo."""
+    res = {}
+
+    def _correr():
+        try:
+            res["r"] = f(*args)
+        except Exception as e:                   # noqa: BLE001
+            res["e"] = e
+    h = threading.Thread(target=_correr, daemon=True)
+    h.start()
+    h.join(timeout)
+    if h.is_alive():
+        return _TIMEOUT
+    if "e" in res:
+        return f"excepción: {res['e']}"
+    return res["r"]
+
+
 def _leer_codigos(robot):
     """(main_code, sub_code, colisión, estado del robot) del paquete de estado (sin RPC)."""
     try:
@@ -508,6 +564,8 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
         t_ult_lectura = 0.0
         leer_real = _LectorPoseReal(robot)
         t_ult_codigos = 0.0
+        sucio = False            # 10-nov: alguna llamada al SDK se quedó colgada → reconectar al reiniciar
+        limpio = 0               # lecturas seguidas sin error estando en ERROR (borrado desde fuera)
 
         def _publicar_real(ahora_):
             q_ = leer_real(ahora_)
@@ -528,64 +586,69 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
                 c_ = _leer_codigos(robot)
                 if c_ is not None:
                     est[_E_MAIN], est[_E_SUB], est[_E_COLIS], est[_E_RSTATE] = c_
+                    # 10-nov: si el error se borra desde fuera (Clear en la WebApp), volver a «en espera»
+                    if est[_E_ESTADO] == ERROR and not enviando and c_[0] == 0 and not c_[2]:
+                        limpio += 1
+                        if limpio >= 5:                  # 0,5 s seguidos sin error
+                            est[_E_ESTADO] = ESPERA
+                            limpio = 0
+                            print("🔄 fr5_servo: la controladora ya no marca error → en espera; vuelve a armar")
+                    else:
+                        limpio = 0
                     if enviando and p.get("FR5_PARAR_SI_COLISION", True) and (c_[2] or c_[0]):
                         print(f"✗ fr5_servo: la controladora marca "
                               f"{'COLISIÓN' if c_[2] else 'FALLO'} (código {c_[0]}/{c_[1]}) → dejo de "
                               "enviar. [X] / RESET para borrar el error y volver a armar")
-                        try:
-                            robot.ServoMoveEnd()
-                        except Exception:
-                            pass
+                        # 10-nov: aquí NO se llama a ServoMoveEnd: tras una colisión la controladora
+                        # no contesta y el SDK se queda esperando para siempre. La controladora ya ha
+                        # parado el brazo; el ServoMoveEnd se manda al borrar el error.
                         enviando = False
                         habilitado.value = 0
                         est[_E_ESTADO] = ERROR
+                        sucio = True                     # → ServoMoveEnd directo antes de volver a armar
 
-            # 9-nov: recuperación rápida (ResetAllError) a petición del programa
+            # 9-nov: recuperación rápida a petición del programa ([X], botón de la web, calibración).
+            # 10-nov: Clear → disable → enable (lo mismo que en la WebApp) por XML-RPC DIRECTO con
+            # tiempo máximo, para que nada se pueda quedar colgado. No mueve el robot.
             if reset is not None and reset.value:
                 reset.value = 0
                 habilitado.value = 0
-                if enviando and not p["FR5_SIMULACRO"]:
-                    try:
-                        robot.ServoMoveEnd()
-                    except Exception:
-                        pass
                 enviando = False
-                try:
-                    rc = _ret(robot.ResetAllError())
-                except Exception as e:
-                    rc = f"excepción: {e}"
+                px = _proxy_directo(p["FR5_IP"], timeout=3.0)
+                rc = _directo(px, "ResetAllError")
                 time.sleep(0.3)
+                pasos = []
                 if p.get("FR5_RESET_REHABILITAR", True):
-                    # 10-nov: falsa colisión por el peso → borrar error, deshabilitar y volver a
-                    # habilitar (lo mismo que se hace a mano en la WebApp). No mueve el robot.
-                    pasos = []
                     for nombre_, estado_ in (("disable", 0), ("enable", 1)):
-                        try:
-                            r_ = _ret(robot.RobotEnable(estado_))
-                        except Exception as e:
-                            r_ = f"excepción: {e}"
+                        r_ = _directo(px, "RobotEnable", estado_)
                         pasos.append(f"{nombre_} → {'✓' if r_ == 0 else r_}")
                         time.sleep(0.5)
-                    print("🔄 fr5_servo: ResetAllError → " + ("✓" if rc == 0 else str(rc))
-                          + " · " + " · ".join(pasos))
+                r_end = _directo(px, "ServoMoveEnd")     # cerrar el modo servo que dejó la colisión
+                pasos.append(f"ServoMoveEnd → {'✓' if r_end == 0 else r_end}")
+                _renovar_xmlrpc(robot, p["FR5_IP"])      # por si la conexión del SDK quedó colgada
+                servoj = _LlamadaServoJ(robot, p)
+                sucio = False
+                print("🔄 fr5_servo: ResetAllError → " + ("✓" if rc == 0 else str(rc)) + " · " + " · ".join(pasos))
+                time.sleep(0.3)
                 c_ = _leer_codigos(robot)
                 if c_ is not None:
                     est[_E_MAIN], est[_E_SUB], est[_E_COLIS], est[_E_RSTATE] = c_
                 errores_seg = 0
                 if rc == 0 and (c_ is None or (c_[0] == 0 and not c_[2])):
                     est[_E_ESTADO] = ESPERA
-                    print("🔄 fr5_servo: errores borrados (ResetAllError) → en espera; vuelve a armar")
+                    print("🔄 fr5_servo: errores borrados → en espera; vuelve a armar")
                 else:
                     print(f"⚠ fr5_servo: ResetAllError → {rc}; código {c_[:2] if c_ else '?'}. Si sigue, "
-                          "puede que haya que sacarlo del tope o rearmarlo en la WebApp")
+                          "bórralo en la WebApp (Clear → Disable → Enable): el programa lo notará solo")
                     est[_E_ESTADO] = ERROR if (c_ and (c_[0] or c_[2])) else ESPERA
                 t_dead, t_ult = time.perf_counter() + dt, None
                 continue
 
             if not habilitado.value:
                 if enviando:
-                    if not p["FR5_SIMULACRO"]:
-                        robot.ServoMoveEnd()
+                    if not p["FR5_SIMULACRO"] and _rpc(robot.ServoMoveEnd, timeout=1.0) == _TIMEOUT:
+                        sucio = True
+                        print("  fr5_servo: la controladora no contesta a ServoMoveEnd")
                     enviando = False
                     print("⏸  fr5_servo: ServoMoveEnd (en espera)")
                 if est[_E_ESTADO] != ERROR:
@@ -599,9 +662,15 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
                 continue
 
             if not enviando:                              # ── arranque del streaming ──
-                r = robot.GetActualJointPosDegree(0)
-                if _ret(r) != 0:
-                    print(f"✗ fr5_servo: no puedo leer la pose real ({_ret(r)}); no envío")
+                if sucio:                                # p. ej. el error se borró en la WebApp
+                    _directo(_proxy_directo(p["FR5_IP"], 2.0), "ServoMoveEnd")
+                    _renovar_xmlrpc(robot, p["FR5_IP"])
+                    servoj, sucio = _LlamadaServoJ(robot, p), False
+                    print("🔌 fr5_servo: conexión XML-RPC renovada")
+                r = _rpc(robot.GetActualJointPosDegree, 0, timeout=2.0)
+                if r == _TIMEOUT or isinstance(r, str) or _ret(r) != 0:
+                    print(f"✗ fr5_servo: no puedo leer la pose real ({r if isinstance(r, str) else _ret(r)}); no envío")
+                    sucio = sucio or r == _TIMEOUT
                     habilitado.value = 0
                     est[_E_ESTADO] = ERROR
                     continue
@@ -609,7 +678,9 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
                 v_cmd[:] = 0.0
                 cmd_id += 1
                 if not p["FR5_SIMULACRO"]:
-                    ret = _ret(robot.ServoMoveStart())
+                    ret = _ret(_rpc(robot.ServoMoveStart, timeout=2.0))
+                    if ret == _TIMEOUT:
+                        sucio = True
                     if ret != 0:
                         print(f"✗ fr5_servo: ServoMoveStart → {ret} (¿modo automático y "
                               f"robot habilitado?)")
@@ -657,13 +728,11 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
                 if errores_seg >= p["FR5_ERRORES_MAX"]:
                     print(f"✗ fr5_servo: {errores_seg} ServoJ fallidos seguidos (último: {ret})"
                           " → dejo de enviar")
-                    try:
-                        robot.ServoMoveEnd()
-                    except Exception:
-                        pass
                     enviando = False
                     habilitado.value = 0
                     est[_E_ESTADO] = ERROR
+                    if _rpc(robot.ServoMoveEnd, timeout=1.0) == _TIMEOUT:
+                        sucio = True
                     continue
             else:
                 errores_seg = 0
@@ -700,7 +769,7 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
                 pass
 
         if enviando and not p["FR5_SIMULACRO"]:
-            robot.ServoMoveEnd()
+            _rpc(robot.ServoMoveEnd, timeout=1.0)
             print("⏹  fr5_servo: ServoMoveEnd")
     except KeyboardInterrupt:
         pass
@@ -709,11 +778,11 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
         if robot is not None:
             try:
                 if est[_E_ESTADO] in (ACERCANDO, ENVIANDO) and not p["FR5_SIMULACRO"]:
-                    robot.ServoMoveEnd()
+                    _rpc(robot.ServoMoveEnd, timeout=1.0)
             except Exception:
                 pass
             try:
-                robot.CloseRPC()
+                _rpc(robot.CloseRPC, timeout=1.0)
             except Exception:
                 pass
         if est[_E_ESTADO] != ERROR:

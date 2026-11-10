@@ -1312,7 +1312,7 @@ FR5_CPU          = None          # núcleo fijo para el proceso (None = cualquie
 # "colisión" sin tocar nada. Valores en diagnosticos/ajustar_gemelo.py (apartado 3).
 # None = no tocar lo que ya tenga la controladora. Solo se escriben fuera de SIMULACRO.
 # Comprobación: en modo arrastre de la WebApp, al soltar el brazo debe quedarse QUIETO.
-FR5_CARGA_KG            = 1.3     # mano + adaptador, pesados el 10-nov
+FR5_CARGA_KG            = 2.2     # mano + adaptador, pesados el 10-nov
 FR5_CARGA_CDM_MM        = None    # centro de masas en la brida, mm (x, y, z). Sin medir: sacadlo con
                                   # la identificación de carga de la WebApp y ponedlo aquí
 # 10-nov: herramienta (TCP) = centro de la palma de la ORCA, sacado del modelo de MuJoCo
@@ -1437,10 +1437,11 @@ AUTONOMO_MAPA_MAX_DIBUJO = 6000          # máx. de vóxeles que se dibujan (el 
 # caja = semi-lados de la herramienta en su marco (para dibujarla y quitarla del mapa al cogerla).
 # Marcadores para imprimir:  python -m skill_shield.autonomo.herramientas --generar
 AUTONOMO_HERRAMIENTAS = [
-    dict(id=0,  nombre="Destornillador",  tipo="herramienta",  lado=0.030,
+    # ids desde el 20: del 0 al 16 son los del tablero de calibración (mismo diccionario 4x4)
+    dict(id=20, nombre="Destornillador",  tipo="herramienta",  lado=0.030,
          desplazamiento=(0.0, 0.0, -0.015), giro_deg=(0, 0, 0), caja=(0.10, 0.016, 0.016)),
-    dict(id=10, nombre="Punto de uso",    tipo="punto_uso",    lado=0.040),
-    dict(id=11, nombre="Punto de dejada", tipo="punto_dejada", lado=0.040),
+    dict(id=21, nombre="Punto de uso",    tipo="punto_uso",    lado=0.040),
+    dict(id=22, nombre="Punto de dejada", tipo="punto_dejada", lado=0.040),
 ]
 AUTONOMO_HERRAMIENTAS_N_ESTABLE = 5      # imágenes seguidas antes de darla por buena
 AUTONOMO_HERRAMIENTAS_OLVIDO_S  = 2.0    # sin verla este tiempo → deja de aparecer
@@ -1448,20 +1449,27 @@ AUTONOMO_HERRAMIENTAS_OLVIDO_S  = 2.0    # sin verla este tiempo → deja de apa
 # ═══════════════════════════════════════════════════════════════════════════
 # CALIBRACIÓN CÁMARA DE CABEZA → ROBOT (10-nov, paso 4) — calibrar_camara_robot.py
 # ═══════════════════════════════════════════════════════════════════════════
-# Tablero ChArUco en la brida/mano. Diccionario 5x5 para no confundirlo con los marcadores 4x4
-# que llevarán las herramientas (paso 5). Si al imprimirlo el cuadrado no mide «lado», pon aquí
-# la medida REAL (con regla) antes de calibrar.
-CALIB_ROBOT_TABLERO = dict(cuadros=(5, 4), lado=0.030, marcador=0.022, diccionario="DICT_5X5_100")
+# Tablero ChArUco en la brida/mano: el de la calibración extrínseca (7x5, 4x4), medido el 10-nov:
+# cuadro 20 mm, marcador 12,5 mm. Sus marcadores son los ids 0-16 del diccionario 4x4: por eso las
+# herramientas usan ids a partir del 20, y el detector de herramientas ignora los del tablero.
+# Si se cambia de tablero, poned aquí sus medidas REALES (con regla o pie de rey).
+CALIB_ROBOT_TABLERO = dict(cuadros=(7, 5), lado=0.020, marcador=0.0125, diccionario="DICT_4X4_50")
 CALIB_ROBOT_ARCHIVO   = "camara_robot.json"     # resultado (T_mundo_cam, en el marco del MJCF)
 CALIB_ROBOT_POSTURAS  = "calib_posturas.json"   # posturas enseñadas (joints): se reutilizan siempre
 CALIB_ROBOT_MUESTRAS  = "calib_muestras.json"   # datos brutos de la última calibración (--recalcular)
 CALIB_ROBOT_MIN_MUESTRAS = 15
 CALIB_ROBOT_ERROR_MAX_MM = 5.0                  # criterio de la hoja de ruta
-CALIB_ROBOT_VEL_MAX_DEG_S = 15.0                # tope del FR5 al ir solo a las posturas (con pedal)
+CALIB_ROBOT_VEL_MAX_DEG_S = 10.0                # tope del FR5 al ir solo a las posturas (con pedal)
 CALIB_ROBOT_ESPERA_S  = 1.0                     # espera en cada postura antes de capturar
 CALIB_ROBOT_VERIFICAR_N = 4                     # posturas que usa --verificar
 # Calibración automática (--auto): el programa elige las posturas comprobando choques con el modelo
 # de colisión de la teleoperación (soporte, suelo y TELEOP_FR5_OBSTACULOS: ¡que la mesa esté bien!)
 CALIB_AUTO_POSTURAS   = 20                      # posturas de medida (además de las ~10 de explorar)
-CALIB_AUTO_RADIO_MANO = 0.11                    # m: la mano + el tablero, para las colisiones
+CALIB_AUTO_RADIO_MANO = 0.13                    # m: la mano + el tablero (14x10 cm), para las colisiones
 CALIB_AUTO_AMPLITUD_DEG = (30, 20, 25, 45, 45, 70)   # cuánto puede alejarse cada joint de la postura de inicio
+CALIB_AUTO_RESET      = True                    # colisión → borrar error, disable, enable solo (luego, P otra vez)
+# La mano NO puede acercarse al antebrazo ni al giro del J4 (si la muñeca se dobla mucho, la mano
+# vuelve hacia atrás, golpea el J4 y se rompe una pieza). Se mide con las piezas reales del gemelo
+# (skill_shield/autonomo/choque_mano.py), mano + tablero. Hueco mínimo que se exige, en metros.
+# Con la muñeca recta el hueco es de unos 6 cm, así que no subáis de 0.05.
+CALIB_MANO_HOLGURA    = 0.03
