@@ -1398,3 +1398,42 @@ AUTONOMO_WEB_PUERTO   = 8080
 AUTONOMO_HZ           = 60.0             # refresco del gemelo
 AUTONOMO_PYTHON_PERCEPCION = None        # intérprete de OTRO venv para la cámara/percepción
                                          # (p. ej. si YOLO choca con numpy<2); None = el mismo
+AUTONOMO_CON_MANO     = True             # vigilar la OrcaHand (SOLO LECTURA: no activa el par)
+AUTONOMO_CON_TACTIL   = True             # lanzar el puente de los táctiles (si ORCA_TACTIL_ACTIVO)
+# Web (FastAPI): mandos protegidos con contraseña. CAMBIADLA. None = sin contraseña (cualquiera
+# de la red podría pisar el pedal o reiniciar el robot desde la web).
+AUTONOMO_WEB_CLAVE    = "elecnor"
+# Pedal de la web: mantener pulsado el botón grande (o la barra espaciadora). La página manda un
+# latido cada 100 ms; sin latido durante AUTONOMO_PEDAL_LATIDO_S = pedal SUELTO.
+AUTONOMO_PEDAL_OBLIGATORIO = True        # cómo arranca la opción «Pedal obligatorio» de la web
+AUTONOMO_PERMITIR_SIN_PEDAL = True       # False = la web NO puede desactivar el pedal
+AUTONOMO_PEDAL_LATIDO_S = 0.35
+# Gemelo en la web (render_gemelo.py): MuJoCo dibujado sin ventana, solo la escena (sin menús)
+AUTONOMO_SIM_WEB      = True             # False = sin gemelo en la web
+AUTONOMO_VENTANA_MUJOCO = True           # False = sin ventana de MuJoCo en el PC (solo la web)
+AUTONOMO_SIM_ANCHO    = 960              # tamaño del vídeo del gemelo
+AUTONOMO_SIM_ALTO     = 540
+AUTONOMO_SIM_FPS      = 20
+AUTONOMO_SIM_GL       = "egl"            # OpenGL sin ventana: "egl" (GPU) · "osmesa" (CPU) · "glfw"
+AUTONOMO_SIM_VISTA    = None             # vista inicial; None = la del visor (azimut 90, elevación -20…)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CALIBRACIÓN CÁMARA DE CABEZA → ROBOT (10-nov, paso 4) — calibrar_camara_robot.py
+# ═══════════════════════════════════════════════════════════════════════════
+# Tablero ChArUco en la brida/mano. Diccionario 5x5 para no confundirlo con los marcadores 4x4
+# que llevarán las herramientas (paso 5). Si al imprimirlo el cuadrado no mide «lado», pon aquí
+# la medida REAL (con regla) antes de calibrar.
+CALIB_ROBOT_TABLERO = dict(cuadros=(5, 4), lado=0.030, marcador=0.022, diccionario="DICT_5X5_100")
+CALIB_ROBOT_ARCHIVO   = "camara_robot.json"     # resultado (T_mundo_cam, en el marco del MJCF)
+CALIB_ROBOT_POSTURAS  = "calib_posturas.json"   # posturas enseñadas (joints): se reutilizan siempre
+CALIB_ROBOT_MUESTRAS  = "calib_muestras.json"   # datos brutos de la última calibración (--recalcular)
+CALIB_ROBOT_MIN_MUESTRAS = 15
+CALIB_ROBOT_ERROR_MAX_MM = 5.0                  # criterio de la hoja de ruta
+CALIB_ROBOT_VEL_MAX_DEG_S = 15.0                # tope del FR5 al ir solo a las posturas (con pedal)
+CALIB_ROBOT_ESPERA_S  = 1.0                     # espera en cada postura antes de capturar
+CALIB_ROBOT_VERIFICAR_N = 4                     # posturas que usa --verificar
+# Calibración automática (--auto): el programa elige las posturas comprobando choques con el modelo
+# de colisión de la teleoperación (soporte, suelo y TELEOP_FR5_OBSTACULOS: ¡que la mesa esté bien!)
+CALIB_AUTO_POSTURAS   = 20                      # posturas de medida (además de las ~10 de explorar)
+CALIB_AUTO_RADIO_MANO = 0.11                    # m: la mano + el tablero, para las colisiones
+CALIB_AUTO_AMPLITUD_DEG = (30, 20, 25, 45, 45, 70)   # cuánto puede alejarse cada joint de la postura de inicio

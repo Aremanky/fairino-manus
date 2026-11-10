@@ -59,12 +59,25 @@ Lo más probable es que falle, pero es bueno para ir depurando el .txt
 
 ### Funcionamiento autónomo (en desarrollo)
 - Última opción del menú. Fija `MODO_EJECUCION = "AUTONOMO"` y salta al paquete `skill_shield/autonomo/`, con su propio bucle.
-- **Paso 2 (ahora):** cámara de cabeza + gemelo en MuJoCo copiando la pose real del FR5 + web. **El robot no se mueve**: `fr5_servo` va siempre en simulacro en este modo y no se arma nunca.
-- Web de solo lectura en `http://<IP del PC>:8080/` desde cualquier equipo de la red (puerto en `AUTONOMO_WEB_PUERTO`). Si no carga desde otro equipo, abre el puerto en el cortafuegos: `sudo ufw allow 8080/tcp`.
-- Cámara de cabeza = la antigua cámara B (`AUTONOMO_CAM_MXID`). Si la tiene abierta otro programa, el gemelo y la web siguen sin imagen.
+- **Paso 2 (ahora):** cámara de cabeza + gemelo en MuJoCo copiando la pose real del FR5 + estado de la OrcaHand y sus táctiles + web. **El robot no se mueve**: `fr5_servo` va siempre en simulacro en este modo y no se arma nunca. La OrcaHand se vigila en solo lectura (no se activa el par).
+- **Web (FastAPI)** en `http://<IP del PC>:8080/` desde cualquier equipo de la red. Necesita `./venv_nivel6/bin/pip install fastapi uvicorn`. Si no carga desde otro equipo: `sudo ufw allow 8080/tcp`.
+  - Lectura abierta: imagen de la cámara, FR5, OrcaHand, táctiles por dedo, gemelo.
+  - Mandos con contraseña (`AUTONOMO_WEB_CLAVE`, **cambiadla**): pedal, opción «Pedal obligatorio» y **Reiniciar tras colisión** (borrar error → disable → enable).
+  - **Pedal de la web:** botón grande (o barra espaciadora) que hay que mantener pulsado. Si se suelta, se corta la red o se cierra la pestaña, en ≤ 0,35 s el pedal cuenta como suelto. Con «Pedal obligatorio» desactivado se permite moverse sin pedal (se puede bloquear con `AUTONOMO_PERMITIR_SIN_PEDAL = False`). Siempre arranca activado.
+- **Gemelo en la web:** pestañas *Cámara · Gemelo · Las dos*. El gemelo se dibuja sin ventana (`render_gemelo.py`, solo la escena, sin los menús del visor): arrastrar para girar, Mayús+arrastrar para mover, rueda o +/− para acercar, y vistas Inicial/Frente/Lado/Arriba. La vista la comparten todos los que miran. Con `AUTONOMO_VENTANA_MUJOCO = False` ya no se abre la ventana de MuJoCo en el PC. Necesita OpenGL sin ventana (`AUTONOMO_SIM_GL = "egl"`; si falla prueba osmesa y glfw).
+- **Superponer gemelo** (con la calibración del paso 4): el gemelo visto desde la cámara calibrada, encima de la imagen real. Si la calibración está bien, el robot virtual tapa al real.
+- Cámara de cabeza = la antigua cámara B (`AUTONOMO_CAM_MXID`).
 - Para salir: cerrar la ventana de MuJoCo o Ctrl+C.
 - Pruebas por separado: `python -m skill_shield.autonomo.camara --ventana` · `python -m skill_shield.autonomo.web`
 - Cerrar el menú con la X o Esc equivale a pulsar este botón (es el «Cancelar» de zenity).
+
+### Calibración cámara de cabeza → robot (paso 4)
+`calibrar_camara_robot.py` — tablero ChArUco en la mano y la cámara fija en el soporte. Resultado: `camara_robot.json` (`T_mundo_cam` en el marco del MJCF). Como la cámara va en la misma peana que el robot, **mover la peana no estropea la calibración**.
+1. `python calibrar_camara_robot.py --generar-tablero` → imprime `tablero_calib_robot.png` a 300 ppp, mide el cuadrado (30 mm) y móntalo plano en la mano.
+2. `python calibrar_camara_robot.py --auto` → **automática**: pon el robot (arrastre) donde la cámara vea el tablero y **mantén la P** con la ventana delante. Explora con giros pequeños, planifica ~20 posturas seguras (modelo de colisión + tablero visible), las recorre y calibra (~5 min). Criterio: error medio ≤ 5 mm y giro ≥ 30°.
+3. `python calibrar_camara_robot.py --verificar` → comprueba en 4 posturas guardadas (`--aqui`: en la postura actual, sin moverlo). Si falla, algo se ha movido → `--repetir` (repite las posturas guardadas) o `--auto`.
+4. `--manual` (mueves tú el robot y pulsas ESPACIO) y `--recalcular` (con las muestras guardadas) siguen disponibles.
+El robot solo se mueve con el pedal y a ≤ 15 °/s. Antes de mover, se comprueba cada trayecto con el modelo de colisión: **revisa que el soporte y la mesa (`TELEOP_FR5_OBSTACULOS`) del modelo coinciden con la realidad**. Cierra antes el modo autónomo: la cámara y el robot tienen que estar libres.
 
 ### Mano Física + Gemelo Digital (teleoperación con el FR5 físico)
 - Arranca el FR5 real (bloque `TELEOP_REAL_*` de `config.py`; `TELEOP_REAL_FR5_SIMULACRO = True` para probar sin que se mueva).

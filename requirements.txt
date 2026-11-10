@@ -158,3 +158,5 @@ mujoco
 torch
 python-mbedtls
 evdev
+fastapi
+uvicorn

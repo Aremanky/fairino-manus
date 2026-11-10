@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skill Shield · Funcionamiento autónomo</title>
+<link rel="icon" href="/logo.png">
+<style>
+:root{
+  --azul:#003f87; --azul-osc:#002b5c; --azul-claro:#e8eef7; --naranja:#f47c00; --naranja-osc:#c96500;
+  --fondo:#f2f4f8; --tarjeta:#ffffff; --texto:#14213d; --suave:#5b6b82; --borde:#dce3ec;
+  --ok:#1e8a4a; --ok-fondo:#e3f4ea; --aviso:#b26b00; --aviso-fondo:#fff2dd; --mal:#c62828; --mal-fondo:#fde7e7;
+  --radio:12px; --sombra:0 1px 2px rgba(0,33,72,.06),0 4px 16px rgba(0,33,72,.06);
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--fondo);color:var(--texto);font:15px/1.45 "Segoe UI",system-ui,-apple-system,Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}
+button{font:inherit;cursor:pointer}
+/* ── cabecera ── */
+.cab{background:#fff;border-bottom:1px solid var(--borde)}
+.cab .dentro{display:flex;align-items:center;gap:18px;max-width:1440px;margin:0 auto;padding:12px 24px}
+.cab img{height:40px;width:auto;display:block}
+.cab .sep{width:1px;height:34px;background:var(--borde)}
+.cab .nombre{display:flex;flex-direction:column;line-height:1.2}
+.cab .nombre b{font-size:17px;color:var(--azul);letter-spacing:.01em}
+.cab .nombre span{font-size:13px;color:var(--suave)}
+.cab .der{margin-left:auto;display:flex;align-items:center;gap:12px}
+.btn-sesion{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--borde);background:#fff;color:var(--azul);padding:8px 14px;border-radius:999px;font-weight:600;font-size:13px}
+.btn-sesion:hover{border-color:var(--azul)}
+.btn-sesion.abierta{background:var(--azul-claro);border-color:transparent}
+.btn-sesion svg{width:15px;height:15px}
+/* ── franja de estado ── */
+.franja{background:linear-gradient(90deg,var(--azul-osc),var(--azul));color:#fff;position:relative;overflow:hidden}
+.franja::after{content:"";position:absolute;right:-60px;top:-40px;width:340px;height:140px;background:var(--naranja);transform:rotate(-14deg);opacity:.9;clip-path:polygon(0 70%,100% 0,100% 18%,0 82%)}
+.franja .dentro{display:flex;flex-wrap:wrap;align-items:center;gap:10px;max-width:1440px;margin:0 auto;padding:12px 24px;position:relative;z-index:1}
+.chip{display:inline-flex;align-items:center;gap:7px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.18);border-radius:999px;padding:5px 11px;font-size:12.5px;white-space:nowrap}
+.chip b{font-weight:600}
+.punto{width:9px;height:9px;border-radius:50%;background:#9fb0c6;flex:none}
+.punto.ok{background:#3fd27a;box-shadow:0 0 0 3px rgba(63,210,122,.22)}
+.punto.aviso{background:#ffb02e;box-shadow:0 0 0 3px rgba(255,176,46,.22)}
+.punto.mal{background:#ff5a5a;box-shadow:0 0 0 3px rgba(255,90,90,.22)}
+.paso{margin-left:auto;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;background:#fff;color:var(--azul);padding:6px 12px;border-radius:999px}
+/* ── rejilla ── */
+main{max-width:1440px;margin:0 auto;padding:20px 24px 8px;display:grid;grid-template-columns:minmax(0,1.75fr) minmax(320px,1fr);gap:20px;align-items:start}
+.col{display:flex;flex-direction:column;gap:20px;min-width:0}
+.tarjeta{background:var(--tarjeta);border:1px solid var(--borde);border-radius:var(--radio);box-shadow:var(--sombra);overflow:hidden}
+.tarjeta>header{display:flex;align-items:center;gap:10px;padding:12px 18px;border-bottom:1px solid var(--borde)}
+.tarjeta>header h2{margin:0;font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--azul)}
+.tarjeta>header h2::before{content:"";display:inline-block;width:4px;height:13px;background:var(--naranja);margin-right:9px;vertical-align:-1px;border-radius:2px}
+.tarjeta>header .meta{margin-left:auto;font-size:12.5px;color:var(--suave);font-variant-numeric:tabular-nums}
+.cuerpo{padding:16px 18px}
+/* vídeo */
+.marco{position:relative;background:#0b1626;aspect-ratio:4/3}
+.marco img{width:100%;height:100%;object-fit:contain;display:block}
+.marco .vacio{position:absolute;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;gap:8px;color:#b8c6d8;font-size:14px}
+.marco.sin .vacio{display:flex}
+.marco.sin img{visibility:hidden}
+.pie-video{display:flex;flex-wrap:wrap;align-items:center;gap:6px 18px;padding:10px 18px;font-size:12.5px;color:var(--suave);font-variant-numeric:tabular-nums}
+.pie-video b{color:var(--texto);font-weight:600}
+.seg{display:inline-flex;background:var(--fondo);border-radius:999px;padding:3px;margin-left:12px}
+.seg button{border:0;background:transparent;color:var(--suave);font-size:12.5px;font-weight:600;padding:5px 12px;border-radius:999px}
+.seg button.act{background:#fff;color:var(--azul);box-shadow:0 1px 3px rgba(0,33,72,.15)}
+.paneles[data-modo=cam] .panel-sim,.paneles[data-modo=sim] .panel-cam{display:none}
+.paneles[data-modo=dos]{display:grid;grid-template-columns:1fr 1fr;gap:2px;background:#0b1626}
+.paneles[data-modo=dos] .marco.gemelo{aspect-ratio:4/3}
+.marco.gemelo{aspect-ratio:16/9;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;background:#1d2a3a}
+.marco.gemelo.arrastrando{cursor:grabbing}
+.marco.gemelo img{object-fit:cover;pointer-events:none}
+.superpuesta{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:.5;display:none;pointer-events:none}
+.etq-marco{position:absolute;left:10px;top:10px;background:rgba(0,43,92,.78);color:#fff;font-size:11.5px;font-weight:600;letter-spacing:.03em;padding:4px 9px;border-radius:999px;pointer-events:none}
+.etq-marco i{font-style:normal;font-weight:400;opacity:.8}
+.paneles[data-modo=dos] .etq-marco i{display:none}
+.vistas{position:absolute;right:10px;bottom:10px;display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
+.vistas button{border:0;background:rgba(255,255,255,.92);color:var(--azul);font-size:12px;font-weight:600;padding:5px 10px;border-radius:7px;box-shadow:0 1px 4px rgba(0,0,0,.2)}
+.vistas button:hover{background:#fff}
+.vistas .sep-v{width:6px}
+.superponer{display:none;align-items:center;gap:8px;margin-left:auto;color:var(--texto);font-weight:600}
+.superponer.ver{display:inline-flex}
+.superponer input[type=range]{width:110px;accent-color:var(--naranja)}
+.superponer input[type=checkbox]{accent-color:var(--azul);width:16px;height:16px}
+/* filas */
+.fila{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--borde);font-size:14px}
+.fila:last-child{border-bottom:0}
+.fila>span:first-child{color:var(--suave)}
+.fila>span:last-child{text-align:right;font-variant-numeric:tabular-nums}
+.etq{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12.5px;font-weight:600}
+.etq.ok{background:var(--ok-fondo);color:var(--ok)}.etq.aviso{background:var(--aviso-fondo);color:var(--aviso)}
+.etq.mal{background:var(--mal-fondo);color:var(--mal)}.etq.neutro{background:var(--azul-claro);color:var(--azul)}
+/* control */
+.pedal{position:relative;width:100%;height:170px;border:0;border-radius:16px;color:#fff;background:linear-gradient(160deg,#0a55ad,var(--azul) 55%,var(--azul-osc));box-shadow:0 6px 0 var(--azul-osc),0 10px 24px rgba(0,43,92,.25);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;user-select:none;-webkit-user-select:none;touch-action:none;-webkit-touch-callout:none;transition:transform .06s,box-shadow .06s,background .15s}
+.pedal .grande{font-size:30px;font-weight:800;letter-spacing:.14em}
+.pedal .peq{font-size:13px;opacity:.85}
+.pedal svg{width:34px;height:34px;opacity:.9}
+.pedal.pulsado{transform:translateY(5px);box-shadow:0 1px 0 var(--naranja-osc),0 4px 14px rgba(244,124,0,.35);background:linear-gradient(160deg,#ff9a2e,var(--naranja) 55%,var(--naranja-osc))}
+.pedal.confirmado::after{content:"PISADO";position:absolute;top:12px;right:14px;font-size:11px;font-weight:700;letter-spacing:.1em;background:rgba(255,255,255,.95);color:var(--naranja-osc);padding:3px 8px;border-radius:999px}
+.pedal:disabled{background:#c9d3df;box-shadow:0 6px 0 #aebaca;color:#f4f7fb;cursor:not-allowed}
+.pedal:focus-visible{outline:3px solid var(--naranja);outline-offset:3px}
+.mov{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:18px 0 6px}
+.mov .motivo{font-size:12.5px;color:var(--suave);text-align:right}
+.interruptor{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 0;border-top:1px solid var(--borde);margin-top:10px}
+.interruptor .txt b{display:block;font-size:14px}
+.interruptor .txt span{font-size:12.5px;color:var(--suave)}
+.sw{position:relative;width:50px;height:28px;flex:none}
+.sw input{opacity:0;width:0;height:0;position:absolute}
+.sw .pista{position:absolute;inset:0;background:#c3ccd8;border-radius:999px;transition:.15s;cursor:pointer}
+.sw .pista::before{content:"";position:absolute;width:22px;height:22px;left:3px;top:3px;background:#fff;border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:.15s}
+.sw input:checked+.pista{background:var(--azul)}
+.sw input:checked+.pista::before{transform:translateX(22px)}
+.sw input:disabled+.pista{opacity:.5;cursor:not-allowed}
+.sw input:focus-visible+.pista{outline:3px solid var(--naranja);outline-offset:2px}
+.aviso-paso{display:flex;gap:10px;align-items:flex-start;background:var(--aviso-fondo);color:#6b4200;border-radius:10px;padding:10px 12px;font-size:13px;margin-top:4px}
+.aviso-paso svg{flex:none;width:18px;height:18px;margin-top:1px}
+.btn-reset{width:100%;display:flex;align-items:center;justify-content:center;gap:10px;margin-top:14px;padding:12px 14px;border-radius:10px;border:1.5px solid var(--azul);background:#fff;color:var(--azul);font-weight:700}
+.btn-reset:hover{background:var(--azul-claro)}
+.btn-reset:disabled{opacity:.5;cursor:not-allowed}
+.btn-reset svg{width:18px;height:18px}
+.nota-reset{font-size:12px;color:var(--suave);text-align:center;margin-top:6px}
+/* articulaciones */
+.juntas{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
+.junta{background:var(--fondo);border-radius:8px;padding:8px 10px}
+.junta span{display:block;font-size:11px;font-weight:700;color:var(--suave);letter-spacing:.06em}
+.junta b{font-size:16px;font-variant-numeric:tabular-nums;color:var(--azul)}
+/* mano */
+.mano-rejilla{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:24px}
+.yemas{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;align-items:end;height:150px;margin-top:6px}
+.yema{display:flex;flex-direction:column;align-items:center;gap:6px;height:100%}
+.yema .barra{position:relative;flex:1;width:100%;max-width:44px;background:var(--fondo);border-radius:8px;overflow:hidden}
+.yema .barra i{position:absolute;left:0;right:0;bottom:0;height:0;background:linear-gradient(0deg,var(--azul),#2f7fd6);border-radius:8px;transition:height .15s}
+.yema .barra i.fuerte{background:linear-gradient(0deg,var(--naranja-osc),var(--naranja))}
+.yema b{font-size:13px;font-variant-numeric:tabular-nums}
+.yema span{font-size:11.5px;color:var(--suave)}
+.subt{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--suave);margin:0 0 4px}
+/* pie */
+footer{max-width:1440px;margin:0 auto;padding:12px 24px 28px;display:flex;flex-wrap:wrap;gap:8px 24px;justify-content:space-between;font-size:12.5px;color:var(--suave)}
+footer b{color:var(--azul)}
+/* modales y avisos */
+.velo{position:fixed;inset:0;background:rgba(10,25,48,.55);display:none;align-items:center;justify-content:center;padding:16px;z-index:50}
+.velo.abierto{display:flex}
+.modal{background:#fff;border-radius:14px;max-width:420px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden}
+.modal header{background:var(--azul);color:#fff;padding:14px 18px;font-weight:700}
+.modal .cuerpo p{margin:0 0 12px;font-size:14px}
+.modal input{width:100%;padding:11px 12px;border:1px solid var(--borde);border-radius:8px;font:inherit}
+.modal input:focus{outline:2px solid var(--azul);border-color:transparent}
+.modal .botones{display:flex;gap:10px;justify-content:flex-end;padding:0 18px 16px}
+.b{padding:10px 16px;border-radius:8px;border:1px solid var(--borde);background:#fff;font-weight:600}
+.b.prim{background:var(--azul);border-color:var(--azul);color:#fff}
+.b.peligro{background:var(--naranja);border-color:var(--naranja);color:#fff}
+.err{color:var(--mal);font-size:13px;min-height:18px;margin-top:6px}
+.tostada{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(20px);background:var(--azul-osc);color:#fff;padding:11px 16px;border-radius:10px;font-size:14px;box-shadow:0 8px 24px rgba(0,0,0,.25);opacity:0;pointer-events:none;transition:.2s;z-index:60;max-width:calc(100% - 32px)}
+.tostada.ver{opacity:1;transform:translateX(-50%)}
+.desconexion{display:none;background:var(--mal);color:#fff;text-align:center;font-size:13.5px;padding:8px 16px}
+.desconexion.ver{display:block}
+@media (max-width:1000px){main{grid-template-columns:1fr;padding:16px}.paneles[data-modo=dos]{grid-template-columns:1fr}.col{display:contents}.o1{order:1}.o2{order:2}.o3{order:3}.o4{order:4}.mano-rejilla{grid-template-columns:1fr}.cab .dentro,.franja .dentro,footer{padding-left:16px;padding-right:16px}}
+@media (max-width:600px){.franja::after{display:none}.tarjeta>header{flex-wrap:wrap}.seg{margin-left:0}.vistas button{padding:5px 8px}.cab .sep,.cab .nombre span{display:none}.cab img{height:32px}.paso{margin-left:0}.btn-sesion .t{display:none}.juntas{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div class="desconexion" id="desconexion">Sin conexión con el PC del robot. Reintentando…</div>
+<header class="cab"><div class="dentro">
+  <img src="/logo.png" alt="IDI · Investigación + Desarrollo + Innovación · Grupo Elecnor">
+  <span class="sep"></span>
+  <div class="nombre"><b>Skill Shield · Funcionamiento autónomo</b><span>FAIRINO FR5 + OrcaHand · cámara de cabeza OAK-D Pro</span></div>
+  <div class="der">
+    <button class="btn-sesion" id="btnSesion" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path id="candado" d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+      <span class="t" id="txtSesion">Desbloquear mandos</span>
+    </button>
+  </div>
+</div></header>
+
+<div class="franja"><div class="dentro">
+  <span class="chip"><i class="punto" id="pFr5"></i><b>FR5</b><span id="cFr5">—</span></span>
+  <span class="chip"><i class="punto" id="pMano"></i><b>OrcaHand</b><span id="cMano">—</span></span>
+  <span class="chip"><i class="punto" id="pTactil"></i><b>Táctiles</b><span id="cTactil">—</span></span>
+  <span class="chip"><i class="punto" id="pCam"></i><b>Cámara</b><span id="cCam">—</span></span>
+  <span class="chip"><i class="punto" id="pGem"></i><b>Gemelo</b><span id="cGem">—</span></span>
+  <span class="chip"><i class="punto" id="pCal"></i><b>Calibración</b><span id="cCal">—</span></span>
+  <span class="paso" id="paso">Paso 2 · solo lectura</span>
+</div></div>
+
+<main>
+  <div class="col">
+    <section class="tarjeta o1">
+      <header><h2>Visión</h2>
+        <div class="seg" role="tablist" aria-label="Qué ver">
+          <button type="button" data-modo="cam" class="act">Cámara</button><button type="button" data-modo="sim">Gemelo</button><button type="button" data-modo="dos">Las dos</button>
+        </div>
+        <span class="meta" id="camMeta">—</span></header>
+      <div class="paneles" id="paneles" data-modo="cam">
+        <div class="panel-cam">
+          <div class="marco sin" id="marco">
+            <img id="video" alt="Imagen en directo de la cámara de cabeza">
+            <img id="simcam" class="superpuesta" alt="">
+            <div class="vacio"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h3l2-3h8l2 3h3v13H3z"/><circle cx="12" cy="13" r="4"/></svg><span id="camVacio">Esperando a la cámara…</span></div>
+            <span class="etq-marco">Cámara de cabeza</span>
+          </div>
+        </div>
+        <div class="panel-sim">
+          <div class="marco gemelo sin" id="marcoSim">
+            <img id="sim" alt="Gemelo digital del robot en MuJoCo" draggable="false">
+            <div class="vacio"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 2l9 5v10l-9 5-9-5V7z"/><path d="M12 22V12M21 7l-9 5-9-5"/></svg><span id="simVacio">Esperando al gemelo…</span></div>
+            <span class="etq-marco">Gemelo digital <i>· arrastra para girar · Mayús+arrastrar para mover · rueda para acercar</i></span>
+            <div class="vistas">
+              <button type="button" data-preset="inicial">Inicial</button><button type="button" data-preset="frente">Frente</button><button type="button" data-preset="lado">Lado</button><button type="button" data-preset="arriba">Arriba</button><span class="sep-v"></span><button type="button" id="zMas" aria-label="Acercar">+</button><button type="button" id="zMenos" aria-label="Alejar">−</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="pie-video"><span id="camPie"></span>
+        <label class="superponer" id="supCtl" title="El gemelo visto desde la cámara calibrada, encima de la imagen real: si la calibración está bien, el robot virtual tapa al real">
+          <input type="checkbox" id="chkSup"> Superponer gemelo <input type="range" id="opac" min="10" max="90" value="50" aria-label="Opacidad del gemelo">
+        </label>
+      </div>
+    </section>
+
+        <section class="tarjeta o4">
+      <header><h2>OrcaHand</h2><span class="meta" id="manoMeta">—</span></header>
+      <div class="cuerpo mano-rejilla">
+        <div>
+          <p class="subt">Motores</p>
+          <div class="fila"><span>Estado</span><span id="manoEstado">—</span></div>
+          <div class="fila"><span>Motores que responden</span><span id="manoMotores">—</span></div>
+          <div class="fila"><span>Temperatura máx.</span><span id="manoTemp">—</span></div>
+          <div class="fila"><span>Par activado</span><span id="manoPar">—</span></div>
+          <div class="fila"><span>Puerto</span><span id="manoPuerto">—</span></div>
+        </div>
+        <div>
+          <p class="subt">Sensores táctiles · fuerza normal (N)</p>
+          <div class="yemas" id="yemas"></div>
+          <div class="fila" style="margin-top:8px"><span>Estado</span><span id="tactilEstado">—</span></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="tarjeta o2">
+      <header><h2>Control</h2><span class="meta" id="ctrlMeta"></span></header>
+      <div class="cuerpo">
+        <button class="pedal" id="pedal" type="button" aria-label="Pedal: mantener pulsado">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 21h10l1-6-4-1-1-9a2 2 0 0 0-4 0v9l-3 2z"/></svg>
+          <span class="grande">PEDAL</span>
+          <span class="peq" id="pedalTxt">Mantén pulsado (o la barra espaciadora)</span>
+        </button>
+        <div class="mov"><span id="movEtq" class="etq neutro">—</span><span class="motivo" id="movMotivo"></span></div>
+        <div class="aviso-paso" id="avisoPaso"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v5M12 16h.01"/></svg>
+          <span>Paso 2: el FR5 está en simulacro. El pedal se registra, pero el robot no se mueve.</span></div>
+        <div class="interruptor">
+          <div class="txt"><b>Pedal obligatorio</b><span id="swTxt">Hombre muerto: el robot solo se mueve mientras se mantiene pulsado.</span></div>
+          <label class="sw"><input type="checkbox" id="swPedal" checked aria-label="Pedal obligatorio"><span class="pista"></span></label>
+        </div>
+        <button class="btn-reset" id="btnReset" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+          Reiniciar tras colisión
+        </button>
+        <div class="nota-reset">Borra el error y hace disable → enable en la controladora</div>
+      </div>
+    </section>
+
+    <section class="tarjeta o3">
+      <header><h2>Robot FR5</h2><span class="meta" id="fr5Meta"></span></header>
+      <div class="cuerpo">
+        <div class="fila"><span>Estado</span><span id="fr5Estado">—</span></div>
+        <div class="fila"><span>Colisión</span><span id="fr5Colision">—</span></div>
+        <div class="fila"><span>Código controladora</span><span id="fr5Codigo">—</span></div>
+        <div class="fila"><span>Envío de movimiento</span><span id="fr5Simulacro">—</span></div>
+        <div class="juntas" id="juntas"></div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<footer>
+  <span><b>Grupo Elecnor</b> · I+D+i · Skill Shield Nivel 6</span>
+  <span>La seta física es la parada de emergencia. El paro de esta página es solo funcional.</span>
+</footer>
+
+<div class="velo" id="veloLogin"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="tLogin">
+  <header id="tLogin">Desbloquear mandos</header>
+  <form class="cuerpo" id="fLogin"><p>Para usar el pedal y el reinicio hace falta la contraseña de la web (<code>AUTONOMO_WEB_CLAVE</code>).</p>
+    <input type="password" id="clave" autocomplete="current-password" placeholder="Contraseña"><div class="err" id="errLogin"></div></form>
+  <div class="botones"><button class="b" type="button" data-cerrar>Cancelar</button><button class="b prim" type="submit" form="fLogin">Entrar</button></div>
+</div></div>
+
+<div class="velo" id="veloConf"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="tConf">
+  <header id="tConf">Confirmar</header>
+  <div class="cuerpo"><p id="txtConf"></p></div>
+  <div class="botones"><button class="b" type="button" data-cerrar>Cancelar</button><button class="b peligro" type="button" id="okConf">Confirmar</button></div>
+</div></div>
+
+<div class="tostada" id="tostada"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const DEDOS = ["Pulgar","Índice","Corazón","Anular","Meñique"];
+const F_MAX = 20;          // N a fondo de escala (el sensor llega a 25,5 N)
+let E = {}, autorizado = false, requiereClave = true;
+let pisando = false, latido = null, swOcupado = false;
+
+// ── utilidades ──
+function punto(el, c){ el.className = "punto " + (c || ""); }
+function etq(el, txt, c){ el.className = "etq " + c; el.textContent = txt; }
+let tTost;
+function tostada(t){ const el=$("tostada"); el.textContent=t; el.classList.add("ver"); clearTimeout(tTost); tTost=setTimeout(()=>el.classList.remove("ver"),2600); }
+async function post(url, datos){
+  const r = await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(datos||{}),credentials:"same-origin"});
+  let j = {}; try { j = await r.json(); } catch(e){}
+  if (r.status === 401 && url !== "/api/login") { abrirLogin(); }
+  return {ok:r.ok, status:r.status, ...j};
+}
+
+// ── yemas y articulaciones (estructura fija) ──
+$("yemas").innerHTML = DEDOS.map((d,i)=>`<div class="yema"><b id="fz${i}">—</b><div class="barra"><i id="bz${i}"></i></div><span>${d}</span></div>`).join("");
+$("juntas").innerHTML = [1,2,3,4,5,6].map(i=>`<div class="junta"><span>J${i}</span><b id="j${i}">—</b></div>`).join("");
+
+// ── pintar estado ──
+function pintar(e){
+  E = e;
+  const vivo = e.edad_s != null && e.edad_s < 2;
+  $("desconexion").classList.remove("ver");
+  const f = e.fr5 || {}, m = e.mano || {}, t = e.tactil || {}, c = e.camara || {}, k = e.control || {}, s = e.sesion || {};
+  autorizado = !!s.autorizado; requiereClave = !!s.requiere_clave;
+
+  // sesión
+  $("btnSesion").classList.toggle("abierta", autorizado && requiereClave);
+  $("btnSesion").style.display = requiereClave ? "" : "none";
+  $("txtSesion").textContent = autorizado ? "Mandos desbloqueados · salir" : "Desbloquear mandos";
+  $("candado").setAttribute("d", autorizado ? "M8 11V7a4 4 0 0 1 7.5-2" : "M8 11V7a4 4 0 0 1 8 0v4");
+
+  // FR5
+  const fr5c = !vivo ? "mal" : !f.en_linea ? "mal" : (f.en_error || f.colision) ? "aviso" : "ok";
+  punto($("pFr5"), fr5c); $("cFr5").textContent = vivo ? (f.texto || "—") : "sin datos";
+  etq($("fr5Estado"), vivo ? (f.texto || "—") : "sin datos del modo autónomo", fr5c === "ok" ? "ok" : fr5c);
+  etq($("fr5Colision"), f.colision ? "COLISIÓN" : "no", f.colision ? "mal" : "ok");
+  $("fr5Codigo").textContent = f.codigo ? f.codigo.join(" / ") : "—";
+  $("fr5Simulacro").textContent = f.simulacro === false ? "REAL" : "bloqueado (simulacro)";
+  $("fr5Meta").textContent = f.en_linea ? "pose real" : "";
+  const q = f.q_real_deg;
+  for (let i=1;i<=6;i++) $("j"+i).textContent = q ? q[i-1].toFixed(1)+"°" : "—";
+
+  // OrcaHand
+  const mc = !vivo ? "mal" : m.estado === "ok" ? "ok" : (m.estado === "aviso" || m.estado === "arrancando") ? "aviso" : "mal";
+  punto($("pMano"), mc); $("cMano").textContent = vivo ? (m.estado === "ok" ? `${m.motores_ok}/${m.motores_total} motores` : (m.texto || "—")) : "sin datos";
+  etq($("manoEstado"), m.texto || "—", mc); $("manoMeta").textContent = "solo lectura · sin par";
+  $("manoMotores").textContent = m.motores_total ? `${m.motores_ok ?? 0} / ${m.motores_total}` : "—";
+  $("manoTemp").textContent = m.temp_max != null ? m.temp_max + " °C" : "—";
+  $("manoPar").textContent = m.par_activo != null ? (m.par_activo ? `${m.par_activo} motores` : "no") : "—";
+  $("manoPuerto").textContent = m.puerto || "—";
+
+  // táctiles
+  const tc = !vivo ? "mal" : t.estado === "ok" ? "ok" : t.estado === "aviso" ? "aviso" : "mal";
+  punto($("pTactil"), tc); $("cTactil").textContent = vivo ? (t.texto || "—") : "sin datos";
+  etq($("tactilEstado"), t.texto || "—", tc);
+  const dedos = t.dedos || [];
+  for (let i=0;i<5;i++){
+    const fz = dedos[i] ? dedos[i].fz : null;
+    $("fz"+i).textContent = fz != null ? fz.toFixed(1) : "—";
+    const bar = $("bz"+i); bar.style.height = fz != null ? Math.min(100, fz / F_MAX * 100) + "%" : "0";
+    bar.classList.toggle("fuerte", fz != null && fz >= 5);
+  }
+
+  const gw = e.gemelo_web || {};
+  const simViva = gw.edad_s != null && gw.edad_s < 2, camSim = gw.cam_edad_s != null && gw.cam_edad_s < 2;
+  $("marcoSim").classList.toggle("sin", !simViva);
+  $("simVacio").textContent = vivo ? "Esperando al gemelo… (render sin ventana de MuJoCo)" : "Sin datos del modo autónomo";
+  $("supCtl").classList.toggle("ver", camSim && modoVision !== "sim");
+  if (!camSim && $("chkSup").checked){ $("chkSup").checked = false; actualizarFuentes(); }
+  const cal = e.calibracion || {};
+  punto($("pCal"), !vivo ? "mal" : cal.estado === "ok" ? "ok" : cal.estado === "sin" ? "" : "aviso");
+  $("cCal").textContent = vivo ? (cal.texto || "—") : "sin datos";
+  // cámara
+  const cv = c.ok && c.edad_s != null && c.edad_s < 2;
+  const ccol = cv ? ((c.usb||"").startsWith("SUPER") ? "ok" : "aviso") : "mal";
+  punto($("pCam"), ccol); $("cCam").textContent = cv ? `${c.fps} fps` : (c.error ? "error" : "sin imagen");
+  $("marco").classList.toggle("sin", !cv);
+  $("camVacio").textContent = c.error ? c.error : "Esperando a la cámara…";
+  $("camMeta").textContent = modoVision === "sim" ? (simViva ? "MuJoCo · vista compartida por todos" : "")
+                                                  : (cv ? `${c.fps} fps · USB ${c.usb}` : "");
+  $("camPie").innerHTML = modoVision === "sim" ? "La vista del gemelo la comparten todos los que tengan la página abierta." : cv ? `MxId <b>${c.mxid}</b> &nbsp;·&nbsp; <b>${c.ancho}×${c.alto}</b> px &nbsp;·&nbsp; centro: <b>${c.prof_centro_mm ? Math.round(c.prof_centro_mm)+" mm" : "—"}</b>` : "";
+
+  // gemelo
+  const gc = !vivo ? "mal" : (e.gemelo||"").startsWith("copiando") ? "ok" : "aviso";
+  punto($("pGem"), gc); $("cGem").textContent = vivo ? (e.gemelo || "—") : "sin datos";
+
+  // control
+  const oblig = k.pedal_obligatorio !== false;
+  if (!swOcupado) $("swPedal").checked = oblig;
+  $("swPedal").disabled = !autorizado || (!k.permitir_sin_pedal && oblig);
+  $("swTxt").textContent = oblig ? "Hombre muerto: el robot solo se mueve mientras se mantiene pulsado."
+                                 : "Desactivado: el robot puede moverse SIN pedal.";
+  const pedal = $("pedal");
+  pedal.disabled = !oblig || !autorizado;
+  $("pedalTxt").textContent = !autorizado ? "Desbloquea los mandos para usarlo" :
+                              !oblig ? "Pedal desactivado" : "Mantén pulsado (o la barra espaciadora)";
+  pedal.classList.toggle("confirmado", !!(k.pedal_pisado || k.pedal_pisado_web) && pisando);
+  const perm = !!k.movimiento_permitido;
+  etq($("movEtq"), perm ? "Movimiento permitido" : "Movimiento bloqueado", perm ? (oblig ? "ok" : "aviso") : "mal");
+  $("movMotivo").textContent = vivo ? (k.motivo || "") : "sin datos del modo autónomo";
+  $("avisoPaso").style.display = k.paso_mueve ? "none" : "";
+  $("btnReset").disabled = !autorizado;
+  $("paso").textContent = (e.modo || "").includes("paso 2") ? "Paso 2 · solo lectura" : (e.modo || "Sin datos");
+}
+
+async function refrescar(){
+  try {
+    const r = await fetch("/api/estado",{cache:"no-store",credentials:"same-origin"});
+    pintar(await r.json());
+  } catch(err){ $("desconexion").classList.add("ver"); }
+}
+setInterval(refrescar, 300); refrescar();
+// ── visión: qué vídeos se piden (solo los visibles, para no gastar red) ──
+let modoVision = "cam";
+try { modoVision = localStorage.getItem("ss_vision") || "cam"; } catch(e){}
+function fuente(img, url){
+  const quiere = url ? url + "?t=" + Date.now() : "";
+  if (!!img.dataset.url !== !!url || img.dataset.url !== (url || "")){ img.dataset.url = url || ""; img.src = quiere; if (!url) img.removeAttribute("src"); }
+}
+function actualizarFuentes(){
+  $("paneles").dataset.modo = modoVision;
+  document.querySelectorAll(".seg button").forEach(b => b.classList.toggle("act", b.dataset.modo === modoVision));
+  const verCam = modoVision !== "sim", verSim = modoVision !== "cam";
+  fuente($("video"), verCam ? "/video.mjpg" : null);
+  fuente($("sim"), verSim ? "/sim.mjpg" : null);
+  const sup = verCam && $("chkSup").checked;
+  fuente($("simcam"), sup ? "/simcam.mjpg" : null);
+  $("simcam").style.display = sup ? "block" : "none";
+}
+document.querySelectorAll(".seg button").forEach(b => b.addEventListener("click", () => {
+  modoVision = b.dataset.modo; try { localStorage.setItem("ss_vision", modoVision); } catch(e){}
+  actualizarFuentes();
+}));
+$("chkSup").addEventListener("change", actualizarFuentes);
+$("opac").addEventListener("input", ev => { $("simcam").style.opacity = ev.target.value / 100; });
+["video","sim","simcam"].forEach(id => $(id).addEventListener("error", () => setTimeout(() => {
+  const img = $(id); if (img.dataset.url) img.src = img.dataset.url + "?t=" + Date.now();
+}, 1500)));
+actualizarFuentes();
+
+// ── gemelo: girar / mover con arrastre, acercar con la rueda ──
+const vistaPost = d => fetch("/api/vista",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(d)}).catch(()=>{});
+let arr = null, acum = {dx:0, dy:0, mover:false}, tVista = null;
+const marcoSim = $("marcoSim");
+function enviarArrastre(){ tVista = null; if (!acum.dx && !acum.dy) return;
+  vistaPost({accion: acum.mover ? "mover" : "rotar", dx: acum.dx, dy: acum.dy}); acum.dx = acum.dy = 0; }
+marcoSim.addEventListener("pointerdown", ev => {
+  if (ev.target.closest(".vistas")) return;
+  marcoSim.setPointerCapture(ev.pointerId); arr = {x: ev.clientX, y: ev.clientY}; marcoSim.classList.add("arrastrando");
+});
+marcoSim.addEventListener("pointermove", ev => {
+  if (!arr) return;
+  acum.dx += ev.clientX - arr.x; acum.dy += ev.clientY - arr.y; acum.mover = ev.shiftKey || ev.buttons === 2;
+  arr = {x: ev.clientX, y: ev.clientY};
+  if (!tVista) tVista = setTimeout(enviarArrastre, 60);
+});
+["pointerup","pointercancel"].forEach(n => marcoSim.addEventListener(n, () => { arr = null; marcoSim.classList.remove("arrastrando"); }));
+marcoSim.addEventListener("contextmenu", ev => ev.preventDefault());
+marcoSim.addEventListener("wheel", ev => { ev.preventDefault(); vistaPost({accion:"zoom", factor: ev.deltaY > 0 ? 1.12 : 1/1.12}); }, {passive:false});
+document.querySelectorAll(".vistas [data-preset]").forEach(b => b.addEventListener("click", () => vistaPost({accion:"preset", nombre:b.dataset.preset})));
+$("zMas").addEventListener("click", () => vistaPost({accion:"zoom", factor:1/1.2}));
+$("zMenos").addEventListener("click", () => vistaPost({accion:"zoom", factor:1.2}));
+
+// ── pedal: latido cada 100 ms mientras se mantiene ──
+function pisar(){
+  if (pisando) return;
+  if (!autorizado){ abrirLogin(); return; }
+  if ($("pedal").disabled) return;
+  pisando = true; $("pedal").classList.add("pulsado");
+  const enviar = () => post("/api/pedal",{pulsado:true}).then(r=>{ if(!r.ok) soltar(); }).catch(()=>{});
+  enviar(); latido = setInterval(enviar, 100);
+}
+function soltar(){
+  if (!pisando) return;
+  pisando = false; clearInterval(latido); latido = null;
+  $("pedal").classList.remove("pulsado","confirmado");
+  post("/api/pedal",{pulsado:false}).catch(()=>{});
+}
+const pedal = $("pedal");
+pedal.addEventListener("pointerdown", ev => { ev.preventDefault(); if (pedal.disabled) return; pedal.setPointerCapture(ev.pointerId); pisar(); });
+["pointerup","pointercancel","lostpointercapture"].forEach(n => pedal.addEventListener(n, soltar));
+pedal.addEventListener("contextmenu", ev => ev.preventDefault());
+window.addEventListener("blur", soltar);
+document.addEventListener("visibilitychange", () => { if (document.hidden) soltar(); });
+window.addEventListener("pagehide", () => { if (pisando) navigator.sendBeacon("/api/pedal", new Blob([JSON.stringify({pulsado:false})],{type:"application/json"})); });
+document.addEventListener("keydown", ev => {
+  if (ev.code !== "Space" || ev.repeat || ev.target.closest("input,textarea,.velo.abierto")) return;
+  ev.preventDefault(); pisar();
+});
+document.addEventListener("keyup", ev => { if (ev.code === "Space") soltar(); });
+
+// ── interruptor del pedal ──
+$("swPedal").addEventListener("change", async ev => {
+  const quiere = ev.target.checked; swOcupado = true;
+  if (!quiere){
+    const ok = await confirmar("Sin pedal, el robot podrá moverse aunque nadie mantenga pulsado el botón. Úsalo solo con la zona despejada y la seta al alcance.", "Desactivar pedal");
+    if (!ok){ ev.target.checked = true; swOcupado = false; return; }
+  }
+  const r = await post("/api/pedal/modo",{obligatorio:quiere});
+  if (!r.ok) ev.target.checked = !quiere;
+  tostada(r.msg || (r.ok ? "Hecho" : "No se pudo cambiar"));
+  swOcupado = false; refrescar();
+});
+
+// ── reinicio tras colisión ──
+$("btnReset").addEventListener("click", async () => {
+  const ok = await confirmar("Se borrará el error de la controladora y se hará disable → enable del FR5. Comprueba que el brazo no está tocando nada.", "Reiniciar");
+  if (!ok) return;
+  const r = await post("/api/reset");
+  tostada(r.msg || (r.ok ? "Reinicio pedido" : "No se pudo pedir el reinicio"));
+});
+
+// ── sesión ──
+function abrirLogin(){ $("errLogin").textContent = ""; $("clave").value = ""; $("veloLogin").classList.add("abierto"); setTimeout(()=>$("clave").focus(), 50); }
+$("btnSesion").addEventListener("click", async () => {
+  if (autorizado){ await post("/api/logout"); tostada("Mandos bloqueados"); refrescar(); }
+  else abrirLogin();
+});
+$("fLogin").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const r = await post("/api/login",{clave:$("clave").value});
+  if (r.ok){ $("veloLogin").classList.remove("abierto"); tostada("Mandos desbloqueados"); refrescar(); }
+  else $("errLogin").textContent = r.msg || "Contraseña incorrecta";
+});
+
+// ── modales ──
+let resolverConf = null;
+function confirmar(texto, boton){
+  $("txtConf").textContent = texto; $("okConf").textContent = boton || "Confirmar";
+  $("veloConf").classList.add("abierto"); $("okConf").focus();
+  return new Promise(res => { resolverConf = res; });
+}
+$("okConf").addEventListener("click", () => { $("veloConf").classList.remove("abierto"); resolverConf && resolverConf(true); resolverConf = null; });
+document.querySelectorAll("[data-cerrar]").forEach(b => b.addEventListener("click", () => {
+  const v = b.closest(".velo"); v.classList.remove("abierto");
+  if (v.id === "veloConf" && resolverConf){ resolverConf(false); resolverConf = null; }
+}));
+document.addEventListener("keydown", ev => {
+  if (ev.key !== "Escape") return;
+  document.querySelectorAll(".velo.abierto").forEach(v => { v.classList.remove("abierto"); if (v.id==="veloConf" && resolverConf){ resolverConf(false); resolverConf=null; } });
+});
+</script>
+</body>
+</html>

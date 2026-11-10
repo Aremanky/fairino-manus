@@ -79,6 +79,7 @@ PARAMETROS_POR_DEFECTO = dict(
     # 10-nov: herramienta (TCP) en la palma de la ORCA (None = no tocar la de la controladora)
     FR5_TCP_MM=None,                  # (x, y, z, rx, ry, rz) mm/° del TCP respecto a la brida
     FR5_HERRAMIENTA_ID=1,             # nº de sistema de herramienta en la controladora (1-14)
+    FR5_RESET_REHABILITAR=True,       # 10-nov: el reset también hace disable → enable
 )
 
 # Índices de la memoria compartida de estado
@@ -145,6 +146,7 @@ class FR5Servo:
 
     def resetear(self):
         """9-nov: ServoMoveEnd + ResetAllError en la controladora (tras una colisión o un fallo).
+        10-nov: y después disable → enable (FR5_RESET_REHABILITAR), para las falsas colisiones.
         El brazo queda DESARMADO: hay que volver a armar (pedal / ARMAR)."""
         self._habilitado.value = 0
         self._reset.value = 1
@@ -553,6 +555,19 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
                 except Exception as e:
                     rc = f"excepción: {e}"
                 time.sleep(0.3)
+                if p.get("FR5_RESET_REHABILITAR", True):
+                    # 10-nov: falsa colisión por el peso → borrar error, deshabilitar y volver a
+                    # habilitar (lo mismo que se hace a mano en la WebApp). No mueve el robot.
+                    pasos = []
+                    for nombre_, estado_ in (("disable", 0), ("enable", 1)):
+                        try:
+                            r_ = _ret(robot.RobotEnable(estado_))
+                        except Exception as e:
+                            r_ = f"excepción: {e}"
+                        pasos.append(f"{nombre_} → {'✓' if r_ == 0 else r_}")
+                        time.sleep(0.5)
+                    print("🔄 fr5_servo: ResetAllError → " + ("✓" if rc == 0 else str(rc))
+                          + " · " + " · ".join(pasos))
                 c_ = _leer_codigos(robot)
                 if c_ is not None:
                     est[_E_MAIN], est[_E_SUB], est[_E_COLIS], est[_E_RSTATE] = c_

@@ -101,6 +101,11 @@ class Canal:
                 return datos, t
         return None, None
 
+    def tiempo(self):
+        """time.time() del último mensaje (sin copiarlo) o None si aún no hay ninguno."""
+        seq, t, _ = _CABECERA.unpack_from(self._shm.buf, 0)
+        return t if seq else None
+
     def secuencia(self):
         return struct.unpack_from("<Q", self._shm.buf, 0)[0]
 
