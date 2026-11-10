@@ -322,6 +322,8 @@ class ConstructorMapa:
         self.hz, self._n, self._t_hz = 0.0, 0, time.monotonic()
         self.aviso = ""
         self.robot_quitado = False
+        self._excluir_web = []
+        self.excluir_extra = []                          # p. ej. la herramienta que se va a coger
 
     def _recargar_calibracion(self):
         import os
@@ -354,7 +356,7 @@ class ConstructorMapa:
             if self._borrado_visto is not None or m.get("mapa_borrar_nuevo"):
                 self.mapa.borrar()
             self._borrado_visto = bid
-        self.mapa.excluir = [(np.asarray(c, float), np.asarray(s, float)) for c, s in (m.get("mapa_excluir") or [])]
+        self._excluir_web = [(np.asarray(c, float), np.asarray(s, float)) for c, s in (m.get("mapa_excluir") or [])]
 
     def _q_real(self):
         if self.canal_q is None:
@@ -377,6 +379,8 @@ class ConstructorMapa:
         if self.T is None:
             self.aviso = "sin calibrar (camara_robot.json)"
             return False
+        self.mapa.excluir = list(self._excluir_web) + [(np.asarray(c, float), np.asarray(s, float))
+                                                       for c, s in self.excluir_extra]
         q = self._q_real()
         self.robot_quitado = q is not None
         self.aviso = "" if q is not None else "sin pose real del robot: puede salir como obstáculo"

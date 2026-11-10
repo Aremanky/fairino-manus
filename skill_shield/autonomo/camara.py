@@ -7,7 +7,8 @@ profundidad alineada, crear_pipeline_oak) y deja en memoria compartida:
   · canal de info:   JSON con MxId, USB, FPS, matriz K de fábrica y la profundidad del centro
 
 También calcula el MAPA DE OBSTÁCULOS (mapa.py) con la profundidad, si hay calibración
-cámara→robot, y lo deja en otro canal. La percepción (ArUco, luego YOLO) irá aquí mismo. Va en su propio proceso para que, si hiciera falta, se
+cámara→robot, y detecta las HERRAMIENTAS con marcadores ArUco (herramientas.py), dibujándolas
+sobre la imagen; cada cosa a su canal. (YOLO irá aquí mismo en el paso 12.) Va en su propio proceso para que, si hiciera falta, se
 pueda lanzar con OTRO entorno virtual (AUTONOMO_PYTHON_PERCEPCION en config.py).
 
 Prueba aislada, sin robot ni MuJoCo (se ve en una ventana; Q o Esc para salir):
@@ -36,6 +37,7 @@ def _parsear():
     ap.add_argument("--canal-qbrazo", default=None, help="pose real del brazo (para quitarlo del mapa)")
     ap.add_argument("--canal-mapa", default=None, help="mapa de obstáculos (None = no calcularlo)")
     ap.add_argument("--canal-mando", default=None, help="mandos de la web (borrar mapa…)")
+    ap.add_argument("--canal-herramientas", default=None, help="herramientas detectadas (None = no detectar)")
     return ap.parse_args()
 
 
@@ -75,8 +77,18 @@ def main():
                                       Canal.esperar(args.canal_qbrazo) if args.canal_qbrazo else None,
                                       Canal.esperar(args.canal_mapa),
                                       Canal.esperar(args.canal_mando) if args.canal_mando else None)
-        print(f"🧱 [autónomo] Mapa de obstáculos: rejilla {tuple(constructor.mapa.n)} de "
+        print(f"🧱 [autónomo] Mapa de obstáculos: rejilla {tuple(int(v) for v in constructor.mapa.n)} de "
               f"{constructor.mapa.res * 100:.0f} cm")
+    detector, canal_herr, canal_mando_h = None, None, None
+    if args.canal_herramientas:                          # herramientas con ArUco (paso 5)
+        import config as cfg
+        from skill_shield.autonomo.herramientas import DetectorHerramientas
+        detector = DetectorHerramientas(cfg, os.path.dirname(os.path.abspath(cfg.__file__)))
+        canal_herr = Canal.esperar(args.canal_herramientas)
+        canal_mando_h = Canal.esperar(args.canal_mando) if args.canal_mando else None
+        print(f"🔧 [autónomo] Herramientas en el catálogo: "
+              + ", ".join(f"{e['nombre']} (id {i})" for i, e in sorted(detector.cat.items())))
+    t_herr, t_pub = 0.0, 0.0
 
     def _info(**kw):
         if canal_info is not None:
@@ -120,6 +132,25 @@ def main():
                 img = pc.getCvFrame()
                 n += 1
                 ahora = time.monotonic()
+                if detector is not None:
+                    try:
+                        if ahora - t_herr >= 1.0 / 15:          # detección a ~15 Hz
+                            t_herr = ahora
+                            detector.paso(img, K, dist, prof_mm=prof)
+                        detector.dibujar(img, K, dist)
+                        if ahora - t_pub >= 0.1:
+                            t_pub = ahora
+                            objetivo = None
+                            if canal_mando_h is not None:
+                                b_m, _ = canal_mando_h.leer()
+                                objetivo = json.loads(b_m).get("objetivo_id") if b_m else None
+                            canal_herr.escribir(json.dumps(dict(lista=detector.lista(), objetivo=objetivo,
+                                                                calibrada=detector.T_mundo_cam is not None)).encode())
+                            if constructor is not None:          # la herramienta a coger no es obstáculo
+                                caja = detector.caja_mundo(objetivo) if objetivo is not None else None
+                                constructor.excluir_extra = [caja] if caja else []
+                    except Exception as e:                        # nunca debe tirar la cámara
+                        print(f"⚠️  [autónomo] Herramientas: {e}")
                 if ahora - t_fps >= 1.0:
                     fps, n, t_fps = n / (ahora - t_fps), 0, ahora
                 z = _prof_centro_mm(prof)

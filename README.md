@@ -71,6 +71,15 @@ Lo más probable es que falle, pero es bueno para ir depurando el .txt
 - Pruebas por separado: `python -m skill_shield.autonomo.camara --ventana` · `python -m skill_shield.autonomo.web`
 - Cerrar el menú con la X o Esc equivale a pulsar este botón (es el «Cancelar» de zenity).
 
+### Herramientas con marcadores ArUco (paso 5)
+`skill_shield/autonomo/herramientas.py` — cada herramienta (y el punto de uso y el de dejada) lleva un marcador ArUco 4x4. Catálogo en `AUTONOMO_HERRAMIENTAS` (id, nombre, tipo, lado impreso, dónde queda la herramienta respecto al marcador, tamaño).
+1. `python -m skill_shield.autonomo.herramientas --generar` → PNG de cada marcador en `marcadores/`. Imprímelos a 300 ppp al 100 %, mide el cuadrado negro y pégalos planos sin recortar el margen blanco.
+2. `python -m skill_shield.autonomo.herramientas --probar` → cámara de cabeza en vivo: pose de cada herramienta, temblor y error (cierra antes el modo autónomo).
+3. En el modo autónomo: tarjeta **Herramientas** en la web (las que se ven, estables o no, y su posición en el mundo) con **Elegir** para marcar la herramienta objetivo: se pinta en naranja en el gemelo y deja de contar como obstáculo en el mapa. Las herramientas también se dibujan sobre la imagen de la cámara y en la ventana de MuJoCo.
+- La distancia de cada marcador se corrige con la profundidad estéreo (con marcadores de 3 cm a 0,8 m, solvePnP solo falla 1-3 cm; con el estéreo, unos mm) y las poses ambiguas (marcador casi de frente) se deciden con el plano que mide el estéreo.
+- Hace falta la calibración para la posición en el mundo; sin ella se ven respecto a la cámara y no se pueden elegir.
+- Marcadores de 3-4 cm hasta ~1 m de la cámara; más lejos, más grandes.
+
 ### Mapa de obstáculos (paso 7)
 `skill_shield/autonomo/mapa.py` — con la calibración hecha, el proceso de la cámara convierte la profundidad en cubos de 2 cm (marco del MJCF) a 4 Hz: quita el **robot** (sus cápsulas con la pose real + 3 cm), el **suelo** y lo que se pida excluir (la herramienta que se va a coger). Cada cubo es *ocupado* (se ven puntos en él varias veces), *libre* (la cámara ve a través) o *desconocido* (tapado, o más de 30 s sin verse: el robot es móvil).
 - En la web: indicador **Obstáculos** y, en el gemelo, los cubos en naranja (botón *Obstáculos* para ocultarlos; *Borrar mapa* con contraseña, p. ej. tras mover la peana). Con *Superponer gemelo*, los cubos deben caer encima de los objetos reales.

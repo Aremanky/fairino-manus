@@ -15,6 +15,8 @@ Qué hace ahora (criterio de «hecho» del paso 2):
   6. Estado de la calibración cámara→robot (camara_robot.json, paso 4).
   7. Mapa de obstáculos (mapa.py): lo calcula el proceso de la cámara con la profundidad; aquí
      solo se le pasa la pose real del brazo (para quitarlo) y se dibuja en la ventana.
+  8. Herramientas con ArUco (herramientas.py): las detecta el proceso de la cámara; la web las
+     lista y deja elegir la objetivo; aquí se dibujan en la ventana.
 
 Mandos de la web (los decide ESTE proceso, la web solo los pide):
   · Pedal de la web: «movimiento permitido» solo mientras llega su latido. Con el pedal
@@ -45,6 +47,7 @@ CANAL_SIM = "skill_autonomo_sim"
 CANAL_SIMCAM = "skill_autonomo_simcam"
 CANAL_QBRAZO = "skill_autonomo_qbrazo"
 CANAL_MAPA = "skill_autonomo_mapa"
+CANAL_HERRAMIENTAS = "skill_autonomo_herramientas"
 
 
 def estado_calibracion(raiz, cfg):
@@ -189,6 +192,8 @@ def ejecutar(cfg):
     canal_qbrazo = Canal(CANAL_QBRAZO, capacidad=64, crear=True) if con_mapa else None
     canal_mapa = Canal(CANAL_MAPA, capacidad=16 + 12 * int(cfg.get("AUTONOMO_MAPA_MAX_DIBUJO", 6000)),
                        crear=True) if con_mapa else None
+    con_herr = bool(cfg.get("AUTONOMO_HERRAMIENTAS"))
+    canal_herr = Canal(CANAL_HERRAMIENTAS, capacidad=64 << 10, crear=True) if con_herr else None
 
     # ── 3. Procesos de cámara y web ──
     py_vision = cfg.get("AUTONOMO_PYTHON_PERCEPCION") or sys.executable
@@ -200,13 +205,18 @@ def ejecutar(cfg):
     if cfg.get("AUTONOMO_CAM_VENTANA", False):
         cmd_cam.append("--ventana")
     if con_mapa:
-        cmd_cam += ["--canal-qbrazo", CANAL_QBRAZO, "--canal-mapa", CANAL_MAPA, "--canal-mando", CANAL_MANDO]
+        cmd_cam += ["--canal-qbrazo", CANAL_QBRAZO, "--canal-mapa", CANAL_MAPA]
+    if con_herr:
+        cmd_cam += ["--canal-herramientas", CANAL_HERRAMIENTAS]
+    if con_mapa or con_herr:
+        cmd_cam += ["--canal-mando", CANAL_MANDO]
     cmd_web = [sys.executable, "-m", "skill_shield.autonomo.web",
                "--host", str(cfg.get("AUTONOMO_WEB_HOST", "0.0.0.0")),
                "--puerto", str(cfg.get("AUTONOMO_WEB_PUERTO", 8080)),
                "--canal-img", CANAL_IMG, "--canal-info", CANAL_INFO,
                "--canal-estado", CANAL_ESTADO, "--canal-mando", CANAL_MANDO,
-               "--canal-sim", CANAL_SIM, "--canal-simcam", CANAL_SIMCAM, "--padre", pid]
+               "--canal-sim", CANAL_SIM, "--canal-simcam", CANAL_SIMCAM, "--padre", pid] \
+        + (["--canal-herramientas", CANAL_HERRAMIENTAS] if con_herr else [])
     proc_cam = _lanzar(cmd_cam, raiz, "cámara de cabeza")
     proc_web = _lanzar(cmd_web, raiz, "web")
     proc_render = None
@@ -260,7 +270,8 @@ def ejecutar(cfg):
             proc_render = _lanzar([sys.executable, "-m", "skill_shield.autonomo.render_gemelo",
                                    "--canal-qpos", CANAL_QPOS, "--canal-sim", CANAL_SIM,
                                    "--canal-simcam", CANAL_SIMCAM, "--canal-mando", CANAL_MANDO,
-                                   "--padre", pid] + (["--canal-mapa", CANAL_MAPA] if con_mapa else []),
+                                   "--padre", pid] + (["--canal-mapa", CANAL_MAPA] if con_mapa else [])
+                                  + (["--canal-herramientas", CANAL_HERRAMIENTAS] if con_herr else []),
                                   raiz, "gemelo para la web")
         con_ventana = bool(cfg.get("AUTONOMO_VENTANA_MUJOCO", True))
         if con_ventana:
@@ -273,6 +284,7 @@ def ejecutar(cfg):
         avisado_render, t_calib, calib_estado = False, 0.0, estado_calibracion(raiz, cfg)
         t_mapa = 0.0
         from skill_shield.autonomo.mapa import desempaquetar, dibujar_voxeles
+        from skill_shield.autonomo.herramientas import dibujar_herramientas
         print("✅ Modo autónomo en marcha. " + ("Cierra la ventana de MuJoCo o pulsa" if con_ventana else "Pulsa")
               + " Ctrl+C para salir.")
         while visor is None or visor.is_running():
@@ -295,15 +307,22 @@ def ejecutar(cfg):
             if canal_qbrazo is not None:                # pose del brazo para quitarlo del mapa (1 = real)
                 q_b = q if q is not None else np.array([datos.qpos[a] for a in qpos_idx])
                 canal_qbrazo.escribir(np.r_[np.asarray(q_b, float), 1.0 if q is not None else 0.0].tobytes())
-            if visor is not None and canal_mapa is not None and t0 - t_mapa >= 0.25:
-                t_mapa = t0                             # obstáculos en la ventana de MuJoCo
-                ver = cfg.get("AUTONOMO_MAPA_VER_VISOR", True) and (control.ver_obstaculos)
-                b_m, t_m = canal_mapa.leer()
+            if visor is not None and (canal_mapa is not None or canal_herr is not None) and t0 - t_mapa >= 0.25:
+                t_mapa = t0                             # obstáculos y herramientas en la ventana de MuJoCo
+                ver = cfg.get("AUTONOMO_MAPA_VER_VISOR", True) and control.ver_obstaculos
+                b_m, t_m = canal_mapa.leer() if canal_mapa is not None else (None, None)
+                b_h, t_h = canal_herr.leer() if canal_herr is not None else (None, None)
                 with visor.lock():
                     visor.user_scn.ngeom = 0
                     if ver and b_m and t_m and time.time() - t_m < 3.0:
                         res_m, cen_m = desempaquetar(b_m)
                         dibujar_voxeles(visor.user_scn, cen_m, res_m)
+                    if b_h and t_h and time.time() - t_h < 3.0:
+                        try:
+                            d_h = json.loads(b_h)
+                            dibujar_herramientas(visor.user_scn, d_h.get("lista", []), d_h.get("objetivo"))
+                        except ValueError:
+                            pass
 
             # ── mandos de la web ──
             m_bytes, t_m = canal_mando.leer()
@@ -368,7 +387,7 @@ def ejecutar(cfg):
             except Exception:
                 pass
         for c in (canal_img, canal_info, canal_estado, canal_mando, canal_sim, canal_simcam, canal_qpos,
-                  canal_qbrazo, canal_mapa):
+                  canal_qbrazo, canal_mapa, canal_herr):
             if c is not None:
                 c.cerrar()
     return 0

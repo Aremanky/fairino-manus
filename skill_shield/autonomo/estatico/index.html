@@ -118,6 +118,23 @@ main{max-width:1440px;margin:0 auto;padding:20px 24px 8px;display:grid;grid-temp
 .btn-reset:disabled{opacity:.5;cursor:not-allowed}
 .btn-reset svg{width:18px;height:18px}
 .nota-reset{font-size:12px;color:var(--suave);text-align:center;margin-top:6px}
+/* herramientas */
+.herr-lista{display:flex;flex-direction:column;gap:8px}
+.herr{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--borde);border-radius:10px;background:#fff}
+.herr.elegida{border-color:var(--naranja);background:#fff7ef;box-shadow:0 0 0 2px rgba(244,124,0,.15)}
+.herr .ico{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex:none;background:var(--azul-claro);color:var(--azul)}
+.herr.es-punto .ico{background:#e7f0ff;color:#2463c9}
+.herr.desconocido .ico{background:var(--fondo);color:var(--suave)}
+.herr .ico svg{width:19px;height:19px}
+.herr .txt{min-width:0;flex:1}
+.herr .txt b{display:block;font-size:14px}
+.herr .txt span{display:block;font-size:12px;color:var(--suave);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.herr .btn-elegir{border:1.5px solid var(--azul);background:#fff;color:var(--azul);font-weight:700;font-size:12.5px;padding:6px 12px;border-radius:8px;flex:none}
+.herr .btn-elegir:hover{background:var(--azul-claro)}
+.herr.elegida .btn-elegir{background:var(--naranja);border-color:var(--naranja);color:#fff}
+.herr .btn-elegir:disabled{opacity:.45;cursor:not-allowed}
+.herr-vacia{margin:4px 0 0;font-size:13px;color:var(--suave)}
+.herr-nota{margin:10px 0 0;font-size:12px;color:var(--suave)}
 /* articulaciones */
 .juntas{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
 .junta{background:var(--fondo);border-radius:8px;padding:8px 10px}
@@ -153,7 +170,7 @@ footer b{color:var(--azul)}
 .tostada.ver{opacity:1;transform:translateX(-50%)}
 .desconexion{display:none;background:var(--mal);color:#fff;text-align:center;font-size:13.5px;padding:8px 16px}
 .desconexion.ver{display:block}
-@media (max-width:1000px){main{grid-template-columns:1fr;padding:16px}.paneles[data-modo=dos]{grid-template-columns:1fr}.col{display:contents}.o1{order:1}.o2{order:2}.o3{order:3}.o4{order:4}.mano-rejilla{grid-template-columns:1fr}.cab .dentro,.franja .dentro,footer{padding-left:16px;padding-right:16px}}
+@media (max-width:1000px){main{grid-template-columns:1fr;padding:16px}.paneles[data-modo=dos]{grid-template-columns:1fr}.col{display:contents}.o1{order:1}.o2{order:2}.o3{order:3}.o4{order:4}.o5{order:5}.mano-rejilla{grid-template-columns:1fr}.cab .dentro,.franja .dentro,footer{padding-left:16px;padding-right:16px}}
 @media (max-width:600px){.franja::after{display:none}.tarjeta>header{flex-wrap:wrap}.seg{margin-left:0}.vistas button{padding:5px 8px}.cab .sep,.cab .nombre span{display:none}.cab img{height:32px}.paso{margin-left:0}.btn-sesion .t{display:none}.juntas{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head>
@@ -217,7 +234,7 @@ footer b{color:var(--azul)}
       </div>
     </section>
 
-        <section class="tarjeta o4">
+        <section class="tarjeta o5">
       <header><h2>OrcaHand</h2><span class="meta" id="manoMeta">—</span></header>
       <div class="cuerpo mano-rejilla">
         <div>
@@ -239,6 +256,15 @@ footer b{color:var(--azul)}
 
   <div class="col">
     <section class="tarjeta o2">
+      <header><h2>Herramientas</h2><span class="meta" id="herrMeta"></span></header>
+      <div class="cuerpo">
+        <div class="herr-lista" id="herrLista"></div>
+        <p class="herr-vacia" id="herrVacia">No se ve ninguna herramienta del catálogo.</p>
+        <p class="herr-nota" id="herrNota"></p>
+      </div>
+    </section>
+
+    <section class="tarjeta o3">
       <header><h2>Control</h2><span class="meta" id="ctrlMeta"></span></header>
       <div class="cuerpo">
         <button class="pedal" id="pedal" type="button" aria-label="Pedal: mantener pulsado">
@@ -261,7 +287,7 @@ footer b{color:var(--azul)}
       </div>
     </section>
 
-    <section class="tarjeta o3">
+    <section class="tarjeta o4">
       <header><h2>Robot FR5</h2><span class="meta" id="fr5Meta"></span></header>
       <div class="cuerpo">
         <div class="fila"><span>Estado</span><span id="fr5Estado">—</span></div>
@@ -390,6 +416,8 @@ function pintar(e){
   $("btnBorrarMapa").hidden = !(modoVision === "sim" && mp.estado && mp.estado !== "sin");
   $("camPie").innerHTML = modoVision === "sim" ? txtMapa : cv ? `MxId <b>${c.mxid}</b> &nbsp;·&nbsp; <b>${c.ancho}×${c.alto}</b> px &nbsp;·&nbsp; centro: <b>${c.prof_centro_mm ? Math.round(c.prof_centro_mm)+" mm" : "—"}</b>` : "";
 
+  pintarHerramientas(e.herramientas || {}, vivo);
+
   // gemelo
   const gc = !vivo ? "mal" : (e.gemelo||"").startsWith("copiando") ? "ok" : "aviso";
   punto($("pGem"), gc); $("cGem").textContent = vivo ? (e.gemelo || "—") : "sin datos";
@@ -420,6 +448,54 @@ async function refrescar(){
   } catch(err){ $("desconexion").classList.add("ver"); }
 }
 setInterval(refrescar, 300); refrescar();
+// ── herramientas detectadas (filas con clave: los botones no se recrean en cada refresco) ──
+const ICONOS = {
+  herramienta: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 6l4 4M3 21l7.5-7.5M13 7l4-4 4 4-4 4z"/><path d="M10 14l-2-2"/></svg>',
+  punto_uso: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/></svg>',
+  punto_dejada: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></svg>',
+  desconocido: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 9a3 3 0 1 1 4 2.8c-.8.4-1 1-1 2.2M12 18h.01"/></svg>'};
+const filasHerr = new Map();
+function pintarHerramientas(hd, vivo){
+  const lista = (vivo && hd.lista) || [], obj = hd.objetivo;
+  const ids = new Set(lista.map(h => h.id));
+  for (const [id, el] of filasHerr) if (!ids.has(id)) { el.remove(); filasHerr.delete(id); }
+  lista.forEach(h => {
+    let el = filasHerr.get(h.id);
+    if (!el){
+      el = document.createElement("div");
+      el.className = "herr " + (h.tipo === "herramienta" ? "" : h.tipo === "desconocido" ? "desconocido" : "es-punto");
+      el.innerHTML = `<div class="ico">${ICONOS[h.tipo] || ICONOS.desconocido}</div><div class="txt"><b></b><span></span></div>` +
+        (h.tipo === "herramienta" ? '<button type="button" class="btn-elegir">Elegir</button>' : "");
+      const b = el.querySelector(".btn-elegir");
+      if (b) b.addEventListener("click", async () => {
+        const r = await post("/api/objetivo", {id: E.herramientas && E.herramientas.objetivo === h.id ? null : h.id});
+        if (r.ok) tostada(r.objetivo == null ? "Sin herramienta objetivo" : `Objetivo: ${h.nombre}`);
+        refrescar();
+      });
+      $("herrLista").appendChild(el); filasHerr.set(h.id, el);
+    }
+    el.querySelector("b").textContent = h.nombre;
+    let sub;
+    if (h.tipo === "desconocido") sub = `id ${h.id}: no está en AUTONOMO_HERRAMIENTAS`;
+    else {
+      const T = h.T_mundo || h.T_cam;
+      const xyz = T ? `(${T[0][3].toFixed(2)}, ${T[1][3].toFixed(2)}, ${T[2][3].toFixed(2)}) m` : "";
+      sub = (h.estable ? "estable" : "buscando…") + ` · a ${h.distancia_m.toFixed(2)} m` +
+            (h.T_mundo ? ` · ${xyz}` : " · sin calibrar") + (h.estereo ? "" : " · sin estéreo");
+    }
+    el.querySelector("span").textContent = sub;
+    const b = el.querySelector(".btn-elegir");
+    el.classList.toggle("elegida", h.id === obj);
+    if (b){ b.textContent = h.id === obj ? "Objetivo ✓" : "Elegir"; b.disabled = !h.T_mundo; b.title = h.T_mundo ? "" : "Hace falta la calibración cámara→robot"; }
+  });
+  $("herrVacia").style.display = lista.length ? "none" : "";
+  $("herrVacia").textContent = !vivo ? "Sin datos del modo autónomo." : hd.activo ? "No se ve ninguna herramienta del catálogo." : "La detección de herramientas no está en marcha.";
+  const nObj = lista.find(h => h.id === obj);
+  $("herrMeta").textContent = lista.filter(h => h.tipo === "herramienta").length + " a la vista";
+  $("herrNota").textContent = obj == null ? "Elige la herramienta que quieres coger. (Coger llegará con el paso 10.)"
+    : nObj ? `Objetivo: ${nObj.nombre}. Ya no cuenta como obstáculo en el mapa.` : "La herramienta objetivo no está a la vista.";
+}
+
 // ── visión: qué vídeos se piden (solo los visibles, para no gastar red) ──
 let modoVision = "cam";
 try { modoVision = localStorage.getItem("ss_vision") || "cam"; } catch(e){}

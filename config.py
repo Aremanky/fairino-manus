@@ -1430,6 +1430,21 @@ AUTONOMO_MAPA_DESCONOCIDO_OCUPADO = True # para esquivar: lo tapado (debajo/detr
 AUTONOMO_MAPA_VER_VISOR = True           # dibujar los obstáculos también en la ventana de MuJoCo
 AUTONOMO_MAPA_MAX_DIBUJO = 6000          # máx. de vóxeles que se dibujan (el mapa completo no tiene límite)
 
+# Herramientas con marcadores ArUco (paso 5, skill_shield/autonomo/herramientas.py). Diccionario 4x4.
+# Por cada una: id del marcador, nombre, tipo ("herramienta" | "punto_uso" | "punto_dejada"),
+# lado = lado del cuadrado NEGRO impreso (m), desplazamiento/giro_deg = dónde queda el centro de la
+# herramienta respecto al marcador (en el marco del marcador: x derecha, y arriba, z hacia fuera),
+# caja = semi-lados de la herramienta en su marco (para dibujarla y quitarla del mapa al cogerla).
+# Marcadores para imprimir:  python -m skill_shield.autonomo.herramientas --generar
+AUTONOMO_HERRAMIENTAS = [
+    dict(id=0,  nombre="Destornillador",  tipo="herramienta",  lado=0.030,
+         desplazamiento=(0.0, 0.0, -0.015), giro_deg=(0, 0, 0), caja=(0.10, 0.016, 0.016)),
+    dict(id=10, nombre="Punto de uso",    tipo="punto_uso",    lado=0.040),
+    dict(id=11, nombre="Punto de dejada", tipo="punto_dejada", lado=0.040),
+]
+AUTONOMO_HERRAMIENTAS_N_ESTABLE = 5      # imágenes seguidas antes de darla por buena
+AUTONOMO_HERRAMIENTAS_OLVIDO_S  = 2.0    # sin verla este tiempo → deja de aparecer
+
 # ═══════════════════════════════════════════════════════════════════════════
 # CALIBRACIÓN CÁMARA DE CABEZA → ROBOT (10-nov, paso 4) — calibrar_camara_robot.py
 # ═══════════════════════════════════════════════════════════════════════════

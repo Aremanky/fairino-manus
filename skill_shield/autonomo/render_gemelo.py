@@ -37,6 +37,7 @@ def _parsear():
     ap.add_argument("--canal-simcam", default=None)
     ap.add_argument("--canal-mando", default=None)
     ap.add_argument("--canal-mapa", default=None, help="mapa de obstáculos (vóxeles) para dibujarlo")
+    ap.add_argument("--canal-herramientas", default=None, help="herramientas detectadas para dibujarlas")
     ap.add_argument("--ancho", type=int, default=int(getattr(cfg, "AUTONOMO_SIM_ANCHO", 960)))
     ap.add_argument("--alto", type=int, default=int(getattr(cfg, "AUTONOMO_SIM_ALTO", 540)))
     ap.add_argument("--fps", type=float, default=float(getattr(cfg, "AUTONOMO_SIM_FPS", 20)))
@@ -135,7 +136,10 @@ def main():
     canal_mando = Canal.esperar(args.canal_mando) if args.canal_mando else None
     canal_mapa = Canal.esperar(args.canal_mapa) if args.canal_mapa else None
     from skill_shield.autonomo.mapa import desempaquetar, dibujar_voxeles
+    from skill_shield.autonomo.herramientas import dibujar_herramientas
+    canal_herr = Canal.esperar(args.canal_herramientas) if args.canal_herramientas else None
     voxeles = (0.0, None)
+    herr = ([], None)
 
     ruta_calib = args.calibracion if os.path.isabs(args.calibracion) else \
         os.path.join(os.path.dirname(os.path.abspath(cfg.__file__)), args.calibracion)
@@ -163,9 +167,16 @@ def main():
                 b_m, t_m = canal_mapa.leer()
                 if b_m and t_m and time.time() - t_m < 3.0:
                     voxeles = desempaquetar(b_m)
+            herr = ([], None)
+            if canal_herr is not None:
+                b_h, t_h = canal_herr.leer()
+                if b_h and t_h and time.time() - t_h < 3.0:
+                    d_h = _mando(b_h)
+                    herr = (d_h.get("lista", []), d_h.get("objetivo"))
             render.update_scene(datos, camera=cam)
             if voxeles[1] is not None:
                 dibujar_voxeles(render.scene, voxeles[1], voxeles[0])
+            dibujar_herramientas(render.scene, *herr)
             rgb = render.render()
             if canal_sim is not None or args.ventana:
                 ok, jpg = cv2.imencode(".jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
@@ -205,6 +216,7 @@ def main():
                     scn = render_cam.scene
                     if voxeles[1] is not None:              # así se ve si caen sobre los objetos reales
                         dibujar_voxeles(scn, voxeles[1], voxeles[0])
+                    dibujar_herramientas(scn, *herr)
                     g = C.camara_gl(calib["T_mundo_cam"], Kc, w, h, float(scn.camera[0].frustum_near))
                     for c in (scn.camera[0], scn.camera[1]):
                         c.pos[:] = g["pos"]

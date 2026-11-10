@@ -11,6 +11,7 @@ Lectura (abierta):
                         cámara de cabeza calibrada (para superponerlo a la imagen real)
   POST /api/vista       girar / acercar / mover / vista predefinida del gemelo (sin contraseña)
   POST /api/mapa {"accion": "ver" | "ocultar" | "borrar"}   obstáculos en el gemelo (borrar pide contraseña)
+  POST /api/objetivo {"id": n | null}   herramienta objetivo (de la lista de detectadas)
 Mandos (con contraseña AUTONOMO_WEB_CLAVE; sesión por cookie):
   POST /api/login {"clave": "..."}      ·  POST /api/logout
   POST /api/pedal {"pulsado": true}     pedal de la web: mientras se mantiene pulsado el botón,
@@ -61,9 +62,10 @@ class ServicioWeb:
 
     def __init__(self, canal_img, canal_info, canal_estado, canal_mando, clave=None,
                  permitir_sin_pedal=True, pedal_obligatorio=True, latido_s=0.35,
-                 canal_sim=None, canal_simcam=None, vista=None):
+                 canal_sim=None, canal_simcam=None, vista=None, canal_herramientas=None):
         self._nombres = dict(img=canal_img, info=canal_info, estado=canal_estado, mando=canal_mando,
-                             sim=canal_sim, simcam=canal_simcam)
+                             sim=canal_sim, simcam=canal_simcam, herr=canal_herramientas)
+        self.objetivo_id = None
         self._vista_inicial = dict(vista or VISTA_INICIAL)
         self.vista = dict(self._vista_inicial)
         self.ver_obstaculos = True
@@ -195,6 +197,13 @@ class ServicioWeb:
         self._escribir_mando()
         return True, "Pedal obligatorio" if obligatorio else "Pedal desactivado: el robot puede moverse sin pedal"
 
+    def elegir(self, id_):
+        """Herramienta objetivo (None = ninguna). No mueve nada: la usarán el planificador y
+        el mapa (que deja de contarla como obstáculo)."""
+        with self._lock:
+            self.objetivo_id = None if id_ is None else int(id_)
+        self._escribir_mando()
+
     def mapa(self, accion):
         """ver / ocultar los obstáculos en el gemelo, o borrar el mapa."""
         with self._lock:
@@ -222,7 +231,7 @@ class ServicioWeb:
             ultimo = max(self._pulsando.values(), default=0.0)
             datos = dict(pedal=bool(self._pulsando), pedal_t=ultimo,
                          pedal_obligatorio=self._pedal_obligatorio, vista=self.vista,
-                         ver_obstaculos=self.ver_obstaculos,
+                         ver_obstaculos=self.ver_obstaculos, objetivo_id=self.objetivo_id,
                          mapa_borrar_id=f"{self._reset_base}-m{self._mapa_borrar_n}",
                          reset_id=f"{self._reset_base}-{self._reset_n}" if self._reset_n else None,
                          t=time.time())
@@ -243,6 +252,10 @@ class ServicioWeb:
             info["edad_s"] = round(ahora - ti, 2) if ti else None
         e["camara"] = info or {}
         e["mapa"] = dict((info or {}).get("mapa") or {}, ver=self.ver_obstaculos)
+        h, th = self._json("herr")
+        e["herramientas"] = dict(lista=(h or {}).get("lista", []) if th and ahora - th < 2.0 else [],
+                                 calibrada=bool((h or {}).get("calibrada")), objetivo=self.objetivo_id,
+                                 activo=th is not None and ahora - th < 2.0)
         ctrl = dict(e.get("control") or {})
         with self._lock:
             ctrl["pedal_obligatorio"] = self._pedal_obligatorio
@@ -363,6 +376,15 @@ def crear_app(servicio):
         ok, msg = servicio.poner_obligatorio(bool((await _cuerpo(request)).get("obligatorio", True)))
         return JSONResponse({"ok": ok, "msg": msg}, status_code=200 if ok else 409)
 
+    @app.post("/api/objetivo")
+    async def objetivo(request: Request):
+        d = await _cuerpo(request)
+        try:
+            servicio.elegir(d.get("id"))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "msg": "id no válido"}, status_code=400)
+        return JSONResponse({"ok": True, "objetivo": servicio.objetivo_id})
+
     @app.post("/api/mapa")
     async def mapa(request: Request):
         accion = (await _cuerpo(request)).get("accion")
@@ -412,6 +434,7 @@ def main():
     ap.add_argument("--canal-mando", default="skill_autonomo_mando")
     ap.add_argument("--canal-sim", default="skill_autonomo_sim")
     ap.add_argument("--canal-simcam", default="skill_autonomo_simcam")
+    ap.add_argument("--canal-herramientas", default="skill_autonomo_herramientas")
     ap.add_argument("--padre", type=int, default=0, help="PID del modo autónomo (si muere, salir)")
     args = ap.parse_args()
 
@@ -429,7 +452,8 @@ def main():
                            pedal_obligatorio=getattr(cfg, "AUTONOMO_PEDAL_OBLIGATORIO", True),
                            latido_s=getattr(cfg, "AUTONOMO_PEDAL_LATIDO_S", 0.35),
                            canal_sim=args.canal_sim, canal_simcam=args.canal_simcam,
-                           vista=getattr(cfg, "AUTONOMO_SIM_VISTA", None))
+                           vista=getattr(cfg, "AUTONOMO_SIM_VISTA", None),
+                           canal_herramientas=args.canal_herramientas)
     servidor = uvicorn.Server(uvicorn.Config(crear_app(servicio), host=args.host, port=args.puerto,
                                              log_level="warning", access_log=False,
                                              timeout_graceful_shutdown=1))   # el vídeo no la bloquea
