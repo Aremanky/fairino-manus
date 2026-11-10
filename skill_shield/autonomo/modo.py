@@ -13,6 +13,8 @@ Qué hace ahora (criterio de «hecho» del paso 2):
      (AUTONOMO_VENTANA_MUJOCO) y en la web (render_gemelo.py: solo la escena, sin menús).
   5. Estado de la OrcaHand (solo lectura, sin activar el par) y de sus táctiles.
   6. Estado de la calibración cámara→robot (camara_robot.json, paso 4).
+  7. Mapa de obstáculos (mapa.py): lo calcula el proceso de la cámara con la profundidad; aquí
+     solo se le pasa la pose real del brazo (para quitarlo) y se dibuja en la ventana.
 
 Mandos de la web (los decide ESTE proceso, la web solo los pide):
   · Pedal de la web: «movimiento permitido» solo mientras llega su latido. Con el pedal
@@ -32,6 +34,8 @@ import subprocess
 import sys
 import time
 
+import numpy as np
+
 CANAL_IMG = "skill_autonomo_img"
 CANAL_INFO = "skill_autonomo_caminfo"
 CANAL_ESTADO = "skill_autonomo_estado"
@@ -39,6 +43,8 @@ CANAL_MANDO = "skill_autonomo_mando"
 CANAL_QPOS = "skill_autonomo_qpos"
 CANAL_SIM = "skill_autonomo_sim"
 CANAL_SIMCAM = "skill_autonomo_simcam"
+CANAL_QBRAZO = "skill_autonomo_qbrazo"
+CANAL_MAPA = "skill_autonomo_mapa"
 
 
 def estado_calibracion(raiz, cfg):
@@ -115,6 +121,7 @@ class Control:
         self.pedal_obligatorio = True
         self.pedal_pisado = False
         self.web_viva = False
+        self.ver_obstaculos = True
 
     def actualizar(self, mando, t_mando, ahora=None):
         """Lee el último mando de la web. Devuelve True si pide un reinicio NUEVO."""
@@ -124,6 +131,7 @@ class Control:
             self.pedal_obligatorio, self.pedal_pisado = True, False
             return False
         self.pedal_obligatorio = bool(mando.get("pedal_obligatorio", True))
+        self.ver_obstaculos = bool(mando.get("ver_obstaculos", True))
         self.pedal_pisado = bool(mando.get("pedal")) and ahora - float(mando.get("pedal_t") or 0) < self.latido_s
         rid = mando.get("reset_id")
         nuevo = rid is not None and rid != self._reset_visto
@@ -177,6 +185,10 @@ def ejecutar(cfg):
     canal_sim = Canal(CANAL_SIM, capacidad=2 << 20, crear=True)
     canal_simcam = Canal(CANAL_SIMCAM, capacidad=2 << 20, crear=True)
     canal_qpos = None                                   # se crea al conocer nq (tras cargar el modelo)
+    con_mapa = bool(cfg.get("AUTONOMO_MAPA", True))
+    canal_qbrazo = Canal(CANAL_QBRAZO, capacidad=64, crear=True) if con_mapa else None
+    canal_mapa = Canal(CANAL_MAPA, capacidad=16 + 12 * int(cfg.get("AUTONOMO_MAPA_MAX_DIBUJO", 6000)),
+                       crear=True) if con_mapa else None
 
     # ── 3. Procesos de cámara y web ──
     py_vision = cfg.get("AUTONOMO_PYTHON_PERCEPCION") or sys.executable
@@ -187,6 +199,8 @@ def ejecutar(cfg):
         cmd_cam += ["--mxid", str(cfg["AUTONOMO_CAM_MXID"])]
     if cfg.get("AUTONOMO_CAM_VENTANA", False):
         cmd_cam.append("--ventana")
+    if con_mapa:
+        cmd_cam += ["--canal-qbrazo", CANAL_QBRAZO, "--canal-mapa", CANAL_MAPA, "--canal-mando", CANAL_MANDO]
     cmd_web = [sys.executable, "-m", "skill_shield.autonomo.web",
                "--host", str(cfg.get("AUTONOMO_WEB_HOST", "0.0.0.0")),
                "--puerto", str(cfg.get("AUTONOMO_WEB_PUERTO", 8080)),
@@ -246,7 +260,8 @@ def ejecutar(cfg):
             proc_render = _lanzar([sys.executable, "-m", "skill_shield.autonomo.render_gemelo",
                                    "--canal-qpos", CANAL_QPOS, "--canal-sim", CANAL_SIM,
                                    "--canal-simcam", CANAL_SIMCAM, "--canal-mando", CANAL_MANDO,
-                                   "--padre", pid], raiz, "gemelo para la web")
+                                   "--padre", pid] + (["--canal-mapa", CANAL_MAPA] if con_mapa else []),
+                                  raiz, "gemelo para la web")
         con_ventana = bool(cfg.get("AUTONOMO_VENTANA_MUJOCO", True))
         if con_ventana:
             visor = mujoco.viewer.launch_passive(modelo, datos)
@@ -256,6 +271,8 @@ def ejecutar(cfg):
         periodo = 1.0 / float(cfg.get("AUTONOMO_HZ", 60.0))
         t_estado, avisado_cam, avisado_web, sincronizado, permitido_antes = 0.0, False, False, None, None
         avisado_render, t_calib, calib_estado = False, 0.0, estado_calibracion(raiz, cfg)
+        t_mapa = 0.0
+        from skill_shield.autonomo.mapa import desempaquetar, dibujar_voxeles
         print("✅ Modo autónomo en marcha. " + ("Cierra la ventana de MuJoCo o pulsa" if con_ventana else "Pulsa")
               + " Ctrl+C para salir.")
         while visor is None or visor.is_running():
@@ -275,6 +292,18 @@ def ejecutar(cfg):
                 visor.sync()
             if canal_qpos is not None:
                 canal_qpos.escribir(datos.qpos.astype("float64").tobytes())
+            if canal_qbrazo is not None:                # pose del brazo para quitarlo del mapa (1 = real)
+                q_b = q if q is not None else np.array([datos.qpos[a] for a in qpos_idx])
+                canal_qbrazo.escribir(np.r_[np.asarray(q_b, float), 1.0 if q is not None else 0.0].tobytes())
+            if visor is not None and canal_mapa is not None and t0 - t_mapa >= 0.25:
+                t_mapa = t0                             # obstáculos en la ventana de MuJoCo
+                ver = cfg.get("AUTONOMO_MAPA_VER_VISOR", True) and (control.ver_obstaculos)
+                b_m, t_m = canal_mapa.leer()
+                with visor.lock():
+                    visor.user_scn.ngeom = 0
+                    if ver and b_m and t_m and time.time() - t_m < 3.0:
+                        res_m, cen_m = desempaquetar(b_m)
+                        dibujar_voxeles(visor.user_scn, cen_m, res_m)
 
             # ── mandos de la web ──
             m_bytes, t_m = canal_mando.leer()
@@ -338,7 +367,8 @@ def ejecutar(cfg):
                 visor.close()
             except Exception:
                 pass
-        for c in (canal_img, canal_info, canal_estado, canal_mando, canal_sim, canal_simcam, canal_qpos):
+        for c in (canal_img, canal_info, canal_estado, canal_mando, canal_sim, canal_simcam, canal_qpos,
+                  canal_qbrazo, canal_mapa):
             if c is not None:
                 c.cerrar()
     return 0

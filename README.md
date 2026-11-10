@@ -71,6 +71,13 @@ Lo más probable es que falle, pero es bueno para ir depurando el .txt
 - Pruebas por separado: `python -m skill_shield.autonomo.camara --ventana` · `python -m skill_shield.autonomo.web`
 - Cerrar el menú con la X o Esc equivale a pulsar este botón (es el «Cancelar» de zenity).
 
+### Mapa de obstáculos (paso 7)
+`skill_shield/autonomo/mapa.py` — con la calibración hecha, el proceso de la cámara convierte la profundidad en cubos de 2 cm (marco del MJCF) a 4 Hz: quita el **robot** (sus cápsulas con la pose real + 3 cm), el **suelo** y lo que se pida excluir (la herramienta que se va a coger). Cada cubo es *ocupado* (se ven puntos en él varias veces), *libre* (la cámara ve a través) o *desconocido* (tapado, o más de 30 s sin verse: el robot es móvil).
+- En la web: indicador **Obstáculos** y, en el gemelo, los cubos en naranja (botón *Obstáculos* para ocultarlos; *Borrar mapa* con contraseña, p. ej. tras mover la peana). Con *Superponer gemelo*, los cubos deben caer encima de los objetos reales.
+- Para esquivar: `ColisionMapa(modelo, mapa)` añade al modelo de colisión de la teleoperación los choques contra el mapa (lo tapado debajo/detrás de algo cuenta como obstáculo, `AUTONOMO_MAPA_DESCONOCIDO_OCUPADO`). Lo usará el planificador (paso 8).
+- Lo que tapa el propio brazo no se ve: se mira con el brazo apartado y el mapa lo recuerda.
+- Ajustes: bloque `AUTONOMO_MAPA_*` de `config.py` (tamaño, zona, frecuencia, olvido).
+
 ### Calibración cámara de cabeza → robot (paso 4)
 `calibrar_camara_robot.py` — tablero ChArUco en la mano y la cámara fija en el soporte. Resultado: `camara_robot.json` (`T_mundo_cam` en el marco del MJCF). Como la cámara va en la misma peana que el robot, **mover la peana no estropea la calibración**.
 1. `python calibrar_camara_robot.py --generar-tablero` → imprime `tablero_calib_robot.png` a 300 ppp, mide el cuadrado (30 mm) y móntalo plano en la mano.

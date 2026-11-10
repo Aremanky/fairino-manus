@@ -74,6 +74,9 @@ main{max-width:1440px;margin:0 auto;padding:20px 24px 8px;display:grid;grid-temp
 .vistas button{border:0;background:rgba(255,255,255,.92);color:var(--azul);font-size:12px;font-weight:600;padding:5px 10px;border-radius:7px;box-shadow:0 1px 4px rgba(0,0,0,.2)}
 .vistas button:hover{background:#fff}
 .vistas .sep-v{width:6px}
+.vistas button.act{background:var(--naranja);color:#fff}
+.btn-mini{border:1px solid var(--borde);background:#fff;color:var(--azul);font-size:12px;font-weight:600;padding:4px 10px;border-radius:7px;margin-left:8px}
+.btn-mini:hover{border-color:var(--azul)}
 .superponer{display:none;align-items:center;gap:8px;margin-left:auto;color:var(--texto);font-weight:600}
 .superponer.ver{display:inline-flex}
 .superponer input[type=range]{width:110px;accent-color:var(--naranja)}
@@ -175,6 +178,7 @@ footer b{color:var(--azul)}
   <span class="chip"><i class="punto" id="pCam"></i><b>Cámara</b><span id="cCam">—</span></span>
   <span class="chip"><i class="punto" id="pGem"></i><b>Gemelo</b><span id="cGem">—</span></span>
   <span class="chip"><i class="punto" id="pCal"></i><b>Calibración</b><span id="cCal">—</span></span>
+  <span class="chip"><i class="punto" id="pMapa"></i><b>Obstáculos</b><span id="cMapa">—</span></span>
   <span class="paso" id="paso">Paso 2 · solo lectura</span>
 </div></div>
 
@@ -201,12 +205,12 @@ footer b{color:var(--azul)}
             <div class="vacio"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 2l9 5v10l-9 5-9-5V7z"/><path d="M12 22V12M21 7l-9 5-9-5"/></svg><span id="simVacio">Esperando al gemelo…</span></div>
             <span class="etq-marco">Gemelo digital <i>· arrastra para girar · Mayús+arrastrar para mover · rueda para acercar</i></span>
             <div class="vistas">
-              <button type="button" data-preset="inicial">Inicial</button><button type="button" data-preset="frente">Frente</button><button type="button" data-preset="lado">Lado</button><button type="button" data-preset="arriba">Arriba</button><span class="sep-v"></span><button type="button" id="zMas" aria-label="Acercar">+</button><button type="button" id="zMenos" aria-label="Alejar">−</button>
+              <button type="button" data-preset="inicial">Inicial</button><button type="button" data-preset="frente">Frente</button><button type="button" data-preset="lado">Lado</button><button type="button" data-preset="arriba">Arriba</button><span class="sep-v"></span><button type="button" id="btnObst" class="act" aria-pressed="true" title="Mostrar u ocultar el mapa de obstáculos">Obstáculos</button><span class="sep-v"></span><button type="button" id="zMas" aria-label="Acercar">+</button><button type="button" id="zMenos" aria-label="Alejar">−</button>
             </div>
           </div>
         </div>
       </div>
-      <div class="pie-video"><span id="camPie"></span>
+      <div class="pie-video"><span id="camPie"></span><button type="button" class="btn-mini" id="btnBorrarMapa" hidden>Borrar mapa</button>
         <label class="superponer" id="supCtl" title="El gemelo visto desde la cámara calibrada, encima de la imagen real: si la calibración está bien, el robot virtual tapa al real">
           <input type="checkbox" id="chkSup"> Superponer gemelo <input type="range" id="opac" min="10" max="90" value="50" aria-label="Opacidad del gemelo">
         </label>
@@ -368,6 +372,11 @@ function pintar(e){
   const cal = e.calibracion || {};
   punto($("pCal"), !vivo ? "mal" : cal.estado === "ok" ? "ok" : cal.estado === "sin" ? "" : "aviso");
   $("cCal").textContent = vivo ? (cal.texto || "—") : "sin datos";
+  const mpx = e.mapa || {};
+  punto($("pMapa"), !vivo ? "mal" : mpx.estado === "ok" ? "ok" : mpx.estado === "aviso" ? "aviso" : "");
+  $("cMapa").textContent = vivo ? (mpx.texto || "—") : "sin datos";
+  const verObs = mpx.ver !== false;
+  $("btnObst").classList.toggle("act", verObs); $("btnObst").setAttribute("aria-pressed", verObs);
   // cámara
   const cv = c.ok && c.edad_s != null && c.edad_s < 2;
   const ccol = cv ? ((c.usb||"").startsWith("SUPER") ? "ok" : "aviso") : "mal";
@@ -376,7 +385,10 @@ function pintar(e){
   $("camVacio").textContent = c.error ? c.error : "Esperando a la cámara…";
   $("camMeta").textContent = modoVision === "sim" ? (simViva ? "MuJoCo · vista compartida por todos" : "")
                                                   : (cv ? `${c.fps} fps · USB ${c.usb}` : "");
-  $("camPie").innerHTML = modoVision === "sim" ? "La vista del gemelo la comparten todos los que tengan la página abierta." : cv ? `MxId <b>${c.mxid}</b> &nbsp;·&nbsp; <b>${c.ancho}×${c.alto}</b> px &nbsp;·&nbsp; centro: <b>${c.prof_centro_mm ? Math.round(c.prof_centro_mm)+" mm" : "—"}</b>` : "";
+  const mp = e.mapa || {};
+  const txtMapa = mp.estado && mp.estado !== "sin" ? `Obstáculos: <b>${mp.ocupados ?? 0}</b> vóxeles de ${Math.round((mp.res||0.02)*100)} cm · ${mp.hz ?? 0} Hz` + (mp.aviso ? ` · <span style="color:var(--aviso)">${mp.aviso}</span>` : "") : "Obstáculos: hace falta la calibración cámara→robot.";
+  $("btnBorrarMapa").hidden = !(modoVision === "sim" && mp.estado && mp.estado !== "sin");
+  $("camPie").innerHTML = modoVision === "sim" ? txtMapa : cv ? `MxId <b>${c.mxid}</b> &nbsp;·&nbsp; <b>${c.ancho}×${c.alto}</b> px &nbsp;·&nbsp; centro: <b>${c.prof_centro_mm ? Math.round(c.prof_centro_mm)+" mm" : "—"}</b>` : "";
 
   // gemelo
   const gc = !vivo ? "mal" : (e.gemelo||"").startsWith("copiando") ? "ok" : "aviso";
@@ -457,6 +469,13 @@ marcoSim.addEventListener("contextmenu", ev => ev.preventDefault());
 marcoSim.addEventListener("wheel", ev => { ev.preventDefault(); vistaPost({accion:"zoom", factor: ev.deltaY > 0 ? 1.12 : 1/1.12}); }, {passive:false});
 document.querySelectorAll(".vistas [data-preset]").forEach(b => b.addEventListener("click", () => vistaPost({accion:"preset", nombre:b.dataset.preset})));
 $("zMas").addEventListener("click", () => vistaPost({accion:"zoom", factor:1/1.2}));
+$("btnObst").addEventListener("click", async () => {
+  const r = await post("/api/mapa", {accion: $("btnObst").classList.contains("act") ? "ocultar" : "ver"});
+  if (r.ok) $("btnObst").classList.toggle("act"); refrescar();
+});
+$("btnBorrarMapa").addEventListener("click", async () => {
+  const r = await post("/api/mapa", {accion: "borrar"}); tostada(r.msg || "No se pudo borrar");
+});
 $("zMenos").addEventListener("click", () => vistaPost({accion:"zoom", factor:1.2}));
 
 // ── pedal: latido cada 100 ms mientras se mantiene ──

@@ -11,8 +11,8 @@ memoria compartida para que la web las sirva como vídeo:
                      a la imagen real: si la calibración está bien, el robot virtual tapa al real.
                      Se recarga solo cuando cambia el archivo (al recalibrar).
 
-Entradas (canales): «qpos» (float64 × nq, lo escribe modo.py) y «mando» (la vista libre, que
-pide la web). En un proceso aparte para no frenar el bucle del gemelo ni la web.
+Entradas (canales): «qpos» (float64 × nq, lo escribe modo.py), «mando» (la vista libre y si se
+ven los obstáculos, que pide la web) y «mapa» (vóxeles ocupados del mapa de obstáculos, en naranja). En un proceso aparte para no frenar el bucle del gemelo ni la web.
 
 Backend de OpenGL sin ventana: MUJOCO_GL = egl (GPU, recomendado) · osmesa (CPU, lento) ·
 glfw (necesita escritorio). Si el elegido falla, el proceso se relanza con el siguiente.
@@ -36,6 +36,7 @@ def _parsear():
     ap.add_argument("--canal-sim", default=None)
     ap.add_argument("--canal-simcam", default=None)
     ap.add_argument("--canal-mando", default=None)
+    ap.add_argument("--canal-mapa", default=None, help="mapa de obstáculos (vóxeles) para dibujarlo")
     ap.add_argument("--ancho", type=int, default=int(getattr(cfg, "AUTONOMO_SIM_ANCHO", 960)))
     ap.add_argument("--alto", type=int, default=int(getattr(cfg, "AUTONOMO_SIM_ALTO", 540)))
     ap.add_argument("--fps", type=float, default=float(getattr(cfg, "AUTONOMO_SIM_FPS", 20)))
@@ -71,12 +72,18 @@ def _cerrar(renderer):
         f()
 
 
-def _vista(mando_bytes):
+def _mando(mando_bytes):
     if not mando_bytes:
-        return dict(VISTA_DEFECTO)
+        return {}
     try:
-        v = json.loads(mando_bytes).get("vista") or {}
+        return json.loads(mando_bytes)
     except ValueError:
+        return {}
+
+
+def _vista(mando_bytes):
+    v = _mando(mando_bytes).get("vista") or {}
+    if not v:
         return dict(VISTA_DEFECTO)
     out = dict(VISTA_DEFECTO)
     out.update({k: v[k] for k in VISTA_DEFECTO if k in v})
@@ -126,6 +133,9 @@ def main():
     canal_sim = Canal.esperar(args.canal_sim) if args.canal_sim else None
     canal_simcam = Canal.esperar(args.canal_simcam) if args.canal_simcam else None
     canal_mando = Canal.esperar(args.canal_mando) if args.canal_mando else None
+    canal_mapa = Canal.esperar(args.canal_mapa) if args.canal_mapa else None
+    from skill_shield.autonomo.mapa import desempaquetar, dibujar_voxeles
+    voxeles = (0.0, None)
 
     ruta_calib = args.calibracion if os.path.isabs(args.calibracion) else \
         os.path.join(os.path.dirname(os.path.abspath(cfg.__file__)), args.calibracion)
@@ -144,10 +154,18 @@ def main():
                     mujoco.mj_forward(modelo, datos)
 
             # ── vista libre ──
-            v = _vista(canal_mando.leer()[0] if canal_mando is not None else None)
+            b_mando = canal_mando.leer()[0] if canal_mando is not None else None
+            v = _vista(b_mando)
             cam.azimuth, cam.elevation, cam.distance = float(v["azimut"]), float(v["elevacion"]), float(v["distancia"])
             cam.lookat[:] = [float(x) for x in v["mirar"]]
+            voxeles = (0.0, None)                        # obstáculos del mapa (si están recientes)
+            if canal_mapa is not None and _mando(b_mando).get("ver_obstaculos", True):
+                b_m, t_m = canal_mapa.leer()
+                if b_m and t_m and time.time() - t_m < 3.0:
+                    voxeles = desempaquetar(b_m)
             render.update_scene(datos, camera=cam)
+            if voxeles[1] is not None:
+                dibujar_voxeles(render.scene, voxeles[1], voxeles[0])
             rgb = render.render()
             if canal_sim is not None or args.ventana:
                 ok, jpg = cv2.imencode(".jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
@@ -185,6 +203,8 @@ def main():
                 if render_cam is not None and calib is not None:
                     render_cam.update_scene(datos, camera=cam)
                     scn = render_cam.scene
+                    if voxeles[1] is not None:              # así se ve si caen sobre los objetos reales
+                        dibujar_voxeles(scn, voxeles[1], voxeles[0])
                     g = C.camara_gl(calib["T_mundo_cam"], Kc, w, h, float(scn.camera[0].frustum_near))
                     for c in (scn.camera[0], scn.camera[1]):
                         c.pos[:] = g["pos"]

@@ -10,6 +10,7 @@ Lectura (abierta):
   GET  /sim.mjpg        gemelo de MuJoCo (vista libre) ·  GET /simcam.mjpg  gemelo visto desde la
                         cámara de cabeza calibrada (para superponerlo a la imagen real)
   POST /api/vista       girar / acercar / mover / vista predefinida del gemelo (sin contraseña)
+  POST /api/mapa {"accion": "ver" | "ocultar" | "borrar"}   obstáculos en el gemelo (borrar pide contraseña)
 Mandos (con contraseña AUTONOMO_WEB_CLAVE; sesión por cookie):
   POST /api/login {"clave": "..."}      ·  POST /api/logout
   POST /api/pedal {"pulsado": true}     pedal de la web: mientras se mantiene pulsado el botón,
@@ -65,6 +66,8 @@ class ServicioWeb:
                              sim=canal_sim, simcam=canal_simcam)
         self._vista_inicial = dict(vista or VISTA_INICIAL)
         self.vista = dict(self._vista_inicial)
+        self.ver_obstaculos = True
+        self._mapa_borrar_n = 0
         self._canales = {}
         self._lock = threading.Lock()
         self.clave = clave or None
@@ -192,6 +195,18 @@ class ServicioWeb:
         self._escribir_mando()
         return True, "Pedal obligatorio" if obligatorio else "Pedal desactivado: el robot puede moverse sin pedal"
 
+    def mapa(self, accion):
+        """ver / ocultar los obstáculos en el gemelo, o borrar el mapa."""
+        with self._lock:
+            if accion in ("ver", "ocultar"):
+                self.ver_obstaculos = accion == "ver"
+            elif accion == "borrar":
+                self._mapa_borrar_n += 1
+            else:
+                return False
+        self._escribir_mando()
+        return True
+
     def reset(self):
         with self._lock:
             self._reset_n += 1
@@ -207,6 +222,8 @@ class ServicioWeb:
             ultimo = max(self._pulsando.values(), default=0.0)
             datos = dict(pedal=bool(self._pulsando), pedal_t=ultimo,
                          pedal_obligatorio=self._pedal_obligatorio, vista=self.vista,
+                         ver_obstaculos=self.ver_obstaculos,
+                         mapa_borrar_id=f"{self._reset_base}-m{self._mapa_borrar_n}",
                          reset_id=f"{self._reset_base}-{self._reset_n}" if self._reset_n else None,
                          t=time.time())
         c.escribir(json.dumps(datos).encode())
@@ -225,6 +242,7 @@ class ServicioWeb:
         if info is not None:
             info["edad_s"] = round(ahora - ti, 2) if ti else None
         e["camara"] = info or {}
+        e["mapa"] = dict((info or {}).get("mapa") or {}, ver=self.ver_obstaculos)
         ctrl = dict(e.get("control") or {})
         with self._lock:
             ctrl["pedal_obligatorio"] = self._pedal_obligatorio
@@ -344,6 +362,16 @@ def crear_app(servicio):
             return _no_autorizado()
         ok, msg = servicio.poner_obligatorio(bool((await _cuerpo(request)).get("obligatorio", True)))
         return JSONResponse({"ok": ok, "msg": msg}, status_code=200 if ok else 409)
+
+    @app.post("/api/mapa")
+    async def mapa(request: Request):
+        accion = (await _cuerpo(request)).get("accion")
+        if accion == "borrar" and not servicio.autorizado(_token(request)):
+            return _no_autorizado()                     # borrar afecta a lo que se esquiva
+        ok = servicio.mapa(accion)
+        return JSONResponse({"ok": ok, "msg": {"ver": "Obstáculos visibles", "ocultar": "Obstáculos ocultos",
+                                               "borrar": "Mapa borrado: se vuelve a llenar en un momento"}
+                             .get(accion, "Acción desconocida")}, status_code=200 if ok else 400)
 
     @app.post("/api/reset")
     async def reset(request: Request):

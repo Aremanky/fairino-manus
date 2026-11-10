@@ -6,8 +6,8 @@ profundidad alineada, crear_pipeline_oak) y deja en memoria compartida:
   · canal de imagen: el último fotograma de color en JPEG (lo sirve la web)
   · canal de info:   JSON con MxId, USB, FPS, matriz K de fábrica y la profundidad del centro
 
-Paso 2 de la hoja de ruta: SOLO enseña la imagen. La percepción (ArUco, luego YOLO) irá
-aquí mismo en los pasos 5 y 10. Va en su propio proceso para que, si hiciera falta, se
+También calcula el MAPA DE OBSTÁCULOS (mapa.py) con la profundidad, si hay calibración
+cámara→robot, y lo deja en otro canal. La percepción (ArUco, luego YOLO) irá aquí mismo. Va en su propio proceso para que, si hiciera falta, se
 pueda lanzar con OTRO entorno virtual (AUTONOMO_PYTHON_PERCEPCION en config.py).
 
 Prueba aislada, sin robot ni MuJoCo (se ve en una ventana; Q o Esc para salir):
@@ -33,6 +33,9 @@ def _parsear():
     ap.add_argument("--calidad", type=int, default=int(getattr(cfg, "AUTONOMO_JPEG_CALIDAD", 80)))
     ap.add_argument("--padre", type=int, default=0, help="PID del modo autónomo (si muere, salir)")
     ap.add_argument("--ir-ma", type=int, default=int(getattr(cfg, "AUTONOMO_CAM_IR_MA", 800)))
+    ap.add_argument("--canal-qbrazo", default=None, help="pose real del brazo (para quitarlo del mapa)")
+    ap.add_argument("--canal-mapa", default=None, help="mapa de obstáculos (None = no calcularlo)")
+    ap.add_argument("--canal-mando", default=None, help="mandos de la web (borrar mapa…)")
     return ap.parse_args()
 
 
@@ -64,6 +67,16 @@ def main():
 
     canal_img = Canal.esperar(args.canal_img) if args.canal_img else None
     canal_info = Canal.esperar(args.canal_info) if args.canal_info else None
+    constructor = None
+    if args.canal_mapa:                                  # mapa de obstáculos (paso 7)
+        import config as cfg
+        from skill_shield.autonomo.mapa import ConstructorMapa
+        constructor = ConstructorMapa(cfg, os.path.dirname(os.path.abspath(cfg.__file__)),
+                                      Canal.esperar(args.canal_qbrazo) if args.canal_qbrazo else None,
+                                      Canal.esperar(args.canal_mapa),
+                                      Canal.esperar(args.canal_mando) if args.canal_mando else None)
+        print(f"🧱 [autónomo] Mapa de obstáculos: rejilla {tuple(constructor.mapa.n)} de "
+              f"{constructor.mapa.res * 100:.0f} cm")
 
     def _info(**kw):
         if canal_info is not None:
@@ -92,6 +105,11 @@ def main():
             pd = _ultimo(qd)
             if pd is not None:
                 prof = pd.getFrame()
+                if constructor is not None:
+                    try:
+                        constructor.paso(prof, K)
+                    except Exception as e:                # el mapa nunca debe tirar la cámara
+                        print(f"⚠️  [autónomo] Mapa de obstáculos: {e}")
             pc = _ultimo(qc)
             if pc is None:
                 time.sleep(0.002)
@@ -117,7 +135,8 @@ def main():
                     t_info = ahora
                     _info(ok=True, mxid=mxid, usb=getattr(usb, "name", str(usb)), fps=round(fps, 1),
                           ancho=w, alto=h, K=K.tolist(), dist=np.asarray(dist).ravel().tolist(),
-                          prof_centro_mm=z, t=time.time())
+                          prof_centro_mm=z, t=time.time(),
+                          mapa=constructor.estado() if constructor is not None else None)
                 if args.ventana:
                     cv2.imshow("Autonomo - camara de cabeza", img)
                     if cv2.waitKey(1) & 0xFF in (ord("q"), 27):

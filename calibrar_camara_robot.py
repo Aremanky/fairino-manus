@@ -192,17 +192,8 @@ def crear_pedal():
 def modelo_colision(cadena, T_mundo_cam=None):
     """El de la teleoperación (soporte, suelo, mesa/obstáculos de config) con la mano más gorda
     (lleva el tablero) y, si ya se sabe, la cámara de cabeza como obstáculo."""
-    from skill_shield.teleop_fr5.ik_teleop import Caja, Entorno, ModeloColision, entorno_soporte_hombros
-    from skill_shield.teleop_fr5.obstaculos import cajas_desde_config
-    g = {k: getattr(cfg, k) for k in dir(cfg) if k.isupper()}
-    ent = entorno_soporte_hombros(cfg.SOPORTE_SUELO_Z) if getattr(cfg, "SOPORTE_HOMBROS", False) \
-        else Entorno(z_suelo=0.0)
-    ent.cajas = cajas_desde_config(g, ent.z_suelo, verbose=False)
-    if T_mundo_cam is not None:
-        ent.cajas.append(Caja("camara_cabeza", T_mundo_cam[:3, 3], (0.07, 0.07, 0.07)))
-    m = ModeloColision(cadena, ent)
-    m.R_MANO = RADIO_MANO
-    return m
+    from skill_shield.autonomo.mapa import modelo_colision as _mc
+    return _mc(cadena, cfg, T_mundo_cam, radio_mano=RADIO_MANO)
 
 
 class Robot:

@@ -1417,6 +1417,19 @@ AUTONOMO_SIM_FPS      = 20
 AUTONOMO_SIM_GL       = "egl"            # OpenGL sin ventana: "egl" (GPU) · "osmesa" (CPU) · "glfw"
 AUTONOMO_SIM_VISTA    = None             # vista inicial; None = la del visor (azimut 90, elevación -20…)
 
+# Mapa de obstáculos (paso 7, skill_shield/autonomo/mapa.py): lo calcula el proceso de la cámara
+# con la profundidad (hace falta la calibración cámara→robot). Vóxeles en el marco del MJCF.
+AUTONOMO_MAPA          = True
+AUTONOMO_MAPA_RES      = 0.02            # m: lado de cada cubo
+AUTONOMO_MAPA_LIMITES  = None            # ((xmin, xmax), (ymin, ymax), (zmin, zmax)) m; None = delante
+                                         # del robot: x -1.0…0.6, y -1.1…0.4, z suelo…0.6
+AUTONOMO_MAPA_HZ       = 4.0             # actualizaciones por segundo
+AUTONOMO_MAPA_OLVIDO_S = 30.0            # lo que no se ve en este tiempo vuelve a «desconocido»
+AUTONOMO_MAPA_MARGEN_ROBOT = 0.03        # m extra alrededor de las cápsulas del robot (se quita del mapa)
+AUTONOMO_MAPA_DESCONOCIDO_OCUPADO = True # para esquivar: lo tapado (debajo/detrás de algo) cuenta como obstáculo
+AUTONOMO_MAPA_VER_VISOR = True           # dibujar los obstáculos también en la ventana de MuJoCo
+AUTONOMO_MAPA_MAX_DIBUJO = 6000          # máx. de vóxeles que se dibujan (el mapa completo no tiene límite)
+
 # ═══════════════════════════════════════════════════════════════════════════
 # CALIBRACIÓN CÁMARA DE CABEZA → ROBOT (10-nov, paso 4) — calibrar_camara_robot.py
 # ═══════════════════════════════════════════════════════════════════════════
