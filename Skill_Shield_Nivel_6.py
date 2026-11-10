@@ -178,26 +178,31 @@ def main():
     # ── MENÚ DE ARRANQUE CON ZENITY (compatible con Wayland/GNOME) ──────────
     # zenity es la herramienta de diálogos nativa de GNOME, siempre visible.
     # Si no está instalada: sudo apt install zenity
-    # 9-nov: la misma pregunta de siempre con un TERCER botón (--extra-button):
-    #   [OK]     💻 Simulación            → SIMULACION
-    #   [Cancel] 🤖 Mano Física + Gemelo  → HARDWARE_REAL
-    #   [Extra]  🎚️ Gemelo (sliders)       → GEMELO_SLIDERS: mano física + guante igual que
-    #            HARDWARE_REAL, pero el BRAZO se mueve con la ventana de sliders
-    #            (skill_shield/interfaz/sliders_brazo.py)
-    # zenity devuelve 1 tanto para Cancel como para el botón extra; el extra se distingue
-    # porque escribe su etiqueta en stdout.
+    # La misma pregunta de siempre, con CUATRO botones (dos --extra-button), en este orden:
+    #   [Extra 1] 💻 Simulación             → SIMULACION
+    #   [Extra 2] 🎚️ Gemelo (sliders)        → GEMELO_SLIDERS: mano física + guante igual que
+    #             HARDWARE_REAL, pero el BRAZO se mueve con la ventana de sliders
+    #             (skill_shield/interfaz/sliders_brazo.py)
+    #   [OK]      🤖 Mano Física + Gemelo   → HARDWARE_REAL
+    #   [Cancel]  🧠 Funcionamiento autónomo → AUTONOMO (10-nov; paquete skill_shield/autonomo/)
+    # zenity devuelve 1 tanto para Cancel como para los botones extra; los extra se distinguen
+    # porque escriben su etiqueta en stdout.
+    # OJO: cerrar la ventana (X / Esc) equivale a Cancel → hoy entra en AUTONOMO. Mientras el
+    # modo autónomo no mueva nada da igual; cuando mueva el FR5, exigir siempre el pedal.
     import subprocess
     global MODO_EJECUCION
     _BOTON_SIMULACION = "💻  Simulación Virtual (MuJoCo)"
+    _BOTON_SLIDERS    = "🎚️  Gemelo Digital (sliders)"
     try:
         resultado = subprocess.run(
             [
                 'zenity', '--question',
                 '--title=Skill Shield Nivel 6',
                 '--text=¿Qué modo de operación deseas iniciar?',
-                f'--extra-button={_BOTON_SIMULACION}',                  # 1º (arriba)
-                '--ok-label=🎚️  Gemelo Digital (sliders)',              # 2º (en medio)
-                '--cancel-label=🤖  Mano Física (USB) + Gemelo Digital', # 3º (abajo)
+                f'--extra-button={_BOTON_SIMULACION}',                  # 1º
+                f'--extra-button={_BOTON_SLIDERS}',                     # 2º
+                '--ok-label=🤖  Mano Física (USB) + Gemelo Digital',     # 3º
+                '--cancel-label=🧠  Funcionamiento autónomo',            # 4º (el último)
                 '--width=420',
                 '--height=50',
             ],
@@ -207,14 +212,17 @@ def main():
         stdout_txt = resultado.stdout.decode(errors="ignore").strip() if resultado.stdout else ""
 
         if resultado.returncode == 1 and stdout_txt == _BOTON_SIMULACION:
-            # Botón extra (arriba) → Simulación
+            # Botón extra 1 → Simulación
             MODO_EJECUCION = "SIMULACION"
-        elif resultado.returncode == 0:
-            # Botón OK (en medio) → gemelo digital con el brazo en sliders
+        elif resultado.returncode == 1 and stdout_txt == _BOTON_SLIDERS:
+            # Botón extra 2 → gemelo digital con el brazo en sliders
             MODO_EJECUCION = "GEMELO_SLIDERS"
-        elif resultado.returncode == 1 and not stdout_txt and not stderr_txt:
-            # Botón Cancelar (abajo) → mano física + gemelo digital normal
+        elif resultado.returncode == 0:
+            # Botón OK → mano física + gemelo digital normal
             MODO_EJECUCION = "HARDWARE_REAL"
+        elif resultado.returncode == 1 and not stdout_txt and not stderr_txt:
+            # Botón Cancelar (el último) → funcionamiento autónomo
+            MODO_EJECUCION = "AUTONOMO"
         else:
             # Cualquier otro código, o zenity escribió algo en stderr → no sabemos si el
             # usuario llegó a ver la ventana. Por seguridad, NUNCA asumimos hardware real.
@@ -232,6 +240,14 @@ def main():
         MODO_EJECUCION = "SIMULACION"
 
     print(f"🚀 Iniciando Skill Shield Nivel 6 en modo: {MODO_EJECUCION}")
+
+    # ── FUNCIONAMIENTO AUTÓNOMO: paquete aparte con su propio bucle (no usa el de abajo) ──
+    # Se sale de main() ANTES de arrancar fr5_servo, la mano o las cámaras: el paquete
+    # arranca las suyas (FR5 en simulacro, cámara de cabeza, web y gemelo en MuJoCo).
+    if MODO_EJECUCION == "AUTONOMO":
+        from skill_shield.autonomo.modo import ejecutar as ejecutar_autonomo
+        ejecutar_autonomo(globals())
+        return
     modo_sliders = MODO_EJECUCION == "GEMELO_SLIDERS"
     mano_fisica  = MODO_EJECUCION in ("HARDWARE_REAL", "GEMELO_SLIDERS")   # OrcaHand por USB
 

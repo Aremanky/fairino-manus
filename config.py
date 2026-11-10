@@ -10,7 +10,7 @@ import math
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ── CONFIGURACIÓN DE ENTORNO Y RUTAS ──────────────────────────────────────────
-MODO_EJECUCION = "SIMULACION"  # Opciones: "SIMULACION" | "HARDWARE_REAL" | "GEMELO_SLIDERS" (lo elige el menú)
+MODO_EJECUCION = "SIMULACION"  # Opciones: "SIMULACION" | "GEMELO_SLIDERS" | "HARDWARE_REAL" | "AUTONOMO" (lo elige el menú)
 
 # Puerto mano
 PUERTO_HARDWARE = "/dev/ttyUSB0"
@@ -1312,8 +1312,15 @@ FR5_CPU          = None          # núcleo fijo para el proceso (None = cualquie
 # "colisión" sin tocar nada. Valores en diagnosticos/ajustar_gemelo.py (apartado 3).
 # None = no tocar lo que ya tenga la controladora. Solo se escriben fuera de SIMULACRO.
 # Comprobación: en modo arrastre de la WebApp, al soltar el brazo debe quedarse QUIETO.
-FR5_CARGA_KG            = None    # p. ej. 1.8 (pesad la mano + adaptador)
-FR5_CARGA_CDM_MM        = None    # p. ej. (0, 10, 60): centro de masas en la brida, mm
+FR5_CARGA_KG            = 1.3     # mano + adaptador, pesados el 10-nov
+FR5_CARGA_CDM_MM        = None    # centro de masas en la brida, mm (x, y, z). Sin medir: sacadlo con
+                                  # la identificación de carga de la WebApp y ponedlo aquí
+# 10-nov: herramienta (TCP) = centro de la palma de la ORCA, sacado del modelo de MuJoCo
+# (mano_mount + OFFSET_LOCAL_PALMA_CENTRO pasado al marco de la brida): ~195 mm a lo largo del eje
+# de la brida. Comprobadlo con un metro (cara de la brida → centro de la palma) y corregid z.
+# None = no tocar el que tenga la controladora. Como la carga, solo se escribe fuera de SIMULACRO.
+FR5_TCP_MM              = (0.0, 2.9, 195.0, 0.0, 0.0, 0.0)   # (x, y, z) mm, (rx, ry, rz) °
+FR5_HERRAMIENTA_ID      = 1       # nº del sistema de herramienta en la controladora (1-14)
 FR5_ANGULO_INSTALACION  = None    # (inclinación, giro) en grados, p. ej. (135.0, 90.0)
 FR5_NIVEL_COLISION      = None    # 6 niveles 1-10, más alto = menos sensible, p. ej. (5, 7, 5, 4, 4, 4)
 FR5_ESTRATEGIA_COLISION = None    # 0 = pausa con error (lo normal) · 2 = para con error
@@ -1343,7 +1350,7 @@ GEMELO_DEBUG          = True          # cada 2 s: pose real vs simulador vs coma
 
 # ── EPISODIO POR POSES (9-nov): episodio_poses.py ───────────────────────────────────────
 # Brazo de pose en pose con Enter (poses en episodio_poses.txt) + mano con el guante MANUS.
-EPISODIO_FR5_VEL_MAX_DEG_S = 20.0   # °/s por joint (la 1ª ida a la inicial va a FR5_VEL_APROX_DEG_S)
+EPISODIO_FR5_VEL_MAX_DEG_S = 7.0   # °/s por joint (la 1ª ida a la inicial va a FR5_VEL_APROX_DEG_S)
 EPISODIO_FR5_SIMULACRO     = False  # True = conecta y lee, pero NO mueve el FR5
 
 # ── MODO GEMELO_SLIDERS (9-nov): mano con guante + BRAZO con una ventana de sliders ─────────
@@ -1374,3 +1381,20 @@ IA_RECORTAR_QUIETOS = True    # quitar el rato quieto del principio y del final 
 IA_MISMA_TAREA      = True    # [G] no vuelve a pedir el nombre: [Shift+G] para cambiar de tarea
 IA_V_MAX_BRAZO      = 1.0     # rad/s: tope por joint del brazo al reproducir (además de fr5_servo)
 IA_PESO_EXP         = 0.15    # ensamblado temporal: más alto = más peso a la predicción reciente
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FUNCIONAMIENTO AUTÓNOMO (10-nov) — última opción del menú (skill_shield/autonomo/)
+# ═══════════════════════════════════════════════════════════════════════════
+# Paso 2 de la hoja de ruta: cámara de cabeza + gemelo en MuJoCo + web, SIN mover el robot
+# (fr5_servo va siempre en simulacro en este modo, diga lo que diga FR5_SIMULACRO).
+AUTONOMO_CON_FR5      = True             # arrancar fr5_servo (solo lectura) para el gemelo
+AUTONOMO_CAM_MXID     = "1944301081B5FA4800"   # cámara de CABEZA = la antigua cámara B
+AUTONOMO_CAM_VENTANA  = False            # True = además de la web, ventana de OpenCV con la imagen
+AUTONOMO_CAM_IR_MA    = 800              # proyector IR de puntos (mejor profundidad en la mesa lisa)
+AUTONOMO_JPEG_CALIDAD = 80               # calidad del vídeo de la web (más alto = más ancho de banda)
+AUTONOMO_WEB_HOST     = "0.0.0.0"        # "0.0.0.0" = abierta a la red local · "127.0.0.1" = solo este PC
+AUTONOMO_WEB_PUERTO   = 8080
+AUTONOMO_HZ           = 60.0             # refresco del gemelo
+AUTONOMO_PYTHON_PERCEPCION = None        # intérprete de OTRO venv para la cámara/percepción
+                                         # (p. ej. si YOLO choca con numpy<2); None = el mismo

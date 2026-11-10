@@ -76,6 +76,9 @@ PARAMETROS_POR_DEFECTO = dict(
     FR5_NIVEL_COLISION=None,          # 6 niveles 1-10 (más alto = hace falta más fuerza)
     FR5_ESTRATEGIA_COLISION=None,     # 0 pausa con error · 2 para con error · (ver SDK)
     FR5_PARAR_SI_COLISION=True,       # colisión/fallo durante el ServoJ → dejar de enviar YA
+    # 10-nov: herramienta (TCP) en la palma de la ORCA (None = no tocar la de la controladora)
+    FR5_TCP_MM=None,                  # (x, y, z, rx, ry, rz) mm/° del TCP respecto a la brida
+    FR5_HERRAMIENTA_ID=1,             # nº de sistema de herramienta en la controladora (1-14)
 )
 
 # Índices de la memoria compartida de estado
@@ -397,6 +400,16 @@ def _configurar_colisiones(robot, p):
     if p.get("FR5_ESTRATEGIA_COLISION") is not None:
         est = int(p["FR5_ESTRATEGIA_COLISION"])
         ordenes.append(("estrategia de colisión", lambda: robot.SetCollisionStrategy(est), str(est)))
+    if p.get("FR5_TCP_MM") is not None:
+        # 10-nov: TCP en la palma. No cambia nada de lo que hace este programa (manda ServoJ en
+        # joints, con su propia cinemática); sirve para la WebApp, la detección de colisiones y
+        # los movimientos cartesianos de la controladora. Tipo 0 = herramienta, instalada en el
+        # extremo del robot (0), carga nº 0 (la misma de SetLoadWeight).
+        tcp = [float(v) for v in p["FR5_TCP_MM"]]
+        hid = int(p.get("FR5_HERRAMIENTA_ID", 1))
+        ordenes.append(("herramienta (TCP)", lambda: robot.SetToolCoord(hid, tcp, 0, 0, 0, 0),
+                        f"nº {hid}: ({tcp[0]:.1f}, {tcp[1]:.1f}, {tcp[2]:.1f}) mm, "
+                        f"({tcp[3]:.1f}, {tcp[4]:.1f}, {tcp[5]:.1f})°"))
     for nombre, f, txt in ordenes:
         if p["FR5_SIMULACRO"]:
             print(f"  fr5_servo [SIMULACRO]: pondría {nombre} = {txt}")
@@ -406,6 +419,14 @@ def _configurar_colisiones(robot, p):
         except Exception as e:
             rc = f"excepción: {e}"
         print(f"  fr5_servo: {nombre} = {txt} → " + ("✓" if rc == 0 else f"⚠ código {rc}"))
+    if p.get("FR5_TCP_MM") is not None:
+        try:                                    # comprobar qué TCP tiene activo la controladora
+            r = robot.GetTCPOffset(0)
+            if _ret(r) == 0 and r[1] is not None:
+                print("  fr5_servo: TCP activo en la controladora: ("
+                      + ", ".join(f"{float(v):.1f}" for v in r[1]) + ") mm/°")
+        except Exception:
+            pass
 
 
 def paso_limitado(q, v, objetivo, v_max, a_max, dt):

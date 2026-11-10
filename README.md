@@ -53,8 +53,18 @@ Lo más probable es que falle, pero es bueno para ir depurando el .txt
 | Modo | Mano (OrcaHand) | Brazo |
 |---|---|---|
 | 💻 Simulación Virtual | solo MuJoCo | cámaras (solo MuJoCo) |
-| 🤖 Mano Física + Gemelo Digital | guante/cámara → mano real por USB | cámaras |
 | 🎚️ Gemelo Digital (sliders) | guante/cámara → mano real por USB | **ventana de sliders** |
+| 🤖 Mano Física + Gemelo Digital | guante/cámara → mano real por USB | cámaras |
+| 🧠 Funcionamiento autónomo | *(en desarrollo)* | *(en desarrollo)* |
+
+### Funcionamiento autónomo (en desarrollo)
+- Última opción del menú. Fija `MODO_EJECUCION = "AUTONOMO"` y salta al paquete `skill_shield/autonomo/`, con su propio bucle.
+- **Paso 2 (ahora):** cámara de cabeza + gemelo en MuJoCo copiando la pose real del FR5 + web. **El robot no se mueve**: `fr5_servo` va siempre en simulacro en este modo y no se arma nunca.
+- Web de solo lectura en `http://<IP del PC>:8080/` desde cualquier equipo de la red (puerto en `AUTONOMO_WEB_PUERTO`). Si no carga desde otro equipo, abre el puerto en el cortafuegos: `sudo ufw allow 8080/tcp`.
+- Cámara de cabeza = la antigua cámara B (`AUTONOMO_CAM_MXID`). Si la tiene abierta otro programa, el gemelo y la web siguen sin imagen.
+- Para salir: cerrar la ventana de MuJoCo o Ctrl+C.
+- Pruebas por separado: `python -m skill_shield.autonomo.camara --ventana` · `python -m skill_shield.autonomo.web`
+- Cerrar el menú con la X o Esc equivale a pulsar este botón (es el «Cancelar» de zenity).
 
 ### Mano Física + Gemelo Digital (teleoperación con el FR5 físico)
 - Arranca el FR5 real (bloque `TELEOP_REAL_*` de `config.py`; `TELEOP_REAL_FR5_SIMULACRO = True` para probar sin que se mueva).
