@@ -1426,6 +1426,15 @@ AUTONOMO_MAPA_RES      = 0.02            # m: lado de cada cubo
 AUTONOMO_MAPA_LIMITES  = None            # ((xmin, xmax), (ymin, ymax), (zmin, zmax)) m; None = delante
                                          # del robot: x -1.0…0.6, y -1.1…0.4, z suelo…0.6
 AUTONOMO_MAPA_HZ       = 4.0             # actualizaciones por segundo
+# Filtros contra obstáculos FALSOS (11-nov): la cámara de cabeza usa una profundidad «honrada» (sin
+# rellenar huecos ni filtro temporal, que se inventan superficies en paredes blancas y ventanas),
+# y el mapa descarta lo incoherente, lo saturado, lo demasiado cerca y los cubos sueltos.
+AUTONOMO_CAM_RELLENAR_HUECOS = 0     # radio de relleno de huecos del estéreo (la teleop usa STEREO_HOLE_FILLING)
+AUTONOMO_CAM_FILTRO_TEMPORAL = False
+AUTONOMO_CAM_CONFIANZA = 200         # confianza del estéreo (0-255, más bajo = más estricto)
+AUTONOMO_MAPA_Z_MIN    = 0.35        # m: más cerca la OAK-D no mide (lo que salga es ruido)
+AUTONOMO_MAPA_MIN_PUNTOS = 4         # puntos en un cubo en una misma imagen para contar
+AUTONOMO_MAPA_MIN_GRUPO  = 4         # cubos ocupados juntos como mínimo (los sueltos son ruido)
 AUTONOMO_MAPA_OLVIDO_S = 30.0            # lo que no se ve en este tiempo vuelve a «desconocido»
 AUTONOMO_MAPA_MARGEN_ROBOT = 0.03        # m extra alrededor de las cápsulas del robot (se quita del mapa)
 AUTONOMO_MAPA_DESCONOCIDO_OCUPADO = True # para esquivar: lo tapado (debajo/detrás de algo) cuenta como obstáculo
@@ -1447,6 +1456,24 @@ AUTONOMO_HERRAMIENTAS = [
 ]
 AUTONOMO_HERRAMIENTAS_N_ESTABLE = 5      # imágenes seguidas antes de darla por buena
 AUTONOMO_HERRAMIENTAS_OLVIDO_S  = 2.0    # sin verla este tiempo → deja de aparecer
+
+# ── PELOTAS (11-nov): por color + profundidad, sin marcadores — skill_shield/autonomo/pelotas.py ──
+# Cada pelota: rangos HSV de OpenCV (H 0-179, S y V 0-255; el rojo necesita dos, da la vuelta) y,
+# si se sabe, su diámetro en m (descarta lo que tenga el mismo color pero otro tamaño; None = de 3 a
+# 20 cm). Colores sacados de la foto del 11-nov: ajustadlos con
+#     python -m skill_shield.autonomo.pelotas --calibrar      (clic en cada pelota)
+AUTONOMO_PELOTAS = [
+    dict(nombre="Pelota amarilla", colores=[((18, 110, 80), (28, 255, 255))], diametro=None,
+         color_gemelo=(1.0, 0.85, 0.1)),
+    dict(nombre="Pelota de tenis", colores=[((29, 90, 80), (38, 255, 255))], diametro=0.067,
+         color_gemelo=(0.8, 0.95, 0.2)),
+    dict(nombre="Pelota verde", colores=[((40, 80, 70), (60, 255, 255))], diametro=None,
+         color_gemelo=(0.2, 0.8, 0.3)),
+    dict(nombre="Pelota roja", colores=[((0, 120, 60), (7, 255, 255)), ((168, 120, 60), (179, 255, 255))],
+         diametro=None, color_gemelo=(0.9, 0.1, 0.15)),
+]
+AUTONOMO_PELOTAS_N_ESTABLE = 5
+AUTONOMO_PELOTAS_OLVIDO_S  = 2.0
 
 # ═══════════════════════════════════════════════════════════════════════════
 # TAREA: COGER → USAR → DEJAR (11-nov, paso 10, 1ª versión) — skill_shield/autonomo/tarea.py
@@ -1482,8 +1509,8 @@ AUTONOMO_TAREA_INCLINACION_PASO_DEG = 20.0
 AUTONOMO_TAREA_DIRECCIONES = 8      # direcciones probadas en cada inclinación
 AUTONOMO_TAREA_OPCIONES    = 3      # formas de llegar a cada sitio que se guardan (por si el camino entre ellos choca)
 # Comprobaciones del plan
-AUTONOMO_TAREA_USAR_MAPA  = False    # esquivar (comprobar) también el mapa de obstáculos de la cámara
-AUTONOMO_TAREA_EXCLUIR_RADIO = 0.15  # m alrededor de cada marcador que NO cuentan como obstáculo
+AUTONOMO_TAREA_USAR_MAPA  = True     # esquivar (comprobar) también el mapa de obstáculos de la cámara
+AUTONOMO_TAREA_EXCLUIR_RADIO = 0.15  # m alrededor de cada MARCADOR que no cuentan como obstáculo (pelotas: su radio + 2 cm)
 AUTONOMO_TAREA_MARGEN_MAPA = 0.03   # m de margen con los obstáculos del mapa
 AUTONOMO_TAREA_PASO_DEG   = 2.0     # cada cuánto se comprueba una postura en los tramos articulares
 AUTONOMO_TAREA_MARGEN_LIMITES_DEG = 2.0
@@ -1493,6 +1520,28 @@ AUTONOMO_TAREA_MANO_AGARRE  = {0: 0.0, 2: 1.25, 3: 1.10, 5: 1.25, 6: 1.10, 8: 1.
                                11: 1.25, 12: 1.10, 13: 0.35, 14: 0.45, 15: 0.70, 16: 0.90}
 AUTONOMO_TAREA_T_ABRIR_S  = 1.0
 AUTONOMO_TAREA_T_CERRAR_S = 1.5
+# Rodear obstáculos (paso 8): si el camino directo entre dos sitios choca (y pasando por la postura
+# de inicio también), se busca un rodeo en el espacio de joints (RRT-Connect + atajos).
+AUTONOMO_TAREA_RODEAR       = True
+AUTONOMO_TAREA_RODEO_S      = 6.0   # s máx. buscando el rodeo de un tramo
+AUTONOMO_TAREA_RODEO_TOTAL_S = 25.0  # s máx. de rodeos en todo un plan
+# ── Pelotas (11-nov): «coger, apretar un poco y dejar». La mano llega DESDE ARRIBA, baja hasta
+# rodearla, cierra, aprieta un poco, afloja, comprueba con los táctiles (si van) y la deja apoyada
+# sobre el marcador del punto de dejada. Lo que no cuenta como obstáculo: solo la pelota (+2 cm).
+AUTONOMO_TAREA_PELOTA_HOLGURA_PALMA = 0.03  # m entre la pelota y el centro de la palma (sobre ella)
+AUTONOMO_TAREA_PELOTA_SUBIDA = 0.12         # m que sube/baja en vertical para cogerla o dejarla
+AUTONOMO_TAREA_PELOTA_TACTIL_N = 0.3        # N para que un dedo cuente como «la noto»
+AUTONOMO_TAREA_PELOTA_TACTIL_DEDOS = 2      # dedos que la tienen que notar (si no, se para)
+# Posturas (ctrl 0..16: 0 muñeca · 1-3 meñique abd/mcp/pip · 4-6 anular · 7-9 corazón · 10-12 índice
+# · 13-16 pulgar cmc/abd/mcp/dip). Ajustadlas a vuestras pelotas: son un punto de partida.
+AUTONOMO_TAREA_MANO_PELOTA_ABIERTA = {0: 0.0, 1: -0.20, 4: -0.10, 7: 0.0, 10: 0.15, 13: 0.0, 14: 0.9,
+                                      15: 0.0, 16: 0.0}
+AUTONOMO_TAREA_MANO_PELOTA_CERRADA = {0: 0.0, 1: -0.15, 2: 0.85, 3: 0.75, 4: -0.08, 5: 0.85, 6: 0.75,
+                                      7: 0.0, 8: 0.85, 9: 0.75, 10: 0.10, 11: 0.85, 12: 0.75,
+                                      13: 0.25, 14: 0.9, 15: 0.55, 16: 0.65}
+AUTONOMO_TAREA_MANO_PELOTA_APRETAR = {0: 0.0, 1: -0.15, 2: 1.00, 3: 0.90, 4: -0.08, 5: 1.00, 6: 0.90,
+                                      7: 0.0, 8: 1.00, 9: 0.90, 10: 0.10, 11: 1.00, 12: 0.90,
+                                      13: 0.25, 14: 0.9, 15: 0.70, 16: 0.80}
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CALIBRACIÓN CÁMARA DE CABEZA → ROBOT (10-nov, paso 4) — calibrar_camara_robot.py

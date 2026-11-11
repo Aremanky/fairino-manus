@@ -36,9 +36,16 @@ def latencia_s(paquete) -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def crear_pipeline_oak(ancho: int = ANCHO_CAM, alto: int = ALTO_CAM,
-                       con_hd: bool = True) -> dai.Pipeline:
+                       con_hd: bool = True, rellenar_huecos=None, temporal=None,
+                       confianza=None) -> dai.Pipeline:
     """con_hd=False: no se crea la salida 'color_hd' (recorte de mano). Lo usa la cámara
-    SECUNDARIA para ahorrar ~2/3 del ancho de banda USB (ver multicamara.py)."""
+    SECUNDARIA para ahorrar ~2/3 del ancho de banda USB (ver multicamara.py).
+    rellenar_huecos / temporal / confianza (11-nov): None = los de la teleoperación
+    (STEREO_HOLE_FILLING, STEREO_TEMPORAL, la del preset). El mapa de obstáculos pide 0 / False /
+    más estricta: rellenar huecos y el filtro temporal se INVENTAN profundidad (paredes blancas,
+    ventanas, estelas) y eso sale como obstáculos flotando."""
+    huecos = STEREO_HOLE_FILLING if rellenar_huecos is None else int(rellenar_huecos)
+    con_temporal = STEREO_TEMPORAL if temporal is None else bool(temporal)
     pipeline = dai.Pipeline()
 
     cam_rgb = pipeline.create(dai.node.ColorCamera)
@@ -93,14 +100,20 @@ def crear_pipeline_oak(ancho: int = ANCHO_CAM, alto: int = ALTO_CAM,
             _cfg.postProcessing.speckleFilter.enable      = True
             _cfg.postProcessing.speckleFilter.speckleRange = 50
             _cfg.postProcessing.spatialFilter.enable      = True
-            _cfg.postProcessing.spatialFilter.holeFillingRadius = STEREO_HOLE_FILLING
+            _cfg.postProcessing.spatialFilter.holeFillingRadius = huecos
             _cfg.postProcessing.spatialFilter.numIterations     = 1
-            _cfg.postProcessing.temporalFilter.enable    = bool(STEREO_TEMPORAL)
+            _cfg.postProcessing.temporalFilter.enable    = con_temporal
+            if confianza is not None:           # más bajo = más estricto (0-255)
+                try:
+                    _cfg.costMatching.confidenceThreshold = int(confianza)
+                except Exception as _e_c:
+                    print(f"⚠️  [OAK] No se pudo poner la confianza del estéreo: {_e_c}")
             _cfg.postProcessing.thresholdFilter.minRange = int(PROF_Z_MIN * 1000)
             _cfg.postProcessing.thresholdFilter.maxRange = int(PROF_Z_MAX * 1000)
             stereo.initialConfig.set(_cfg)
             print("🧹 [OAK] Filtros de profundidad activados "
-                  f"(hole-filling={STEREO_HOLE_FILLING}, temporal={STEREO_TEMPORAL})")
+                  f"(hole-filling={huecos}, temporal={con_temporal}"
+                  + (f", confianza={confianza}" if confianza is not None else "") + ")")
         except Exception as _e_pp:
             print(f"⚠️  [OAK] No se pudieron aplicar los filtros de profundidad: {_e_pp}")
 

@@ -344,7 +344,12 @@ def dibujar_herramientas(scn, lista, objetivo=None):
         if T is None or scn.ngeom >= scn.maxgeom:
             continue
         T = np.asarray(T, float)
-        if h["tipo"] == "herramienta":
+        if h["tipo"] == "pelota":
+            c = list(h.get("color") or (1.0, 0.8, 0.1))
+            rgba = np.array([1.0, 0.45, 0.0, 0.9] if h["id"] == objetivo else c[:3] + [0.85], np.float32)
+            mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE, np.array([h["caja"][0], 0, 0]),
+                                T[:3, 3], np.eye(3).flatten(), rgba)
+        elif h["tipo"] == "herramienta":
             rgba = np.array([1.0, 0.45, 0.0, 0.85] if h["id"] == objetivo else [0.1, 0.8, 0.25, 0.75], np.float32)
             mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_BOX, np.asarray(h["caja"], float),
                                 T[:3, 3], T[:3, :3].flatten(), rgba)

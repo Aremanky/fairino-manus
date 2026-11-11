@@ -196,7 +196,10 @@ def test_mapa_quita_la_mano_y_deja_lo_demas():
     palma = np.array([[-0.15, 0, 0.8, 0.15, 0, 0.8, 0.16]])
     caps = np.vstack([caps, palma])
     lim = ((-0.6, 0.6), (-0.6, 0.6), (0.4, 1.2))
-    sin, con = MapaOcupacion(lim, 0.02), MapaOcupacion(lim, 0.02)
+    import cv2
+    prof = cv2.dilate(prof, np.ones((5, 5), np.uint8))           # superficies, no puntos sueltos
+    # (aquí se prueba quitar la mano: sin los filtros de ruido de cubos sueltos)
+    sin, con = (MapaOcupacion(lim, 0.02, min_puntos=1, min_grupo=1, z_min=0.2) for _ in range(2))
     for i in range(4):
         sin.actualizar(prof, K, np.eye(4), (), ahora=100 + i)
         con.actualizar(prof, K, np.eye(4), (), ahora=100 + i, capsulas_mano=caps)

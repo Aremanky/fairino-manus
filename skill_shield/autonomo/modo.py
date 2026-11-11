@@ -247,7 +247,7 @@ def ejecutar(cfg):
     tarea = None
     if cfg.get("AUTONOMO_TAREA", True):
         from skill_shield.autonomo.tarea import Tarea
-        tarea = Tarea(cfg, raiz, fr5, simulacro, mano)
+        tarea = Tarea(cfg, raiz, fr5, simulacro, mano, tactil=lambda: estado_tactil(tactil))
 
     control = Control(latido_s=float(cfg.get("AUTONOMO_PEDAL_LATIDO_S", 0.35)))
     visor = None

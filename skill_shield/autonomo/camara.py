@@ -13,6 +13,8 @@ pueda lanzar con OTRO entorno virtual (AUTONOMO_PYTHON_PERCEPCION en config.py).
 
 Prueba aislada, sin robot ni MuJoCo (se ve en una ventana; Q o Esc para salir):
     python -m skill_shield.autonomo.camara --ventana
+Guardar la escena (color + profundidad + calibración) para revisar el mapa sin el robot:
+    python -m skill_shield.autonomo.camara --grabar 10
 """
 import argparse
 import json
@@ -38,6 +40,9 @@ def _parsear():
     ap.add_argument("--canal-mapa", default=None, help="mapa de obstáculos (None = no calcularlo)")
     ap.add_argument("--canal-mando", default=None, help="mandos de la web (borrar mapa…)")
     ap.add_argument("--canal-herramientas", default=None, help="herramientas detectadas (None = no detectar)")
+    ap.add_argument("--grabar", type=int, default=0, metavar="N",
+                    help="guardar N pares color+profundidad en diagnosticos/escena_*.npz y salir "
+                         "(con el modo autónomo cerrado), para revisar el mapa fuera del robot")
     return ap.parse_args()
 
 
@@ -56,6 +61,36 @@ def _prof_centro_mm(prof, r=6):
     trozo = prof[h // 2 - r:h // 2 + r, w // 2 - r:w // 2 + r]
     v = trozo[trozo > 0]
     return float(np.median(v)) if v.size else None
+
+
+def _grabar(dev, K, n):
+    import config as cfg
+    raiz = os.path.dirname(os.path.abspath(cfg.__file__))
+    qc = dev.getOutputQueue("color", maxSize=1, blocking=False)
+    qd = dev.getOutputQueue("depth", maxSize=1, blocking=False)
+    colores, profs, prof = [], [], None
+    time.sleep(1.0)                                       # que se asiente la exposición
+    while len(colores) < n:
+        pd = _ultimo(qd)
+        prof = pd.getFrame() if pd is not None else prof
+        pc = _ultimo(qc)
+        if pc is None or prof is None:
+            time.sleep(0.01)
+            continue
+        colores.append(pc.getCvFrame())
+        profs.append(prof.copy())
+        time.sleep(0.2)
+    T = None
+    ruta_c = os.path.join(raiz, getattr(cfg, "CALIB_ROBOT_ARCHIVO", "camara_robot.json"))
+    if os.path.exists(ruta_c):
+        from skill_shield.autonomo.calibracion import cargar
+        T = cargar(ruta_c)["T_mundo_cam"]
+    os.makedirs(os.path.join(raiz, "diagnosticos"), exist_ok=True)
+    ruta = os.path.join(raiz, "diagnosticos", time.strftime("escena_%Y%m%d_%H%M%S.npz"))
+    np.savez_compressed(ruta, color=np.array(colores), profundidad=np.array(profs), K=K,
+                        T_mundo_cam=T if T is not None else np.full((4, 4), np.nan))
+    print(f"💾 [autónomo] {n} imágenes guardadas en {ruta}")
+    return 0
 
 
 def main():
@@ -88,6 +123,13 @@ def main():
         canal_mando_h = Canal.esperar(args.canal_mando) if args.canal_mando else None
         print(f"🔧 [autónomo] Herramientas en el catálogo: "
               + ", ".join(f"{e['nombre']} (id {i})" for i, e in sorted(detector.cat.items())))
+    pelotas = None
+    if args.canal_herramientas:                          # pelotas por color + profundidad (11-nov)
+        import config as cfg
+        if getattr(cfg, "AUTONOMO_PELOTAS", None):
+            from skill_shield.autonomo.pelotas import DetectorPelotas
+            pelotas = DetectorPelotas(cfg, os.path.dirname(os.path.abspath(cfg.__file__)))
+            print("⚽ [autónomo] Pelotas: " + ", ".join(e["nombre"] for e in pelotas.cat))
     t_herr, t_pub = 0.0, 0.0
 
     def _info(**kw):
@@ -96,7 +138,12 @@ def main():
 
     print(f"📷 [autónomo] OAK-D disponibles: {listar_camaras()}")
     try:
-        dev = abrir_dispositivo(crear_pipeline_oak(con_hd=False), args.mxid)
+        import config as cfg_
+        dev = abrir_dispositivo(crear_pipeline_oak(
+            con_hd=False,                                 # profundidad «honrada» para el mapa (11-nov)
+            rellenar_huecos=getattr(cfg_, "AUTONOMO_CAM_RELLENAR_HUECOS", 0),
+            temporal=getattr(cfg_, "AUTONOMO_CAM_FILTRO_TEMPORAL", False),
+            confianza=getattr(cfg_, "AUTONOMO_CAM_CONFIANZA", 200)), args.mxid)
     except Exception as e:
         print(f"✗ [autónomo] No se pudo abrir la cámara de cabeza (MxId {args.mxid}): {e}")
         print("   ¿Está conectada? ¿La tiene abierta otro programa (teleoperación, calibración)?")
@@ -112,14 +159,17 @@ def main():
               f"fx={K[0, 0]:.1f} fy={K[1, 1]:.1f} cx={K[0, 2]:.1f} cy={K[1, 2]:.1f} px")
         qc = dev.getOutputQueue("color", maxSize=1, blocking=False)
         qd = dev.getOutputQueue("depth", maxSize=1, blocking=False)
+        if args.grabar:
+            return _grabar(dev, K, args.grabar)
         prof, n, t_fps, fps, t_info = None, 0, time.monotonic(), 0.0, 0.0
+        img_ult = None                                    # último color (el mapa descarta lo saturado)
         while True:
             pd = _ultimo(qd)
             if pd is not None:
                 prof = pd.getFrame()
                 if constructor is not None:
                     try:
-                        constructor.paso(prof, K)
+                        constructor.paso(prof, K, img_ult)
                     except Exception as e:                # el mapa nunca debe tirar la cámara
                         print(f"⚠️  [autónomo] Mapa de obstáculos: {e}")
             pc = _ultimo(qc)
@@ -130,6 +180,7 @@ def main():
                     break
             else:
                 img = pc.getCvFrame()
+                img_ult = img.copy()
                 n += 1
                 ahora = time.monotonic()
                 if detector is not None:
@@ -137,17 +188,25 @@ def main():
                         if ahora - t_herr >= 1.0 / 15:          # detección a ~15 Hz
                             t_herr = ahora
                             detector.paso(img, K, dist, prof_mm=prof)
+                            if pelotas is not None:
+                                pelotas.paso(img, K, prof)
                         detector.dibujar(img, K, dist)
+                        if pelotas is not None:
+                            pelotas.dibujar(img)
                         if ahora - t_pub >= 0.1:
                             t_pub = ahora
                             objetivo = None
                             if canal_mando_h is not None:
                                 b_m, _ = canal_mando_h.leer()
                                 objetivo = json.loads(b_m).get("objetivo_id") if b_m else None
-                            canal_herr.escribir(json.dumps(dict(lista=detector.lista(), objetivo=objetivo,
+                            lista = detector.lista() + (pelotas.lista() if pelotas is not None else [])
+                            canal_herr.escribir(json.dumps(dict(lista=lista, objetivo=objetivo,
                                                                 calibrada=detector.T_mundo_cam is not None)).encode())
                             if constructor is not None:          # la herramienta a coger no es obstáculo
-                                caja = detector.caja_mundo(objetivo) if objetivo is not None else None
+                                caja = None
+                                if objetivo is not None:
+                                    caja = detector.caja_mundo(objetivo) or (
+                                        pelotas.caja_mundo(objetivo) if pelotas is not None else None)
                                 constructor.excluir_extra = [caja] if caja else []
                     except Exception as e:                        # nunca debe tirar la cámara
                         print(f"⚠️  [autónomo] Herramientas: {e}")

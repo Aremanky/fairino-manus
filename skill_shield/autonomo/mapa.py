@@ -26,15 +26,35 @@ import numpy as np
 DESCONOCIDO, LIBRE, OCUPADO = 0, 1, 2
 
 
-def nube_desde_profundidad(prof_mm, K, paso=2, z_min=0.2, z_max=2.5):
+def pixeles_fiables(prof_mm, img_bgr=None, tol_rel=0.02, tol_abs=0.015, saturado=250):
+    """Máscara de los píxeles de profundidad en los que fiarse para el mapa (11-nov):
+      · COHERENTES con sus vecinos: la mediana 5x5 no se separa más de max(1,5 cm, 2 %). Fuera
+        los «píxeles voladores» de los bordes y el ruido suelto de las zonas sin textura.
+      · NO SATURADOS en color: ventanas y fluorescentes dan profundidades inventadas.
+    (Sin el relleno de huecos ni el filtro temporal de la OAK, que también inventan.)"""
+    p = prof_mm.astype(np.uint16) if prof_mm.dtype != np.uint16 else prof_mm
+    import cv2
+    med = cv2.medianBlur(p, 5).astype(np.float32)
+    z = p.astype(np.float32)
+    ok = (z > 0) & (med > 0) & (np.abs(z - med) <= np.maximum(tol_abs * 1000.0, tol_rel * med))
+    if img_bgr is not None and img_bgr.shape[:2] == prof_mm.shape[:2]:
+        ok &= img_bgr.max(axis=2) < saturado
+    return ok
+
+
+def nube_desde_profundidad(prof_mm, K, paso=2, z_min=0.35, z_max=2.5, fiables=None):
     """Puntos (N x 3, metros, marco de la cámara OpenCV) de una imagen de profundidad en mm.
-    paso = 2 → se usa 1 de cada 2 píxeles en cada eje (sobra para vóxeles de 2 cm)."""
+    paso = 2 → se usa 1 de cada 2 píxeles en cada eje (sobra para vóxeles de 2 cm).
+    z_min: por debajo de ~35 cm la OAK-D no mide (sin disparidad extendida): lo que salga es ruido.
+    fiables: máscara de pixeles_fiables() (None = todos)."""
     p = prof_mm[::paso, ::paso].astype(np.float32) * 0.001
     h, w = p.shape
     v, u = np.mgrid[0:h, 0:w]
-    u = u * paso + (paso - 1) * 0.5
-    v = v * paso + (paso - 1) * 0.5
+    u = u * paso
+    v = v * paso
     ok = (p > z_min) & (p < z_max)
+    if fiables is not None:
+        ok &= fiables[::paso, ::paso]
     z = p[ok]
     x = (u[ok] - K[0, 2]) / K[0, 0] * z
     y = (v[ok] - K[1, 2]) / K[1, 1] * z
@@ -58,10 +78,10 @@ class MapaOcupacion:
 
     L_OCUPADO, L_LIBRE = 0.85, 0.4          # cuánto suma un acierto / resta «verlo a través»
     L_MIN, L_MAX = -2.0, 3.5
-    UMBRAL_OCUPADO, UMBRAL_LIBRE = 1.2, -0.6
+    UMBRAL_OCUPADO, UMBRAL_LIBRE = 2.0, -0.6   # 11-nov: 3 aciertos seguidos (antes 2)
 
     def __init__(self, limites, resolucion=0.02, olvido_s=30.0, z_suelo=None, margen_robot=0.03,
-                 margen_suelo=0.015, min_puntos=2):
+                 margen_suelo=0.015, min_puntos=4, min_grupo=4, z_min=0.35):
         lim = np.asarray(limites, float).reshape(3, 2)
         self.res = float(resolucion)
         self.origen = lim[:, 0]
@@ -71,6 +91,8 @@ class MapaOcupacion:
         self.margen_robot = float(margen_robot)
         self.margen_suelo = float(margen_suelo)
         self.min_puntos = int(min_puntos)
+        self.min_grupo = int(min_grupo)         # cubos ocupados sueltos (grupos más pequeños): ruido
+        self.z_min = float(z_min)
         self.L = np.zeros(tuple(self.n), np.float32)
         self.t_visto = np.zeros(tuple(self.n), np.float64)      # time.time() de la última vez que se vio
         ix, iy, iz = np.meshgrid(*[np.arange(k) for k in self.n], indexing="ij")
@@ -97,7 +119,13 @@ class MapaOcupacion:
         ahora = time.time() if ahora is None else ahora
         e = np.full(self.L.shape, DESCONOCIDO, np.int8)
         reciente = (ahora - self.t_visto) <= self.olvido_s
-        e[(self.L >= self.UMBRAL_OCUPADO) & reciente] = OCUPADO
+        ocupado = (self.L >= self.UMBRAL_OCUPADO) & reciente
+        if self.min_grupo > 1 and ocupado.any():
+            from scipy.ndimage import label
+            etiquetas, n = label(ocupado, structure=np.ones((3, 3, 3), bool))   # vecinos en 26 direcciones
+            tam = np.bincount(etiquetas.ravel(), minlength=n + 1)
+            ocupado &= tam[etiquetas] >= self.min_grupo
+        e[ocupado] = OCUPADO
         e[(self.L <= self.UMBRAL_LIBRE) & reciente] = LIBRE
         return e
 
@@ -131,13 +159,15 @@ class MapaOcupacion:
         fuera[sel[dentro]] = True
         return fuera
 
-    def actualizar(self, prof_mm, K, T_mundo_cam, capsulas_robot=(), ahora=None, paso=2, capsulas_mano=()):
+    def actualizar(self, prof_mm, K, T_mundo_cam, capsulas_robot=(), ahora=None, paso=2, capsulas_mano=(),
+                   img_bgr=None):
         """capsulas_robot: lista de (a, b, radio) en el mundo (la pose REAL del robot).
         capsulas_mano: lo mismo para las piezas de la OrcaHand con su postura real (PiezasMano)."""
         t0 = time.perf_counter()
         ahora = time.time() if ahora is None else ahora
         R, t = T_mundo_cam[:3, :3], T_mundo_cam[:3, 3]
-        P = nube_desde_profundidad(prof_mm, K, paso) @ R.T + t
+        fiables = pixeles_fiables(prof_mm, img_bgr)
+        P = nube_desde_profundidad(prof_mm, K, paso, self.z_min, fiables=fiables) @ R.T + t
         n_total = len(P)
         idx, dentro = self.indices(P)
         P, idx = P[dentro], idx[dentro]
@@ -418,7 +448,10 @@ class ConstructorMapa:
         lim = g.get("AUTONOMO_MAPA_LIMITES") or ((-1.0, 0.6), (-1.1, 0.4), (z_suelo, 0.6))
         self.mapa = MapaOcupacion(lim, float(g.get("AUTONOMO_MAPA_RES", 0.02)),
                                   olvido_s=float(g.get("AUTONOMO_MAPA_OLVIDO_S", 30.0)), z_suelo=z_suelo,
-                                  margen_robot=float(g.get("AUTONOMO_MAPA_MARGEN_ROBOT", 0.03)))
+                                  margen_robot=float(g.get("AUTONOMO_MAPA_MARGEN_ROBOT", 0.03)),
+                                  min_puntos=int(g.get("AUTONOMO_MAPA_MIN_PUNTOS", 4)),
+                                  min_grupo=int(g.get("AUTONOMO_MAPA_MIN_GRUPO", 4)),
+                                  z_min=float(g.get("AUTONOMO_MAPA_Z_MIN", 0.35)))
         from skill_shield.teleop_fr5.cinematica import cargar_cadena
         self.modelo = modelo_colision(cargar_cadena(g.get("RUTA_XML"), verbose=False), g)
         self.periodo = 1.0 / max(float(g.get("AUTONOMO_MAPA_HZ", 4.0)), 0.5)
@@ -477,7 +510,7 @@ class ConstructorMapa:
         q, real, caps = desempaquetar_pose(b)
         return (q, caps) if real else (None, None)
 
-    def paso(self, prof_mm, K):
+    def paso(self, prof_mm, K, img_bgr=None):
         ahora = time.monotonic()
         if ahora - self._t_ult < self.periodo:
             return False
@@ -502,7 +535,8 @@ class ConstructorMapa:
             self.aviso = ""
         self.mapa.actualizar(prof_mm, K, self.T,
                              capsulas_robot(self.modelo, q, con_mano=caps_mano is None) if q is not None else (),
-                             capsulas_mano=caps_mano if caps_mano is not None else ())
+                             capsulas_mano=caps_mano if caps_mano is not None else (),
+                             img_bgr=img_bgr)
         if self.canal_mapa is not None:
             b = empaquetar(self.mapa.centros_ocupados(), self.mapa.res, self.max_dibujo)
             if len(b) <= self.canal_mapa.capacidad:

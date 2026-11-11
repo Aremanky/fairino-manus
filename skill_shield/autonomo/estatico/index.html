@@ -285,7 +285,7 @@ footer b{color:var(--azul)}
           <button class="b" type="button" id="tVolver">Volver al inicio</button>
           <button class="b peligro" type="button" id="tCanc">Cancelar</button>
         </div>
-        <p class="tarea-nota">Coge la herramienta elegida (de momento finge el agarre), la usa en el punto de uso y la deja en el punto de dejada. El robot solo se mueve mientras pisas el pedal; al soltarlo se para y espera.</p>
+        <p class="tarea-nota">Herramienta: la coge (de momento finge el agarre), la usa en el punto de uso y la deja en el punto de dejada. Pelota: la coge desde arriba, la aprieta un poco y la deja en el punto de dejada. Si el camino directo choca, busca un rodeo. El robot solo se mueve mientras pisas el pedal; al soltarlo se para y espera.</p>
       </div>
     </section>
 
@@ -479,6 +479,7 @@ const ICONOS = {
   herramienta: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 6l4 4M3 21l7.5-7.5M13 7l4-4 4 4-4 4z"/><path d="M10 14l-2-2"/></svg>',
   punto_uso: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/></svg>',
   punto_dejada: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></svg>',
+  pelota: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M5.6 6.4c3 2.2 3 9 0 11.2M18.4 6.4c-3 2.2-3 9 0 11.2"/></svg>',
   desconocido: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 9a3 3 0 1 1 4 2.8c-.8.4-1 1-1 2.2M12 18h.01"/></svg>'};
 const filasHerr = new Map();
 function pintarHerramientas(hd, vivo){
@@ -489,9 +490,10 @@ function pintarHerramientas(hd, vivo){
     let el = filasHerr.get(h.id);
     if (!el){
       el = document.createElement("div");
-      el.className = "herr " + (h.tipo === "herramienta" ? "" : h.tipo === "desconocido" ? "desconocido" : "es-punto");
+      const cogible = h.tipo === "herramienta" || h.tipo === "pelota";
+      el.className = "herr " + (cogible ? "" : h.tipo === "desconocido" ? "desconocido" : "es-punto");
       el.innerHTML = `<div class="ico">${ICONOS[h.tipo] || ICONOS.desconocido}</div><div class="txt"><b></b><span></span></div>` +
-        (h.tipo === "herramienta" ? '<button type="button" class="btn-elegir">Elegir</button>' : "");
+        (cogible ? '<button type="button" class="btn-elegir">Elegir</button>' : "");
       const b = el.querySelector(".btn-elegir");
       if (b) b.addEventListener("click", async () => {
         const r = await post("/api/objetivo", {id: E.herramientas && E.herramientas.objetivo === h.id ? null : h.id});
@@ -507,7 +509,8 @@ function pintarHerramientas(hd, vivo){
       const T = h.T_mundo || h.T_cam;
       const xyz = T ? `(${T[0][3].toFixed(2)}, ${T[1][3].toFixed(2)}, ${T[2][3].toFixed(2)}) m` : "";
       sub = (h.estable ? "estable" : "buscando…") + ` · a ${h.distancia_m.toFixed(2)} m` +
-            (h.T_mundo ? ` · ${xyz}` : " · sin calibrar") + (h.estereo ? "" : " · sin estéreo");
+            (h.T_mundo ? ` · ${xyz}` : " · sin calibrar") + (h.estereo ? "" : " · sin estéreo") +
+            (h.diametro_m ? ` · Ø ${(h.diametro_m*100).toFixed(1)} cm` : "");
     }
     el.querySelector("span").textContent = sub;
     const b = el.querySelector(".btn-elegir");
@@ -517,7 +520,7 @@ function pintarHerramientas(hd, vivo){
   $("herrVacia").style.display = lista.length ? "none" : "";
   $("herrVacia").textContent = !vivo ? "Sin datos del modo autónomo." : hd.activo ? "No se ve ninguna herramienta del catálogo." : "La detección de herramientas no está en marcha.";
   const nObj = lista.find(h => h.id === obj);
-  $("herrMeta").textContent = lista.filter(h => h.tipo === "herramienta").length + " a la vista";
+  $("herrMeta").textContent = lista.filter(h => h.tipo === "herramienta" || h.tipo === "pelota").length + " a la vista";
   $("herrNota").textContent = obj == null ? "Elige la herramienta que quieres coger y planifica la tarea."
     : nObj ? `Objetivo: ${nObj.nombre}. Ya no cuenta como obstáculo en el mapa.` : "La herramienta objetivo no está a la vista.";
 }
