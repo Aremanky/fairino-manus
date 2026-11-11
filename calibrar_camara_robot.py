@@ -122,7 +122,12 @@ def generar_tablero():
     cuadros, lado = tuple(TABLERO["cuadros"]), float(TABLERO["lado"])
     board, _ = crear_tablero(cuadros, lado, TABLERO["marcador"], TABLERO["diccionario"])
     px = int(round(lado * 1000 * 300 / 25.4))            # 300 ppp
-    img = board.generateImage((cuadros[0] * px, cuadros[1] * px), marginSize=int(px * 0.4))
+    margen = int(px * 0.4)
+    # OJO: generateImage mete el margen DENTRO del tamaño pedido y encoge el tablero para que quepa.
+    # Por eso el tamaño total tiene que llevar ya los dos márgenes (si no, el cuadro sale de ~31,5 mm
+    # en vez de 37,5 mm al imprimir a 300 ppp).
+    img = board.generateImage((cuadros[0] * px + 2 * margen, cuadros[1] * px + 2 * margen),
+                              marginSize=margen)
     salida = os.path.join(RAIZ, "tablero_calib_robot.png")
     cv2.imwrite(salida, img)
     print(f"Guardado {salida} ({cuadros[0]}x{cuadros[1]} cuadros de {lado * 1000:.0f} mm, "
@@ -172,6 +177,19 @@ def calcular_y_guardar(muestras, cadena, info_cam):
         print("⚠️  Poco giro entre posturas (< 30°): la calibración puede estar mal aunque el error "
               "parezca bajo. Añade posturas girando la muñeca.")
     ok = res["error_medio_mm"] <= ERROR_MAX and giro >= 30
+    # Comprobación final del tamaño del tablero, ya con TODAS las muestras (con las de la exploración
+    # sola la escala sale con ±2 %; con las ~30 de la medida, con ±0,3 %).
+    try:
+        escala = C.estimar_escala([Tb[i] for i in usadas], [Tc[i] for i in usadas])
+        lado_mm = float(TABLERO["lado"]) * 1000
+        print(f"   tamaño del tablero según el robot: cuadro ≈ {escala * lado_mm:.1f} mm "
+              f"(config.py: {lado_mm:.1f} mm)")
+        if abs(escala - 1.0) > 0.015:
+            ok = False
+            print(f"⚠️  El cuadro no mide lo que dice CALIB_ROBOT_TABLERO ({(escala - 1) * 100:+.1f} %): corrige "
+                  f"lado y marcador en config.py y lanza --repetir (las poses de la cámara se miden con el tamaño del tablero).")
+    except (ValueError, np.linalg.LinAlgError):
+        pass
     C.guardar(ARCHIVO, res, mxid=info_cam["mxid"], K=info_cam["K"], dist=info_cam["dist"],
               ancho=info_cam["ancho"], alto=info_cam["alto"], tablero=TABLERO,
               n_muestras=len(muestras), usadas=usadas)
@@ -645,8 +663,15 @@ def _texto_revision(rev):
     for codigo, texto in rev["problemas"]:
         lineas.append("   · " + texto[0].upper() + texto[1:] + ".")
         if codigo == "escala" and np.isfinite(rev["escala"]):
-            lineas.append("     Mide con una regla un cuadrado del tablero montado y pon en CALIB_ROBOT_TABLERO "
-                          "(config.py) lado = lo que mida y marcador = 0,75 × lado (en metros).")
+            n = int(TABLERO["cuadros"][0])
+            lado_mm = float(TABLERO["lado"]) * 1000
+            lineas.append(f"     Mide con regla una FILA ENTERA de {n} cuadros (de borde a borde del ajedrezado, no un "
+                          f"cuadro suelto): con lo que pone config.py mediría {n * lado_mm:.1f} mm; según el robot, "
+                          f"≈ {n * lado_mm * rev['escala']:.0f} mm.")
+            lineas.append("     Pon en CALIB_ROBOT_TABLERO (config.py) lado = lo medido / "
+                          f"{n} y marcador = el lado del cuadrado NEGRO de un ArUco, medido igual (en metros).")
+            lineas.append("     Si la regla da justo lo de config.py, avisa: con solo la exploración (movimientos "
+                          "pequeños) esta estimación tiene ±2 % de incertidumbre.")
         elif codigo == "error":
             lineas.append("     Comprueba que el tablero está rígido y bien sujeto a la mano (que no se mueva "
                           "respecto a ella) y que la cámara lo ve entero y nítido.")
