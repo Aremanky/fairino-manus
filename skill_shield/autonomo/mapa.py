@@ -106,8 +106,34 @@ class MapaOcupacion:
         return self._centros[(e == OCUPADO).reshape(-1)]
 
     # ── actualización con una imagen de profundidad ──
-    def actualizar(self, prof_mm, K, T_mundo_cam, capsulas_robot=(), ahora=None, paso=2):
-        """capsulas_robot: lista de (a, b, radio) en el mundo (la pose REAL del robot)."""
+    def _cerca(self, P, capsulas):
+        """Máscara de los puntos a menos de (radio + margen_robot) de alguna cápsula. Antes de
+        medir se descartan los puntos fuera de la caja que envuelve TODAS las cápsulas: con las
+        ~30 piezas pequeñas de la mano solo se miden los pocos puntos que hay cerca de ella."""
+        fuera = np.zeros(len(P), bool)
+        if capsulas is None or not len(capsulas) or not len(P):
+            return fuera
+        if isinstance(capsulas, np.ndarray) and capsulas.ndim == 2 and capsulas.shape[1] == 7:
+            A, B, r = capsulas[:, 0:3], capsulas[:, 3:6], capsulas[:, 6] + self.margen_robot
+        else:
+            A = np.array([c[0] for c in capsulas], float)
+            B = np.array([c[1] for c in capsulas], float)
+            r = np.array([c[2] for c in capsulas], float) + self.margen_robot
+        lo = np.minimum(A, B).min(0) - r.max()
+        hi = np.maximum(A, B).max(0) + r.max()
+        sel = np.nonzero(np.all((P >= lo) & (P <= hi), axis=1))[0]
+        if not len(sel):
+            return fuera
+        Q = P[sel]
+        dentro = np.zeros(len(Q), bool)
+        for a, b, rr in zip(A, B, r):
+            dentro |= distancia_a_segmentos(Q, [a], [b]) < rr
+        fuera[sel[dentro]] = True
+        return fuera
+
+    def actualizar(self, prof_mm, K, T_mundo_cam, capsulas_robot=(), ahora=None, paso=2, capsulas_mano=()):
+        """capsulas_robot: lista de (a, b, radio) en el mundo (la pose REAL del robot).
+        capsulas_mano: lo mismo para las piezas de la OrcaHand con su postura real (PiezasMano)."""
         t0 = time.perf_counter()
         ahora = time.time() if ahora is None else ahora
         R, t = T_mundo_cam[:3, :3], T_mundo_cam[:3, 3]
@@ -122,16 +148,10 @@ class MapaOcupacion:
             n_suelo = int(s.sum())
             quitar |= s
         n_robot = 0
-        if len(capsulas_robot):
-            A = np.array([c[0] for c in capsulas_robot], float)
-            B = np.array([c[1] for c in capsulas_robot], float)
-            r = np.array([c[2] for c in capsulas_robot], float)
-            # cada cápsula con su radio: se compara contra la más restrictiva (radio máx + margen)
-            for a, b, rr in zip(A, B, r):
-                d = distancia_a_segmentos(P, [a], [b])
-                q = d < rr + self.margen_robot
-                n_robot += int((q & ~quitar).sum())
-                quitar |= q
+        for grupo in (capsulas_robot, capsulas_mano):
+            q = self._cerca(P, grupo)
+            n_robot += int((q & ~quitar).sum())
+            quitar |= q
         for c, semi in self.excluir:
             quitar |= np.all(np.abs(P - np.asarray(c)) <= np.asarray(semi), axis=1)
         idx = idx[~quitar]
@@ -236,9 +256,97 @@ class ColisionMapa:
         return self.m.capsulas(q, marcos)
 
 
-def capsulas_robot(modelo, q):
-    """(a, b, radio) de las cápsulas del robot en la pose q, para quitar el robot del mapa."""
-    return [(c.a, c.b, c.r) for c in modelo.capsulas(np.asarray(q, float))]
+def capsulas_robot(modelo, q, con_mano=True):
+    """(a, b, radio) de las cápsulas del robot en la pose q, para quitar el robot del mapa.
+    con_mano=False: sin la cápsula recta de la mano; en su lugar solo el tramo brida → mano_mount
+    (wrist3 + adaptador), porque la mano llega aparte con su postura real (PiezasMano)."""
+    q = np.asarray(q, float)
+    if con_mano:
+        return [(c.a, c.b, c.r) for c in modelo.capsulas(q)]
+    m = modelo.c.fk_marcos(q)
+    out = [(c.a, c.b, c.r) for c in modelo.capsulas(q, m) if c.nombre != "mano"]
+    out.append((m[5][:3, 3], m[6][:3, 3], modelo.R_MUNECA))
+    return out
+
+
+class PiezasMano:
+    """Cápsulas que envuelven cada pieza de la OrcaHand del gemelo (todos los geoms que cuelgan
+    de mano_mount), con la muñeca de la Orca y los dedos en su postura REAL (11-nov).
+    Sustituyen en el mapa a la cápsula recta de ModeloColision, que no sabía nada de la muñeca
+    de la mano ni de los dedos y dejaba la mano real como obstáculo falso.
+
+    Cada geom → su caja local (geom_aabb) → cápsula por el eje más largo de la caja, con radio
+    = media diagonal de la sección (envuelve la caja entera). Sin geom_aabb (MuJoCo antiguo):
+    una esfera de radio geom_rbound. Solo usa el modelo y los datos: se llama donde está MuJoCo
+    (modo.py) y se mandan las cápsulas al proceso de la cámara."""
+
+    def __init__(self, modelo, cuerpo="mano_mount"):
+        import mujoco
+        raiz = mujoco.mj_name2id(modelo, mujoco.mjtObj.mjOBJ_BODY, cuerpo)
+        if raiz < 0:
+            raise ValueError(f"no hay cuerpo «{cuerpo}» en el modelo")
+        cuerpos = set()
+        for b in range(modelo.nbody):
+            p = b
+            while p > 0 and p != raiz:
+                p = int(modelo.body_parentid[p])
+            if p == raiz:
+                cuerpos.add(b)
+        aabb = getattr(modelo, "geom_aabb", None)
+        g_, c_, e_, r_ = [], [], [], []
+        for g in range(modelo.ngeom):
+            if int(modelo.geom_bodyid[g]) not in cuerpos:
+                continue
+            if aabb is not None:
+                a = np.asarray(aabb[g], float).reshape(6)
+                c, h = a[:3], np.abs(a[3:])
+                k = int(np.argmax(h))
+                e = np.zeros(3)
+                e[k] = h[k]
+                r = float(np.sqrt(max(float(h @ h) - h[k] ** 2, 0.0)))
+            else:
+                c, e, r = np.zeros(3), np.zeros(3), float(modelo.geom_rbound[g])
+            if r <= 0.0 and not e.any():
+                continue
+            g_.append(g)
+            c_.append(c)
+            e_.append(e)
+            r_.append(r)
+        self.geoms = np.array(g_, int)
+        self._c = np.array(c_, float).reshape(-1, 3)
+        self._e = np.array(e_, float).reshape(-1, 3)
+        self._r = np.array(r_, float)
+
+    def __len__(self):
+        return len(self.geoms)
+
+    def capsulas(self, datos):
+        """(n, 7): a (3), b (3) y radio de cada pieza, en el mundo, con la pose de `datos`."""
+        P = np.asarray(datos.geom_xpos)[self.geoms]
+        M = np.asarray(datos.geom_xmat)[self.geoms].reshape(-1, 3, 3)
+        c = P + np.einsum("nij,nj->ni", M, self._c)
+        d = np.einsum("nij,nj->ni", M, self._e)
+        return np.hstack([c - d, c + d, self._r[:, None]])
+
+
+def empaquetar_pose(q, real, caps_mano=None):
+    """Mensaje del canal «qbrazo»: float64 [q (6), real (1/0), n, a, b, r de cada pieza de la mano…]."""
+    caps = np.zeros((0, 7)) if caps_mano is None else np.asarray(caps_mano, float).reshape(-1, 7)
+    return np.r_[np.asarray(q, float)[:6], 1.0 if real else 0.0, float(len(caps)), caps.ravel()].tobytes()
+
+
+def desempaquetar_pose(b):
+    """(q, real, caps_mano (n x 7) o None). Acepta también el mensaje antiguo de 7 números."""
+    a = np.frombuffer(b, np.float64)
+    if len(a) < 7:
+        return None, False, None
+    q, real = a[:6].copy(), bool(a[6] > 0.5)
+    caps = None
+    if len(a) >= 8:
+        n = int(a[7])
+        if n > 0 and len(a) >= 8 + 7 * n:
+            caps = a[8:8 + 7 * n].reshape(n, 7).copy()
+    return q, real, caps
 
 
 # ── para mandar el mapa a otros procesos (canal de memoria compartida) ──
@@ -322,6 +430,7 @@ class ConstructorMapa:
         self.hz, self._n, self._t_hz = 0.0, 0, time.monotonic()
         self.aviso = ""
         self.robot_quitado = False
+        self.mano_real = False
         self._excluir_web = []
         self.excluir_extra = []                          # p. ej. la herramienta que se va a coger
 
@@ -359,13 +468,14 @@ class ConstructorMapa:
         self._excluir_web = [(np.asarray(c, float), np.asarray(s, float)) for c, s in (m.get("mapa_excluir") or [])]
 
     def _q_real(self):
+        """(pose REAL del brazo o None, cápsulas de la mano con su postura real o None)."""
         if self.canal_q is None:
-            return None
+            return None, None
         b, t = self.canal_q.leer()
         if not b or t is None or time.time() - t > 0.5:
-            return None
-        a = np.frombuffer(b, np.float64)
-        return a[:6].copy() if len(a) >= 7 and a[6] > 0.5 else None    # a[6] = 1 si es la pose REAL
+            return None, None
+        q, real, caps = desempaquetar_pose(b)
+        return (q, caps) if real else (None, None)
 
     def paso(self, prof_mm, K):
         ahora = time.monotonic()
@@ -381,10 +491,18 @@ class ConstructorMapa:
             return False
         self.mapa.excluir = list(self._excluir_web) + [(np.asarray(c, float), np.asarray(s, float))
                                                        for c, s in self.excluir_extra]
-        q = self._q_real()
+        q, caps_mano = self._q_real()
         self.robot_quitado = q is not None
-        self.aviso = "" if q is not None else "sin pose real del robot: puede salir como obstáculo"
-        self.mapa.actualizar(prof_mm, K, self.T, capsulas_robot(self.modelo, q) if q is not None else ())
+        self.mano_real = caps_mano is not None
+        if q is None:
+            self.aviso = "sin pose real del robot: puede salir como obstáculo"
+        elif caps_mano is None:
+            self.aviso = "sin la postura real de la mano: se quita con una cápsula recta (puede dejar restos)"
+        else:
+            self.aviso = ""
+        self.mapa.actualizar(prof_mm, K, self.T,
+                             capsulas_robot(self.modelo, q, con_mano=caps_mano is None) if q is not None else (),
+                             capsulas_mano=caps_mano if caps_mano is not None else ())
         if self.canal_mapa is not None:
             b = empaquetar(self.mapa.centros_ocupados(), self.mapa.res, self.max_dibujo)
             if len(b) <= self.canal_mapa.capacidad:
@@ -400,6 +518,8 @@ class ConstructorMapa:
         e = self.mapa.estado()
         n_ocu = int((e == OCUPADO).sum())
         return dict(estado="ok" if self.robot_quitado else "aviso",
-                    texto=f"{n_ocu} vóxeles" + ("" if self.robot_quitado else " (robot sin quitar)"),
+                    texto=f"{n_ocu} vóxeles" + ("" if self.robot_quitado else " (robot sin quitar)")
+                    + (" (mano aproximada)" if self.robot_quitado and not self.mano_real else ""),
+                    mano_real=self.mano_real,
                     ocupados=n_ocu, libres=int((e == LIBRE).sum()), res=self.mapa.res,
                     hz=round(self.hz, 1), ms=self.mapa.ultima.get("ms"), aviso=self.aviso)

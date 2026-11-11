@@ -1399,6 +1399,8 @@ AUTONOMO_HZ           = 60.0             # refresco del gemelo
 AUTONOMO_PYTHON_PERCEPCION = None        # intérprete de OTRO venv para la cámara/percepción
                                          # (p. ej. si YOLO choca con numpy<2); None = el mismo
 AUTONOMO_CON_MANO     = True             # vigilar la OrcaHand (SOLO LECTURA: no activa el par)
+AUTONOMO_MANO_POSTURA_PERIODO_S = 0.1   # leer la postura de la mano (muñeca + dedos) para el gemelo y
+                                         # el mapa cada estos s (solo lectura); None = no leerla
 AUTONOMO_CON_TACTIL   = True             # lanzar el puente de los táctiles (si ORCA_TACTIL_ACTIVO)
 # Web (FastAPI): mandos protegidos con contraseña. CAMBIADLA. None = sin contraseña (cualquiera
 # de la red podría pisar el pedal o reiniciar el robot desde la web).
@@ -1438,13 +1440,59 @@ AUTONOMO_MAPA_MAX_DIBUJO = 6000          # máx. de vóxeles que se dibujan (el 
 # Marcadores para imprimir:  python -m skill_shield.autonomo.herramientas --generar
 AUTONOMO_HERRAMIENTAS = [
     # ids desde el 20: del 0 al 16 son los del tablero de calibración (mismo diccionario 4x4)
-    dict(id=20, nombre="Destornillador",  tipo="herramienta",  lado=0.030,
+    dict(id=20, nombre="Destornillador",  tipo="herramienta",  lado=0.093,
          desplazamiento=(0.0, 0.0, -0.015), giro_deg=(0, 0, 0), caja=(0.10, 0.016, 0.016)),
-    dict(id=21, nombre="Punto de uso",    tipo="punto_uso",    lado=0.040),
-    dict(id=22, nombre="Punto de dejada", tipo="punto_dejada", lado=0.040),
+    dict(id=21, nombre="Punto de uso",    tipo="punto_uso",    lado=0.124),
+    dict(id=22, nombre="Punto de dejada", tipo="punto_dejada", lado=0.124),
 ]
 AUTONOMO_HERRAMIENTAS_N_ESTABLE = 5      # imágenes seguidas antes de darla por buena
 AUTONOMO_HERRAMIENTAS_OLVIDO_S  = 2.0    # sin verla este tiempo → deja de aparecer
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TAREA: COGER → USAR → DEJAR (11-nov, paso 10, 1ª versión) — skill_shield/autonomo/tarea.py
+# ═══════════════════════════════════════════════════════════════════════════
+# Tarjeta «Tarea» de la web: Planificar → Ejecutar → el robot se mueve SOLO mientras se pisa el
+# pedal de la web. Sin herramienta real: la mano finge el agarre delante del marcador.
+AUTONOMO_TAREA            = True
+AUTONOMO_FR5_SIMULACRO    = False   # False = la tarea mueve el FR5 REAL (con pedal) · True = solo el gemelo
+AUTONOMO_FR5_VEL_MAX_DEG_S = 20.0   # tope de fr5_servo en este modo (°/s por joint; el FR5 llega a ~180)
+AUTONOMO_TAREA_VEL_DEG_S  = 15.0    # velocidad del plan (°/s del joint más rápido) ≈ 8 % del máximo
+AUTONOMO_TAREA_ACEL_DEG_S2 = 30.0
+AUTONOMO_TAREA_DESVIO_MAX_DEG = 8.0  # si el robot real se separa más de esto de lo mandado → abortar
+AUTONOMO_TAREA_MOVER_MANO = True    # False = la mano no se toca (solo se mueve el brazo)
+# Distancias al marcador (m). La palma se queda DELANTE, sin tocar: al cerrar, los dedos avanzan.
+AUTONOMO_TAREA_DIST_AGARRE = 0.10   # palma ↔ marcador al coger y al dejar
+AUTONOMO_TAREA_DIST_PREVIA = 0.14   # desde donde se acerca en línea recta (y adonde se retira)
+# Destornillador virtual, en el marco de mano_mount (dedos +Y, la palma mira a −X, meñique→índice +Z).
+# Cogido como lo coge una persona: mango en el puño y varilla saliendo por el lado del índice (+Z),
+# punta a ~9 cm de la mano. Al usarlo, la punta apunta al marcador del punto de uso y la mano gira
+# alrededor de la varilla. (Con la varilla por el eje de la brida —PUNTA (0, 0.30, 0.0099), EJE
+# (0, 1, 0)— el giro sería solo J6, pero con los marcadores cerca del robot la muñeca no llega.)
+AUTONOMO_TAREA_PUNTA      = (-0.03, 0.15, 0.14)
+AUTONOMO_TAREA_EJE        = (0.0, 0.0, 1.0)
+AUTONOMO_TAREA_USO_PREVIA = 0.12    # punta ↔ marcador al llegar y al irse
+AUTONOMO_TAREA_USO_CERCA  = 0.02    # punta ↔ marcador al «atornillar» (no llega a tocar)
+AUTONOMO_TAREA_USO_LEJOS  = 0.06    # punta ↔ marcador al alejarse para deshacer el giro
+AUTONOMO_TAREA_USO_GIRO_DEG = 30.0  # giro de J6 en cada «vuelta»
+AUTONOMO_TAREA_USO_VECES  = 3
+# No hace falta llegar de frente al marcador: si la muñeca no da (marcador cerca del robot o
+# mirándolo), se prueba llegando de lado, de 20 en 20° hasta este máximo respecto a su normal.
+AUTONOMO_TAREA_INCLINACION_MAX_DEG  = 60.0
+AUTONOMO_TAREA_INCLINACION_PASO_DEG = 20.0
+AUTONOMO_TAREA_DIRECCIONES = 8      # direcciones probadas en cada inclinación
+AUTONOMO_TAREA_OPCIONES    = 3      # formas de llegar a cada sitio que se guardan (por si el camino entre ellos choca)
+# Comprobaciones del plan
+AUTONOMO_TAREA_USAR_MAPA  = False    # esquivar (comprobar) también el mapa de obstáculos de la cámara
+AUTONOMO_TAREA_EXCLUIR_RADIO = 0.15  # m alrededor de cada marcador que NO cuentan como obstáculo
+AUTONOMO_TAREA_MARGEN_MAPA = 0.03   # m de margen con los obstáculos del mapa
+AUTONOMO_TAREA_PASO_DEG   = 2.0     # cada cuánto se comprueba una postura en los tramos articulares
+AUTONOMO_TAREA_MARGEN_LIMITES_DEG = 2.0
+# Posturas de la mano (índices de ctrl 0..16, los de LIMITES_CTRL; lo no indicado = 0)
+AUTONOMO_TAREA_MANO_ABIERTA = {0: 0.0, 13: -0.0979, 14: 0.641, 15: 0.0, 16: 0.175}
+AUTONOMO_TAREA_MANO_AGARRE  = {0: 0.0, 2: 1.25, 3: 1.10, 5: 1.25, 6: 1.10, 8: 1.25, 9: 1.10,
+                               11: 1.25, 12: 1.10, 13: 0.35, 14: 0.45, 15: 0.70, 16: 0.90}
+AUTONOMO_TAREA_T_ABRIR_S  = 1.0
+AUTONOMO_TAREA_T_CERRAR_S = 1.5
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CALIBRACIÓN CÁMARA DE CABEZA → ROBOT (10-nov, paso 4) — calibrar_camara_robot.py

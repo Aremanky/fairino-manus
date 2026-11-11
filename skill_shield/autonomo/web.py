@@ -20,6 +20,8 @@ Mandos (con contraseña AUTONOMO_WEB_CLAVE; sesión por cookie):
                                         se corta la red, se cierra la pestaña o muere este proceso).
   POST /api/pedal/modo {"obligatorio": bool}   pedal obligatorio (hombre muerto) o no
   POST /api/reset                       falsa colisión: borrar error → disable → enable
+  POST /api/tarea {"accion": "planificar" | "ejecutar" | "cancelar" | "volver"}   (11-nov, paso 10)
+                                        la tarea de la herramienta; el robot solo se mueve con el pedal
 
 La web no habla con el robot: deja los mandos en un canal de memoria compartida
 (skill_autonomo_mando) y el proceso del modo autónomo decide (modo.py). El paro de la web
@@ -80,6 +82,8 @@ class ServicioWeb:
         self._pedal_obligatorio = bool(pedal_obligatorio) or not self.permitir_sin_pedal
         self._reset_base = uuid.uuid4().hex[:8]   # cambia en cada arranque de la web
         self._reset_n = 0
+        self._tarea = None                        # última orden de la tarea: {"accion", "id"}
+        self._tarea_n = 0
 
     # ── canales ──
     def canal(self, clave):
@@ -221,6 +225,18 @@ class ServicioWeb:
             self._reset_n += 1
         self._escribir_mando()
 
+    ACCIONES_TAREA = ("planificar", "ejecutar", "cancelar", "volver")
+
+    def tarea(self, accion):
+        """Orden para la tarea (la decide modo.py). Cada orden lleva un id nuevo."""
+        if accion not in self.ACCIONES_TAREA:
+            return False
+        with self._lock:
+            self._tarea_n += 1
+            self._tarea = dict(accion=accion, id=f"{self._reset_base}-t{self._tarea_n}")
+        self._escribir_mando()
+        return True
+
     def _escribir_mando(self):
         c = self.canal("mando")
         if c is None:
@@ -234,7 +250,7 @@ class ServicioWeb:
                          ver_obstaculos=self.ver_obstaculos, objetivo_id=self.objetivo_id,
                          mapa_borrar_id=f"{self._reset_base}-m{self._mapa_borrar_n}",
                          reset_id=f"{self._reset_base}-{self._reset_n}" if self._reset_n else None,
-                         t=time.time())
+                         tarea=self._tarea, t=time.time())
         c.escribir(json.dumps(datos).encode())
 
     def latido_mando(self):
@@ -393,6 +409,16 @@ def crear_app(servicio):
         ok = servicio.mapa(accion)
         return JSONResponse({"ok": ok, "msg": {"ver": "Obstáculos visibles", "ocultar": "Obstáculos ocultos",
                                                "borrar": "Mapa borrado: se vuelve a llenar en un momento"}
+                             .get(accion, "Acción desconocida")}, status_code=200 if ok else 400)
+
+    @app.post("/api/tarea")
+    async def tarea(request: Request):
+        if not servicio.autorizado(_token(request)):
+            return _no_autorizado()                     # mueve el robot (con el pedal)
+        accion = (await _cuerpo(request)).get("accion")
+        ok = servicio.tarea(accion)
+        return JSONResponse({"ok": ok, "msg": {"planificar": "Planificando…", "ejecutar": "Pisa el pedal para que se mueva",
+                                               "cancelar": "Tarea cancelada", "volver": "Planificando la vuelta al inicio…"}
                              .get(accion, "Acción desconocida")}, status_code=200 if ok else 400)
 
     @app.post("/api/reset")

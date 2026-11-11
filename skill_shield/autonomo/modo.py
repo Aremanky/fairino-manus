@@ -12,6 +12,8 @@ Qué hace ahora (criterio de «hecho» del paso 2):
   4. MuJoCo con el brazo copiando la pose REAL del FR5 (gemelo digital), en una ventana
      (AUTONOMO_VENTANA_MUJOCO) y en la web (render_gemelo.py: solo la escena, sin menús).
   5. Estado de la OrcaHand (solo lectura, sin activar el par) y de sus táctiles.
+     11-nov: también su POSTURA (muñeca de la Orca y dedos) se copia al gemelo, y las piezas
+     de la mano con esa postura van al mapa para quitar la mano real de los obstáculos.
   6. Estado de la calibración cámara→robot (camara_robot.json, paso 4).
   7. Mapa de obstáculos (mapa.py): lo calcula el proceso de la cámara con la profundidad; aquí
      solo se le pasa la pose real del brazo (para quitarlo) y se dibuja en la ventana.
@@ -30,6 +32,7 @@ Reparto en procesos, comunicados por memoria compartida (canal.py):
 
 Para salir: cerrar la ventana de MuJoCo o Ctrl+C en la terminal.
 """
+import contextlib
 import json
 import os
 import subprocess
@@ -166,16 +169,21 @@ def ejecutar(cfg):
 
     raiz = os.path.dirname(os.path.abspath(sys.modules["config"].__file__)) \
         if "config" in sys.modules else os.getcwd()
-    print("🧠 Funcionamiento autónomo — paso 2 (esqueleto): cámara + gemelo + web, SIN mover el robot.")
-
     # ── 1. FR5: lo primero (fork, antes de abrir el visor y de lanzar procesos) ──
-    # Simulacro FORZADO: aunque config diga otra cosa, en este paso no se manda ningún ServoJ
-    # y tampoco se escriben carga/TCP/límites en la controladora (solo se leen y se enseñan).
-    # El reinicio de la web (ResetAllError → disable → enable) sí actúa: no mueve el robot.
-    fr5, simulacro = None, True
+    # 11-nov (paso 10, tarea): con AUTONOMO_TAREA y AUTONOMO_FR5_SIMULACRO = False el FR5 se mueve
+    # DE VERDAD, pero solo mientras la tarea está en marcha y el pedal de la web pisado, y con su
+    # propio tope de velocidad (AUTONOMO_FR5_VEL_MAX_DEG_S). Fuera de simulacro fr5_servo también
+    # escribe carga, TCP y límites en la controladora (como en la teleoperación).
+    # En simulacro no se manda ningún ServoJ: la tarea se ve solo en el gemelo.
+    simulacro = bool(cfg.get("AUTONOMO_FR5_SIMULACRO", True)) or not cfg.get("AUTONOMO_TAREA", True)
+    print("🧠 Funcionamiento autónomo: cámara + gemelo + web" +
+          (" · tarea con el FR5 REAL (solo con el pedal)" if not simulacro else " · FR5 en simulacro (no se mueve)"))
+    fr5 = None
     if cfg.get("AUTONOMO_CON_FR5", True):
         c = dict(cfg)
         c["FR5_SIMULACRO"] = simulacro
+        c["FR5_VEL_MAX_DEG_S"] = min(float(cfg.get("FR5_VEL_MAX_DEG_S", 60.0)),
+                                     float(cfg.get("AUTONOMO_FR5_VEL_MAX_DEG_S", 20.0)))
         fr5 = FR5Servo.desde_config(c)
         if not fr5.iniciar():
             print("   Sin conexión con el FR5: el gemelo enseñará el brazo en reposo.")
@@ -189,7 +197,8 @@ def ejecutar(cfg):
     canal_simcam = Canal(CANAL_SIMCAM, capacidad=2 << 20, crear=True)
     canal_qpos = None                                   # se crea al conocer nq (tras cargar el modelo)
     con_mapa = bool(cfg.get("AUTONOMO_MAPA", True))
-    canal_qbrazo = Canal(CANAL_QBRAZO, capacidad=64, crear=True) if con_mapa else None
+    # pose del brazo + cápsulas de las piezas de la mano (11-nov): hasta ~280 piezas
+    canal_qbrazo = Canal(CANAL_QBRAZO, capacidad=16 << 10, crear=True) if con_mapa else None
     canal_mapa = Canal(CANAL_MAPA, capacidad=16 + 12 * int(cfg.get("AUTONOMO_MAPA_MAX_DIBUJO", 6000)),
                        crear=True) if con_mapa else None
     con_herr = bool(cfg.get("AUTONOMO_HERRAMIENTAS"))
@@ -235,6 +244,10 @@ def ejecutar(cfg):
         except Exception as e:
             print(f"⚠️  Táctiles no disponibles ({e}).")
             tactil = None
+    tarea = None
+    if cfg.get("AUTONOMO_TAREA", True):
+        from skill_shield.autonomo.tarea import Tarea
+        tarea = Tarea(cfg, raiz, fr5, simulacro, mano)
 
     control = Control(latido_s=float(cfg.get("AUTONOMO_PEDAL_LATIDO_S", 0.35)))
     visor = None
@@ -263,6 +276,23 @@ def ejecutar(cfg):
             if off + i < modelo.nu:
                 datos.ctrl[off + i] = float(v)
         mujoco.mj_forward(modelo, datos)
+        # Muñeca de la Orca y dedos (11-nov): joint del MJCF de cada articulación de orca_core,
+        # por el mismo actuador que usa la teleoperación (OFFSET_MANO + JOINT_A_CTRL).
+        from orca_hardware import OrcaHardwareWrapper
+        from skill_shield.autonomo.mapa import PiezasMano, empaquetar_pose
+        mano_qpos = {}
+        for nombre_j, k in OrcaHardwareWrapper.JOINT_A_CTRL.items():
+            a = off + int(k)
+            if a < modelo.nu and int(modelo.actuator_trntype[a]) == int(mujoco.mjtTrn.mjTRN_JOINT):
+                mano_qpos[nombre_j] = (int(modelo.jnt_qposadr[int(modelo.actuator_trnid[a, 0])]), a)
+        piezas_mano = None
+        if canal_qbrazo is not None and len(mano_qpos) == len(OrcaHardwareWrapper.JOINT_A_CTRL):
+            try:
+                piezas_mano = PiezasMano(modelo)
+            except Exception as e:
+                print(f"⚠️  Mapa: no se pueden sacar las piezas de la mano del modelo ({e}): "
+                      "se quitará con una cápsula recta.")
+        sincronizada_mano = None
         # ── gemelo en la web: proceso de render sin ventana (solo la escena, sin menús) ──
         if cfg.get("AUTONOMO_SIM_WEB", True):
             canal_qpos = Canal(CANAL_QPOS, capacidad=8 * modelo.nq, crear=True)
@@ -287,15 +317,32 @@ def ejecutar(cfg):
         from skill_shield.autonomo.herramientas import dibujar_herramientas
         print("✅ Modo autónomo en marcha. " + ("Cierra la ventana de MuJoCo o pulsa" if con_ventana else "Pulsa")
               + " Ctrl+C para salir.")
+        q_tarea_sim, t_ant = None, time.monotonic()
         while visor is None or visor.is_running():
             t0 = time.monotonic()
+            dt_vuelta, t_ant = min(t0 - t_ant, 0.1), t0
             q = fr5.q_real_rad() if fr5 is not None else None
-            if q is not None:
-                if visor is not None:
-                    with visor.lock():
-                        sincronizar_mujoco(modelo, datos, q, qpos_idx, dof_idx, ctrl_idx)
-                else:
-                    sincronizar_mujoco(modelo, datos, q, qpos_idx, dof_idx, ctrl_idx)
+            if tarea is not None and tarea.mano_activa is not None:
+                mano = tarea.mano_activa                    # la tarea conectó la mano con par
+            qm = mano.postura() if mano is not None else None      # muñeca de la Orca y dedos (rad)
+            q_vista = q_tarea_sim if q_tarea_sim is not None else q    # simulacro: el gemelo hace la tarea
+            if q_vista is not None or qm is not None:
+                with visor.lock() if visor is not None else contextlib.nullcontext():
+                    if qm is not None:
+                        for nombre_j, v in qm.items():
+                            if nombre_j in mano_qpos:
+                                adr, a = mano_qpos[nombre_j]
+                                datos.qpos[adr] = v
+                                datos.ctrl[a] = v
+                    if q_vista is not None:
+                        sincronizar_mujoco(modelo, datos, q_vista, qpos_idx, dof_idx, ctrl_idx)
+                    else:
+                        mujoco.mj_forward(modelo, datos)
+            if (qm is not None) != sincronizada_mano:
+                sincronizada_mano = qm is not None
+                print("🖐️  Gemelo: " + ("copiando la postura REAL de la mano (muñeca de la Orca y dedos)"
+                                       if sincronizada_mano else
+                                       "sin la postura real de la mano (se queda como estaba)"))
             if (q is not None) != sincronizado:
                 sincronizado = q is not None
                 print("🔗 Gemelo: " + ("copiando la pose REAL del FR5" if sincronizado
@@ -306,7 +353,10 @@ def ejecutar(cfg):
                 canal_qpos.escribir(datos.qpos.astype("float64").tobytes())
             if canal_qbrazo is not None:                # pose del brazo para quitarlo del mapa (1 = real)
                 q_b = q if q is not None else np.array([datos.qpos[a] for a in qpos_idx])
-                canal_qbrazo.escribir(np.r_[np.asarray(q_b, float), 1.0 if q is not None else 0.0].tobytes())
+                # + las piezas de la mano, solo si brazo Y mano son reales (si no, cápsula recta)
+                caps = (piezas_mano.capsulas(datos) if piezas_mano is not None and q is not None
+                        and qm is not None and q_tarea_sim is None else None)
+                canal_qbrazo.escribir(empaquetar_pose(q_b, q is not None, caps))
             if visor is not None and (canal_mapa is not None or canal_herr is not None) and t0 - t_mapa >= 0.25:
                 t_mapa = t0                             # obstáculos y herramientas en la ventana de MuJoCo
                 ver = cfg.get("AUTONOMO_MAPA_VER_VISOR", True) and control.ver_obstaculos
@@ -336,24 +386,45 @@ def ejecutar(cfg):
                     fr5.resetear()
                 else:
                     print("⚠️  Web: reinicio pedido, pero no hay conexión con el FR5.")
+            # ── tarea (paso 10): órdenes de la web y un paso de ejecución (solo con el pedal) ──
+            if tarea is not None:
+                def _contexto():
+                    b_h, t_h = canal_herr.leer() if canal_herr is not None else (None, None)
+                    lista = []
+                    if b_h and t_h and time.time() - t_h < 2.0:
+                        try:
+                            lista = json.loads(b_h).get("lista", [])
+                        except ValueError:
+                            pass
+                    b_mp, t_mp = canal_mapa.leer() if canal_mapa is not None else (None, None)
+                    mp = desempaquetar(b_mp) if b_mp and t_mp and time.time() - t_mp < 3.0 else None
+                    if mp is not None and len(mp[1]) >= int(cfg.get("AUTONOMO_MAPA_MAX_DIBUJO", 6000)):
+                        print("⚠️  Tarea: el mapa tiene más cubos de los que se publican "
+                              "(AUTONOMO_MAPA_MAX_DIBUJO): se planifica con una muestra.")
+                    return dict(q_real=q, herramientas=lista, objetivo_id=(mando or {}).get("objetivo_id"), mapa=mp)
+                tarea.orden(mando, _contexto)
+                q_tarea_sim = tarea.paso(dt_vuelta, q, control.web_viva and control.pedal_pisado)
             robot_listo = fr5 is not None and fr5.conectado
             permitido = control.movimiento_permitido(robot_listo)
             if permitido != permitido_antes:
                 permitido_antes = permitido
-                print("🟢 Movimiento PERMITIDO (" if permitido else "⛔ Movimiento bloqueado (",
-                      control.estado(robot_listo)["motivo"], ") — en el paso 2 el robot no se mueve", sep="")
+                print("🟢 Pedal pisado (" if permitido else "⛔ Movimiento bloqueado (",
+                      control.estado(robot_listo)["motivo"], ")" + ("" if tarea is not None and not simulacro
+                                                                  else " — el FR5 está en simulacro"), sep="")
 
             if t0 - t_estado >= 0.1:
                 t_estado = t0
                 canal_estado.escribir(json.dumps(dict(
-                    modo="AUTÓNOMO · paso 2 (solo lectura)",
+                    modo=("AUTÓNOMO · tarea · FR5 REAL" if tarea is not None and not simulacro
+                          else "AUTÓNOMO · FR5 en simulacro"),
                     fr5=_estado_fr5(fr5, simulacro),
                     mano=mano.estado() if mano is not None else dict(estado="desactivado",
                                                                      texto="desactivada en config"),
                     tactil=estado_tactil(tactil),
                     gemelo="copiando la pose real" if sincronizado else "sin pose real",
-                    control=control.estado(robot_listo, mueve=False),
+                    control=control.estado(robot_listo, mueve=tarea is not None and not simulacro),
                     calibracion=calib_estado,
+                    tarea=tarea.estado_web() if tarea is not None else None,
                 )).encode())
                 if t0 - t_calib >= 2.0:                 # por si se recalibra con el modo en marcha
                     t_calib, calib_estado = t0, estado_calibracion(raiz, cfg)
@@ -377,6 +448,8 @@ def ejecutar(cfg):
         _cerrar(proc_cam, "cámara")
         if tactil is not None:
             tactil.cerrar()
+        if tarea is not None:
+            tarea.cerrar()                              # ServoMoveEnd y, si tenía par, suelta la mano
         if mano is not None:
             mano.cerrar()
         if fr5 is not None:

@@ -118,6 +118,15 @@ main{max-width:1440px;margin:0 auto;padding:20px 24px 8px;display:grid;grid-temp
 .btn-reset:disabled{opacity:.5;cursor:not-allowed}
 .btn-reset svg{width:18px;height:18px}
 .nota-reset{font-size:12px;color:var(--suave);text-align:center;margin-top:6px}
+/* tarea (11-nov, paso 10) */
+.tarea-cab{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.tarea-txt{font-size:13.5px;margin:10px 0 8px;min-height:2.6em}
+.progreso{height:8px;border-radius:999px;background:var(--azul-claro);overflow:hidden}
+.progreso i{display:block;height:100%;width:0;background:var(--azul);transition:width .3s}
+.progreso.hecho i{background:var(--ok)}
+.tarea-botones{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px}
+.tarea-botones .b:disabled{opacity:.45;cursor:not-allowed}
+.tarea-nota{font-size:12px;color:var(--suave);margin-top:10px}
 /* herramientas */
 .herr-lista{display:flex;flex-direction:column;gap:8px}
 .herr{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--borde);border-radius:10px;background:#fff}
@@ -261,6 +270,22 @@ footer b{color:var(--azul)}
         <div class="herr-lista" id="herrLista"></div>
         <p class="herr-vacia" id="herrVacia">No se ve ninguna herramienta del catálogo.</p>
         <p class="herr-nota" id="herrNota"></p>
+      </div>
+    </section>
+
+    <section class="tarjeta o2">
+      <header><h2>Tarea</h2><span class="meta" id="tareaMeta"></span></header>
+      <div class="cuerpo">
+        <div class="tarea-cab"><span id="tareaEtq" class="etq neutro">—</span><span class="meta" id="tareaPaso"></span></div>
+        <p class="tarea-txt" id="tareaTxt">—</p>
+        <div class="progreso" id="tareaProg"><i id="tareaBarra"></i></div>
+        <div class="tarea-botones">
+          <button class="b prim" type="button" id="tPlan">Planificar</button>
+          <button class="b prim" type="button" id="tEjec">Ejecutar</button>
+          <button class="b" type="button" id="tVolver">Volver al inicio</button>
+          <button class="b peligro" type="button" id="tCanc">Cancelar</button>
+        </div>
+        <p class="tarea-nota">Coge la herramienta elegida (de momento finge el agarre), la usa en el punto de uso y la deja en el punto de dejada. El robot solo se mueve mientras pisas el pedal; al soltarlo se para y espera.</p>
       </div>
     </section>
 
@@ -417,6 +442,7 @@ function pintar(e){
   $("camPie").innerHTML = modoVision === "sim" ? txtMapa : cv ? `MxId <b>${c.mxid}</b> &nbsp;·&nbsp; <b>${c.ancho}×${c.alto}</b> px &nbsp;·&nbsp; centro: <b>${c.prof_centro_mm ? Math.round(c.prof_centro_mm)+" mm" : "—"}</b>` : "";
 
   pintarHerramientas(e.herramientas || {}, vivo);
+  pintarTarea(e.tarea, vivo);
 
   // gemelo
   const gc = !vivo ? "mal" : (e.gemelo||"").startsWith("copiando") ? "ok" : "aviso";
@@ -492,7 +518,7 @@ function pintarHerramientas(hd, vivo){
   $("herrVacia").textContent = !vivo ? "Sin datos del modo autónomo." : hd.activo ? "No se ve ninguna herramienta del catálogo." : "La detección de herramientas no está en marcha.";
   const nObj = lista.find(h => h.id === obj);
   $("herrMeta").textContent = lista.filter(h => h.tipo === "herramienta").length + " a la vista";
-  $("herrNota").textContent = obj == null ? "Elige la herramienta que quieres coger. (Coger llegará con el paso 10.)"
+  $("herrNota").textContent = obj == null ? "Elige la herramienta que quieres coger y planifica la tarea."
     : nObj ? `Objetivo: ${nObj.nombre}. Ya no cuenta como obstáculo en el mapa.` : "La herramienta objetivo no está a la vista.";
 }
 
@@ -593,6 +619,48 @@ $("swPedal").addEventListener("change", async ev => {
   if (!r.ok) ev.target.checked = !quiere;
   tostada(r.msg || (r.ok ? "Hecho" : "No se pudo cambiar"));
   swOcupado = false; refrescar();
+});
+
+// ── tarea (paso 10) ──
+const ETQ_TAREA = {libre:["Sin tarea","neutro"], planificando:["Planificando…","neutro"], lista:["Plan listo","ok"],
+  ejecutando:["En marcha","ok"], pausada:["En pausa","aviso"], terminada:["Hecha","ok"], error:["No se puede","mal"]};
+function pintarTarea(t, vivo){
+  const on = vivo && t;
+  const [txt, col] = on ? (ETQ_TAREA[t.estado] || [t.estado, "neutro"]) : ["—", "neutro"];
+  etq($("tareaEtq"), txt, col);
+  $("tareaTxt").textContent = !vivo ? "Sin datos del modo autónomo." : !t ? "La tarea está desactivada en config (AUTONOMO_TAREA)." : (t.texto || "");
+  $("tareaPaso").textContent = on && t.i && t.n ? `tramo ${t.i} de ${t.n}` : "";
+  $("tareaMeta").textContent = on ? (t.simulacro ? "simulacro · solo el gemelo" : `FR5 REAL · ${t.vel_deg_s}°/s`) : "";
+  $("tareaBarra").style.width = on ? Math.round((t.progreso || 0) * 100) + "%" : "0";
+  $("tareaProg").classList.toggle("hecho", !!(on && t.estado === "terminada"));
+  const p = (on && t.puede) || {};
+  $("tPlan").disabled = !autorizado || !p.planificar;
+  $("tEjec").disabled = !autorizado || !p.ejecutar;
+  $("tVolver").disabled = !autorizado || !p.volver;
+  $("tCanc").disabled = !autorizado || !p.cancelar;
+}
+async function ordenTarea(accion){
+  const r = await post("/api/tarea", {accion});
+  if (r.status !== 401) tostada(r.msg || (r.ok ? "Hecho" : "No se pudo"));
+  refrescar();
+}
+$("tPlan").addEventListener("click", () => ordenTarea("planificar"));
+$("tCanc").addEventListener("click", () => ordenTarea("cancelar"));
+$("tEjec").addEventListener("click", async () => {
+  const t = E.tarea || {};
+  if (!t.simulacro){
+    const ok = await confirmar("El FR5 y la mano se van a mover DE VERDAD, siguiendo el plan, mientras mantengas pisado el pedal. Comprueba que no hay nadie en la zona del robot y ten la seta a mano.", "Entendido");
+    if (!ok) return;
+  }
+  ordenTarea("ejecutar");
+});
+$("tVolver").addEventListener("click", async () => {
+  const t = E.tarea || {};
+  if (!t.simulacro){
+    const ok = await confirmar("El robot volverá a la postura en la que estaba al planificar (en cuanto esté el camino, mientras pises el pedal).", "Volver");
+    if (!ok) return;
+  }
+  ordenTarea("volver");
 });
 
 // ── reinicio tras colisión ──
