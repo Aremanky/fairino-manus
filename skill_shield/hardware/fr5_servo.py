@@ -487,6 +487,30 @@ def _configurar_colisiones(robot, p):
             pass
 
 
+def limites_envio_deg(p, lim_blandos=None):
+    """(mín, máx) en grados de la controladora de lo que fr5_servo llega a ENVIAR: los topes del
+    FR5 con FR5_MARGEN_LIMITES_DEG y, si se conocen, los límites blandos de la controladora con
+    0,5° de margen. Un objetivo fuera de este rango se RECORTA: el robot no llega a él."""
+    m = float(p["FR5_MARGEN_LIMITES_DEG"])
+    lim_inf = np.array([a + m for a, _ in LIMITES_FR5_DEG])
+    lim_sup = np.array([b - m for _, b in LIMITES_FR5_DEG])
+    if lim_blandos is not None:            # nunca pedir nada que la controladora rechace
+        lim_blandos = np.asarray(lim_blandos, dtype=float).reshape(6, 2)
+        lim_inf = np.maximum(lim_inf, lim_blandos[:, 0] + 0.5)
+        lim_sup = np.minimum(lim_sup, lim_blandos[:, 1] - 0.5)
+    return lim_inf, lim_sup
+
+
+def limites_envio_rad(p, lim_blandos=None):
+    """limites_envio_deg en el convenio del MJCF: (6, 2) en rad (lo que se puede `publicar`
+    sabiendo que el robot va a llegar). Inversa de q_FR5[°] = SIGNO · grados(q_MJCF) + OFFSET."""
+    lo, hi = limites_envio_deg(p, lim_blandos)
+    signo = np.asarray(p["FR5_SIGNO"], dtype=float)
+    offset = np.asarray(p["FR5_OFFSET_DEG"], dtype=float)
+    a, b = np.radians(lo - offset) * signo, np.radians(hi - offset) * signo
+    return np.column_stack([np.minimum(a, b), np.maximum(a, b)])
+
+
 def paso_limitado(q, v, objetivo, v_max, a_max, dt):
     """
     Un paso hacia `objetivo` con |v| ≤ v_max y |a| ≤ a_max, frenando a tiempo para no
@@ -545,12 +569,7 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
         dt = float(p["FR5_PERIODO_S"])
         signo = np.asarray(p["FR5_SIGNO"], float)
         offset = np.asarray(p["FR5_OFFSET_DEG"], float)
-        m = float(p["FR5_MARGEN_LIMITES_DEG"])
-        lim_inf = np.array([a + m for a, _ in LIMITES_FR5_DEG])
-        lim_sup = np.array([b - m for _, b in LIMITES_FR5_DEG])
-        if lim_blandos is not None:            # nunca pedir nada que la controladora rechace
-            lim_inf = np.maximum(lim_inf, lim_blandos[:, 0] + 0.5)
-            lim_sup = np.minimum(lim_sup, lim_blandos[:, 1] - 0.5)
+        lim_inf, lim_sup = limites_envio_deg(p, lim_blandos)
         servoj = _LlamadaServoJ(robot, p)
 
         q_cmd = np.asarray(q_real[:6], float)

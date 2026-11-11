@@ -29,18 +29,32 @@ para seguir, suelta la P y vuelve a pulsarla. Tres colisiones en la misma postur
 
 Calibración automática, por dentro:
   1. EXPLORAR (~1 min): pequeños giros de la muñeca y del brazo desde la postura de inicio →
-     calibración aproximada (ya se sabe más o menos dónde está la cámara).
-  2. PLANIFICAR (un par de segundos, sin moverse): miles de posturas candidatas; se quedan las
-     que no chocan (modelo de colisión de la teleoperación, con el tablero incluido en la mano y
-     la cámara como obstáculo) y dejan el tablero bien visible. Se eligen ~20 muy distintas, se
-     ordenan y se comprueba cada trayecto tal como lo moverá fr5_servo.
+     calibración aproximada (ya se sabe más o menos dónde está la cámara). Aquí se comprueba
+     también que el cuadrado del tablero mide lo que dice CALIB_ROBOT_TABLERO: si no, se para.
+  2. PLANIFICAR (unos segundos, sin moverse): miles de posturas candidatas; se quedan las que
+     dejan el tablero bien visible, a las que el robot puede llegar (límites de fr5_servo) y en
+     las que nada se acerca a nada. Se eligen ~20 muy distintas, se ordenan y se comprueba cada
+     trayecto tal como lo moverá fr5_servo.
   3. MEDIR (~3-5 min): las recorre, captura en cada una y calcula la calibración definitiva.
      Las posturas se guardan para --repetir y --verificar.
+
+Que nada choque ni se estruje (10-nov). La postura de inicio —la deja el operario, con la muñeca
+cómoda y nada apretado— es la referencia: ningún hueco de la mano o del tablero con el robot, el
+soporte, la cabeza con la cámara, las cajas de config o el suelo puede cerrarse más de 1 cm
+respecto al que había al empezar (salvo que siga sobrando hueco), y nunca baja de su mínimo
+(crear_seguridad; huecos en el bloque CALIB_* de config.py). Tres barreras:
+  · el plan: posturas y trayectos comprobados sin ninguna manga;
+  · antes de cada movimiento: el trayecto entero desde donde está el robot DE VERDAD (ir_a);
+  · con el pedal pisado: la postura real, en cada vuelta. Si se acerca a algo más de lo comprobado
+    o no sigue el trayecto que se le pide, el robot se para y la calibración termina («Calibración
+    detenida: …» dice qué pasa). Si lo han movido a mano con el pedal suelto, se vuelve a
+    comprobar el trayecto desde donde esté; y sin lectura de su postura, no se le mueve.
 """
 import argparse
 import collections
 import datetime
 import json
+import math
 import os
 import sys
 import time
@@ -73,6 +87,12 @@ N_AUTO = int(getattr(cfg, "CALIB_AUTO_POSTURAS", 20))
 RADIO_MANO = float(getattr(cfg, "CALIB_AUTO_RADIO_MANO", 0.11))
 AMPLITUD = tuple(getattr(cfg, "CALIB_AUTO_AMPLITUD_DEG", (30, 20, 25, 45, 45, 70)))
 AUTO_RESET = bool(getattr(cfg, "CALIB_AUTO_RESET", True))   # colisión → Clear, disable, enable solo
+SIN_AVANCE_S = float(getattr(cfg, "CALIB_SIN_AVANCE_S", 5.0))   # armado y parado sin llegar → se deja esa postura
+# Lo PLANIFICADO se comprueba sin manga. Al robot de verdad, que nunca queda exactamente donde se
+# le pide, se le dan unos mm: al comprobar el trayecto desde donde está y, algo más, al vigilarlo.
+MARGEN_TRAYECTO = 0.006         # m de manga al comprobar un trayecto desde la postura REAL, antes de moverse
+MARGEN_VIGILANCIA = 0.012       # m de manga a la postura REAL mientras se mueve (va algo por detrás de la pedida)
+TUBO_DEG = 3.0                  # ° que la postura REAL puede separarse del trayecto comprobado sin volver a comprobarlo
 FOTOS_POR_MUESTRA = 5           # se promedia la pose del tablero en 5 imágenes seguidas
 QUIETO_DEG = 0.05               # el robot cuenta como quieto si en 0,6 s se mueve menos que esto
 LLEGADA_DEG = 0.3               # postura alcanzada
@@ -80,6 +100,19 @@ LLEGADA_DEG = 0.3               # postura alcanzada
 
 class Cancelado(Exception):
     pass
+
+
+class Detenido(Exception):
+    """La calibración no puede seguir sin que alguien mire el robot (el mensaje dice por qué)."""
+
+
+class FueraDeTrayecto(Exception):
+    """El robot no está en el trayecto que se comprobó (lo trata Sesion.ir_a: vuelve a comprobar).
+    armado: si se ha salido con el pedal pisado (se ha desviado él) o suelto (lo han movido a mano)."""
+
+    def __init__(self, armado):
+        super().__init__()
+        self.armado = bool(armado)
 
 
 # ═════════════ utilidades ═════════════
@@ -204,16 +237,51 @@ def modelo_colision(cadena, T_mundo_cam=None):
     return _mc(cadena, cfg, T_mundo_cam, radio_mano=RADIO_MANO)
 
 
-def choque_mano(cadena, T_brida_tablero=None):
-    """Comprobación mano (+ tablero) contra antebrazo y giro del J4, con las piezas del gemelo."""
+def choque_mano(cadena, T_brida_tablero=None, entorno=None):
+    """Comprobación de la mano (+ el tablero) contra el propio robot y el soporte, con las piezas
+    del gemelo; con 'entorno' (el del modelo de colisión), también contra la cabeza con la cámara,
+    las cajas de config y el suelo."""
     from skill_shield.autonomo.choque_mano import desde_config
-    return desde_config(cadena, cfg, T_brida_tablero)
+    return desde_config(cadena, cfg, T_brida_tablero, entorno)
 
 
-def _texto_mano(ch, q):
-    d, donde = ch.distancia(q)
-    sitio = "del giro del J4" if donde == "wrist1_Link" else "del antebrazo" if donde == "forearm_Link" else "del brazo"
-    return f"la mano queda a {d * 100:.1f} cm {sitio} (mínimo {ch.holgura * 100:.1f} cm)"
+def limites_articulares(cadena):
+    """Rango (rad, convenio del MJCF) en el que se pueden pedir posturas sabiendo que el robot va
+    a llegar: lo que fr5_servo deja pasar (topes del FR5 y límites blandos de la controladora, con
+    sus márgenes) menos CALIB_MARGEN_LIMITES_DEG, dentro de los rangos del MJCF."""
+    from skill_shield.hardware.fr5_servo import PARAMETROS_POR_DEFECTO, limites_envio_rad
+    p = dict(PARAMETROS_POR_DEFECTO)
+    p.update({k: getattr(cfg, k) for k in PARAMETROS_POR_DEFECTO if hasattr(cfg, k)})
+    lim = limites_envio_rad(p, p.get("FR5_LIMITES_BLANDOS_DEG"))
+    m = math.radians(float(getattr(cfg, "CALIB_MARGEN_LIMITES_DEG", 1.0)))
+    return np.column_stack([np.maximum(cadena.limites[:, 0], lim[:, 0] + m),
+                            np.minimum(cadena.limites[:, 1], lim[:, 1] - m)])
+
+
+def crear_seguridad(cadena, q_inicio, T_brida_tablero=None, T_mundo_cam=None):
+    """Comprobador de choques para que el robot se mueva solo, con q_inicio como referencia:
+    cápsulas de la teleoperación + piezas reales de la mano (y del tablero y la cámara, si ya se
+    sabe dónde están). Devuelve un calibracion.Colisiones."""
+    modelo = modelo_colision(cadena, T_mundo_cam)
+    mano = choque_mano(cadena, T_brida_tablero, modelo.entorno).fijar_inicio(q_inicio)
+    return C.Colisiones(modelo, q_inicio, mano=mano)
+
+
+def posturas_exploracion(cadena, q0, col):
+    """Paso ② del modo automático: los giros pequeños desde q0 que valen según 'col' y a los que
+    el robot puede llegar (límites que aplica fr5_servo)."""
+    return C.posturas_explorar(q0, col, limites_articulares(cadena), VEL_MAX)
+
+
+def planificar_medida(cadena, q0, T_mundo_cam, T_brida_tablero, K, ancho, alto):
+    """Paso ③ del modo automático: con la calibración aproximada, elige las posturas de medida.
+    Devuelve (plan, info, comprobador de choques con el que se ha planificado)."""
+    col = crear_seguridad(cadena, q0, T_brida_tablero, T_mundo_cam)   # ya con el tablero
+    P = C.puntos_tablero(TABLERO["cuadros"], TABLERO["lado"])
+    plan, info = C.planificar_posturas(q0, cadena, col, T_mundo_cam, T_brida_tablero, K, ancho, alto, P,
+                                       n=N_AUTO, amplitud_deg=AMPLITUD, v_max_deg=VEL_MAX,
+                                       limites=limites_articulares(cadena))
+    return plan, info, col
 
 
 class Robot:
@@ -246,6 +314,7 @@ class Sesion:
     def __init__(self, mover):
         from calibrar_extrinseca import crear_tablero, pose_tablero
         from skill_shield.teleop_fr5.cinematica import cargar_cadena
+        self._estado_inicial()
         self.mover = mover
         self.fr5 = arrancar_fr5(mover)                   # lo primero: fork antes de abrir la cámara
         self.robot = Robot(self.fr5)
@@ -257,19 +326,24 @@ class Sesion:
         self.dev, self.cola, self.info = abrir_camara()
         self.K, self.dist = self.info["K"], self.info["dist"]
         self.P = C.puntos_tablero(TABLERO["cuadros"], TABLERO["lado"])
+        self.ventana = "Calibracion camara-robot"
+        cv2.namedWindow(self.ventana, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.ventana, int(self.info["ancho"] * 0.75), int(self.info["alto"] * 0.75))
+
+    def _estado_inicial(self):
+        """El estado que no es hardware (el mismo en la sesión real y en la simulada de las pruebas)."""
         self.armado = False
         self._t_reset = -10.0
         self._en_error = False
         self._avisado_webapp = False
         self.n_colisiones = 0
-        self.mano = None                                 # ChoqueManoBrazo (lo pone cada modo)
-        self.peligro_mano = False
+        self.mano = None                                 # ChoqueManoBrazo: avisos del modo manual
+        self.seguridad = None                            # calibracion.Colisiones (lo pone cada modo)
+        self.motivo_salto = ""                           # por qué ir_a no ha llevado el robot a una postura
+        self._trayecto = None                            # posturas del trayecto comprobado que se está recorriendo
         self.q = None
         self.T_ct, self.txt_tab = None, ""
         self.mensaje, self.t_mensaje = "", 0.0
-        self.ventana = "Calibracion camara-robot"
-        cv2.namedWindow(self.ventana, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.ventana, int(self.info["ancho"] * 0.75), int(self.info["alto"] * 0.75))
 
     def cerrar(self):
         self.fr5.habilitar(False)
@@ -282,6 +356,34 @@ class Sesion:
     def avisar(self, txt):
         self.mensaje, self.t_mensaje = txt, time.monotonic()
         print("   " + txt)
+
+    def _parar(self):
+        """Quieto ya: deja de mandar al FR5; para seguir hay que soltar y volver a pisar el pedal."""
+        self.fr5.habilitar(False)
+        self.armado = False
+        if self.pedal is not None:
+            self.pedal.desarmar()
+
+    def _vigilar_postura(self):
+        """Mientras se le manda un objetivo al robot (trayectos y capturas), su postura REAL —no la
+        pedida— tiene que seguir dentro de lo comprobado. Si no hace lo que se le pide, se para
+        aquí y la calibración termina (Detenido)."""
+        seg = self.seguridad
+        if seg is None or self.q is None:
+            return
+        if not seg.libre(self.q, MARGEN_VIGILANCIA):
+            motivo = seg.motivo(self.q, MARGEN_VIGILANCIA) or "la postura real no vale"
+            self._parar()
+            raise Detenido(f"el robot se ha salido de lo comprobado: {motivo}. Se queda parado: sepáralo a "
+                           "mano (arrastre en la WebApp) y vuelve a empezar.")
+        if self._trayecto is not None and float(np.degrees(np.min(np.max(
+                np.abs(self._trayecto - self.q), axis=1)))) > TUBO_DEG:
+            # Está bien colocado, pero no en el trayecto que se comprobó (lo han movido a mano con el
+            # pedal suelto, se ha desviado…): quieto hasta que ir_a compruebe el trayecto desde aquí.
+            estaba_armado = self.armado
+            self.fr5.habilitar(False)
+            self.armado = False
+            raise FueraDeTrayecto(estaba_armado)
 
     def _reiniciar(self, motivo):
         """Lo mismo que se hace a mano en la WebApp: Clear → disable → enable (fr5_servo.resetear).
@@ -333,18 +435,32 @@ class Sesion:
         (tecla, hay imagen nueva). Lanza Cancelado con Q/Esc."""
         self.q = self.robot.leer()
         if objetivo is not None:
+            if self.mover:
+                self._vigilar_postura()
             self.fr5.publicar(objetivo)                  # cada vuelta (watchdog de fr5_servo)
+        nueva = self._mirar(hud)
+        key = self._tecla(nueva)
+        if self.mover:
+            self._vigilar_errores(key)
+            # sin lectura de la postura real no se puede vigilar: mientras no llegue, no se le mueve
+            a_ciegas = self.seguridad is not None and self.q is None
+            self._pedal(key, objetivo is not None and not a_ciegas)
+        if key in (27, ord("q"), ord("Q")):
+            raise Cancelado()
+        return key, nueva
+
+    def _tecla(self, hay_imagen):
+        """Tecla pulsada en la ventana (−1 si ninguna)."""
+        return cv2.waitKeyEx(1 if hay_imagen else 3)
+
+    def _mirar(self, hud=()):
+        """Última imagen de la cámara: busca el tablero (deja T_ct y txt_tab) y la enseña con el
+        HUD. Devuelve False si no ha llegado ninguna imagen nueva."""
         p, pkt = self.cola.tryGet(), None
         while p is not None:
             pkt, p = p, self.cola.tryGet()
         if pkt is None:
-            key = cv2.waitKeyEx(3)
-            if self.mover:
-                self._vigilar_errores(key)
-                self._pedal(key, objetivo is not None)
-            if key in (27, ord("q"), ord("Q")):
-                raise Cancelado()
-            return key, False
+            return False
         img = pkt.getCvFrame()
         gris = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         self.T_ct, self.txt_tab, corners, ids = self._pose_tablero(self.det, self.board, gris, self.K, self.dist)
@@ -370,13 +486,7 @@ class Sesion:
             cv2.putText(img, l, (16, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
             y += 32
         cv2.imshow(self.ventana, img)
-        key = cv2.waitKeyEx(1)
-        if self.mover:
-            self._vigilar_errores(key)
-            self._pedal(key, objetivo is not None)
-        if key in (27, ord("q"), ord("Q")):
-            raise Cancelado()
-        return key, True
+        return True
 
     @property
     def listo(self):
@@ -402,27 +512,81 @@ class Sesion:
 
     def ir_a(self, q_obj, hud=()):
         """Lleva el robot a q_obj (solo con el pedal) y espera a que esté quieto allí.
-        False si al intentarlo salta la colisión 3 veces (esa postura se salta)."""
+        False (y el porqué en motivo_salto) si esa postura hay que saltarla: el trayecto desde
+        donde está el robot no vale, la colisión salta 3 veces o el robot se para sin llegar.
+        Lanza Detenido si, en marcha, la postura real del robot se sale de lo comprobado."""
         q_obj = np.asarray(q_obj, float)
-        if self.mano is not None:                       # última barrera: nunca acercar la mano al J4
+        self.motivo_salto = ""
+        seg = self.seguridad
+        if seg is not None:
+            # Última barrera: el trayecto se comprueba ENTERO (mano, tablero, brazo, soporte…) desde
+            # donde está el robot AHORA, que no siempre es donde el plan creía (postura saltada,
+            # colisión a medio camino, pedal soltado…). Si no vale, el robot no se mueve.
             while self.q is None:
                 self.vuelta(None, hud=hud)
-            camino = C.simular_camino(np.array(self.q), q_obj, VEL_MAX)
-            malo = next((q for q in camino if not self.mano.ok(q)), None)
-            if malo is not None:
-                self.avisar("NO voy a esa postura: " + _texto_mano(self.mano, malo))
-                self.peligro_mano = True
+            if not self._comprobar_trayecto(q_obj):
                 return False
+        try:
+            return self._seguir_trayecto(q_obj, hud)
+        finally:
+            self._trayecto = None
+
+    def _comprobar_trayecto(self, q_obj):
+        """Simula el trayecto desde la postura REAL hasta q_obj y lo comprueba entero. Si vale, lo
+        deja en _trayecto (la vigilancia exige que el robot no se salga de él) y devuelve True."""
+        camino = np.array(C.simular_camino(np.array(self.q), q_obj, VEL_MAX))
+        motivo = self.seguridad.motivo_posturas(camino, MARGEN_TRAYECTO)
+        if motivo is not None:
+            self._trayecto = None
+            self.motivo_salto = "por el camino, " + motivo
+            self.avisar("NO voy a esa postura: " + self.motivo_salto)
+            return False
+        self._trayecto = camino
+        return True
+
+    def _seguir_trayecto(self, q_obj, hud):
         t_llegada = None
+        n_desvios = 0                                    # veces que se ha salido del trayecto con el pedal pisado
         n0 = self.n_colisiones
+        q_ref, t_ref = None, time.monotonic()           # para notar que el robot, armado, no avanza
         while True:
             if self.n_colisiones - n0 >= 3:
+                self.motivo_salto = "3 colisiones seguidas yendo a ella"
                 return False
-            self.vuelta(q_obj, hud=hud)
+            try:
+                self.vuelta(q_obj, hud=hud)              # (vigila la postura real: puede lanzar Detenido)
+            except FueraDeTrayecto as e:
+                # Con el pedal suelto lo han movido a mano: se comprueba desde donde está y, si no
+                # vale, se salta la postura. Con el pedal pisado se ha desviado él: se le deja
+                # corregir un par de veces, pero un robot que no sigue lo que se le pide se para.
+                n_desvios += e.armado
+                self.avisar("el robot no está en el trayecto comprobado: lo compruebo desde donde está")
+                vale = n_desvios < 3 and self._comprobar_trayecto(q_obj)
+                if not vale and e.armado:
+                    self._parar()
+                    raise Detenido("el robot no sigue el trayecto que se le pide"
+                                   + (f" (se ha desviado más de {TUBO_DEG:.0f}° tres veces yendo a la misma postura)"
+                                      if n_desvios >= 3 else f" y desde donde está ya no vale: {self.motivo_salto}")
+                                   + ". Se queda parado: revisa el robot antes de volver a empezar.")
+                if not vale:
+                    return False
+                continue
+            ahora = time.monotonic()
             cerca = self.q is not None and float(np.degrees(np.max(np.abs(self.q - q_obj)))) < LLEGADA_DEG
-            t_llegada = (t_llegada or time.monotonic()) if cerca else None
-            if t_llegada and time.monotonic() - t_llegada >= ESPERA_S and self.robot.quieto:
+            t_llegada = (t_llegada or ahora) if cerca else None
+            if t_llegada and ahora - t_llegada >= ESPERA_S and self.robot.quieto:
                 return True
+            # Con el pedal pisado el robot tiene que avanzar. Si se queda parado lejos del objetivo
+            # es que alguien ha recortado lo pedido (límites blandos de la controladora más estrechos
+            # que los de config…): esa postura no se alcanza nunca → se deja, no se espera más.
+            if not self.armado or self.q is None or cerca:
+                q_ref, t_ref = None, ahora
+            elif q_ref is None or float(np.degrees(np.max(np.abs(self.q - q_ref)))) > 0.2:
+                q_ref, t_ref = np.array(self.q), ahora
+            elif ahora - t_ref > SIN_AVANCE_S:
+                self.motivo_salto = (f"el robot se ha parado antes de llegar y lleva {SIN_AVANCE_S:.0f} s sin "
+                                     "avanzar (¿límites blandos de la controladora?)")
+                return False
 
     def recorrer(self, posturas, titulo, cada=None):
         """Recorre las posturas ({q, capturar}) y captura donde toque. Devuelve las muestras."""
@@ -443,11 +607,7 @@ class Sesion:
                 if m is not None or self.n_colisiones == n_col:
                     break
             if not llegado:
-                if self.peligro_mano:
-                    self.peligro_mano = False
-                    self.avisar(f"postura {k + 1}: la mano pasaría demasiado cerca del J4 → la salto")
-                else:
-                    self.avisar(f"postura {k + 1}: 3 colisiones seguidas yendo a ella → la salto")
+                self.avisar(f"postura {k + 1}: {self.motivo_salto} → la salto")
                 continue
             if not p["capturar"]:
                 continue
@@ -479,22 +639,39 @@ def _guardar_muestras(s, muestras):
                                                    alto=s.info["alto"]), mxid=s.info["mxid"], muestras=muestras))
 
 
-def modo_auto():
-    s = Sesion(mover=True)
+def _texto_revision(rev):
+    """Qué decirle al operario cuando la exploración no deja planificar (C.revisar_exploracion)."""
+    lineas = ["✗ No sigo: con lo medido al explorar no se puede saber dónde están la cámara y el tablero."]
+    for codigo, texto in rev["problemas"]:
+        lineas.append("   · " + texto[0].upper() + texto[1:] + ".")
+        if codigo == "escala" and np.isfinite(rev["escala"]):
+            lineas.append("     Mide con una regla un cuadrado del tablero montado y pon en CALIB_ROBOT_TABLERO "
+                          "(config.py) lado = lo que mida y marcador = 0,75 × lado (en metros).")
+        elif codigo == "error":
+            lineas.append("     Comprueba que el tablero está rígido y bien sujeto a la mano (que no se mueva "
+                          "respecto a ella) y que la cámara lo ve entero y nítido.")
+    lineas.append("   El robot solo ha hecho los movimientos pequeños de la exploración. Corrígelo y vuelve a "
+                  "lanzar --auto.")
+    return "\n".join(lineas)
+
+
+def modo_auto(s=None):
+    s = s or Sesion(mover=True)
     try:
         print("\n① Pon el robot (arrastre en la WebApp) donde la cámara vea el tablero entero y de frente.")
         s.esperar_tablero(["AUTO: coloca el robot donde la camara vea el tablero", "Q = salir"])
         q0 = np.array(s.q)
-        s.mano = choque_mano(s.cadena)                   # sin tablero todavía (no se sabe dónde está)
-        if not s.mano.ok(q0):
-            sys.exit("✗ En la postura de inicio " + _texto_mano(s.mano, q0) + ". Endereza la muñeca "
-                     "(arrastre en la WebApp) y vuelve a probar.")
-        col = C.Colisiones(modelo_colision(s.cadena), q0, mano=s.mano)
+        print("   Tablero a la vista. Midiendo los huecos de la mano en esta postura (unos segundos)…")
+        col = crear_seguridad(s.cadena, q0)              # sin tablero todavía (no se sabe dónde está)
+        if col.mano.motivo(q0):
+            sys.exit("✗ En la postura de inicio " + col.mano.motivo(q0) + ". Sepáralo (arrastre en la "
+                     "WebApp: muñeca más recta, más lejos del soporte) y vuelve a probar.")
+        s.seguridad = col
         if col.base:
             print(f"⚠️  El modelo de colisión ya ve choques en la postura de inicio {list(col.base)}: o el modelo "
                   "del soporte no cuadra con el real o el robot está muy cerca. Se tolera, pero no pueden empeorar.")
         explorar = []                                    # ida a cada una y vuelta a la de inicio
-        for q in C.posturas_explorar(q0, col, s.cadena.limites, VEL_MAX):
+        for q in posturas_exploracion(s.cadena, q0, col):
             explorar += [dict(q=q.tolist(), capturar=True), dict(q=q0.tolist(), capturar=False)]
         if len(explorar) < 10:
             sys.exit("✗ Desde esta postura no hay sitio para explorar sin chocar: aléjala del soporte y la mesa.")
@@ -505,16 +682,18 @@ def modo_auto():
             sys.exit(f"✗ Solo {len(m1)} muestras al explorar: ¿se ve bien el tablero? Acércalo o ponlo más de frente.")
         Tb = [s.cadena.fk_marcos(np.array(m["q"]))[5] for m in m1]
         Tc = [np.array(m["T_cam_tablero"]) for m in m1]
-        aprox = C.calibrar(Tb, Tc, s.P)
+        rev = C.revisar_exploracion(Tb, Tc, s.P, float(TABLERO["lado"]))
+        aprox = rev["aprox"]
         print(f"   calibración aproximada: error medio {aprox['error_medio_mm']:.1f} mm "
-              f"(cámara en {np.round(aprox['T_mundo_cam'][:3, 3], 3).tolist()} m)")
+              f"(cámara en {np.round(aprox['T_mundo_cam'][:3, 3], 3).tolist()} m) · cuadrado del tablero "
+              f"≈ {rev['lado_estimado'] * 1000:.1f} mm")
+        if not rev["ok"]:                                # con esto no se puede planificar nada seguro
+            sys.exit(_texto_revision(rev))
 
         print("\n③ Planificando posturas (sin moverse)…")
-        s.mano = choque_mano(s.cadena, aprox["T_brida_tablero"]).fijar_inicio(q0)   # ya con el tablero
-        col = C.Colisiones(modelo_colision(s.cadena, aprox["T_mundo_cam"]), q0, mano=s.mano)
-        plan, info = C.planificar_posturas(q0, s.cadena, col, aprox["T_mundo_cam"], aprox["T_brida_tablero"],
-                                           s.K, s.info["ancho"], s.info["alto"], s.P, n=N_AUTO,
-                                           amplitud_deg=AMPLITUD, v_max_deg=VEL_MAX)
+        plan, info, col = planificar_medida(s.cadena, q0, aprox["T_mundo_cam"], aprox["T_brida_tablero"],
+                                            s.K, s.info["ancho"], s.info["alto"])
+        s.seguridad = col
         print(f"   {info}")
         if info.get("elegidas", 0) < 8:
             sys.exit("✗ No salen suficientes posturas seguras y con el tablero a la vista. Prueba otra postura de "
@@ -527,12 +706,14 @@ def modo_auto():
     except Cancelado:
         print("⏹  Cancelado.")
         return None
+    except Detenido as e:
+        sys.exit(f"⛔ Calibración detenida: {e}")
     finally:
         s.cerrar()
     return calcular_y_guardar(muestras, s.cadena, s.info)[1]
 
 
-def modo_repetir_o_verificar(verificar, aqui=False):
+def modo_repetir_o_verificar(verificar, aqui=False, s=None):
     posturas = []
     if not aqui:
         posturas = _normalizar_posturas(_leer_json(POSTURAS, []))
@@ -544,7 +725,7 @@ def modo_repetir_o_verificar(verificar, aqui=False):
                                                               min(N_VERIFICAR, len(idx_cap))).round().astype(int))])
             posturas = [dict(p, capturar=(i in sel)) for i, p in enumerate(posturas) if i <= max(sel)]
     calib = C.cargar(ARCHIVO) if verificar else None
-    s = Sesion(mover=not aqui)
+    s = s or Sesion(mover=not aqui)
     muestras = []
     try:
         if aqui:
@@ -564,36 +745,40 @@ def modo_repetir_o_verificar(verificar, aqui=False):
             except Cancelado:
                 pass                                     # Q = terminar
         else:
-            # el primer trayecto sale de donde esté el robot ahora: comprobarlo antes
             while s.q is None:
                 s.vuelta(None, hud=["leyendo la postura del robot..."])
             q_act = np.array(s.q)
-            modelo = modelo_colision(s.cadena)
-            try:
-                T_bt = C.cargar(ARCHIVO)["T_brida_tablero"]   # para contar también con el tablero
+            try:                                         # para contar con el tablero y con la cámara
+                guardada = C.cargar(ARCHIVO)
+                T_bt, T_mc = guardada["T_brida_tablero"], guardada["T_mundo_cam"]
             except Exception:
-                T_bt = None
-            s.mano = choque_mano(s.cadena, T_bt).fijar_inicio(posturas[0]["q"])
-            cerca = [k + 1 for k, p in enumerate(posturas) if not s.mano.ok(p["q"])]
-            if cerca:
-                sys.exit(f"✗ En las posturas guardadas {cerca} la mano queda demasiado cerca del antebrazo / "
-                         "giro del J4. Borra calib_posturas.json y vuelve a calibrar con --auto.")
-            if not s.mano.ok(q_act):
-                sys.exit("✗ Ahora mismo " + _texto_mano(s.mano, q_act) + ". Endereza la muñeca y vuelve a probar.")
-            if not C.Colisiones(modelo, q_act, mano=s.mano).camino_libre(q_act, posturas[0]["q"], VEL_MAX):
-                sys.exit("✗ El trayecto desde la postura actual hasta la primera postura guardada podría chocar. "
-                         "Lleva el robot (arrastre) cerca de esa postura de inicio y vuelve a probar.")
-            col = C.Colisiones(modelo, posturas[0]["q"], mano=s.mano)  # los demás trayectos, también
+                T_bt = T_mc = None
+            # Mismas reglas que en --auto, con la primera postura guardada (la de inicio de aquella
+            # calibración) como referencia: se revisan las posturas, los trayectos entre ellas y el
+            # trayecto desde donde está el robot ahora. Si algo no vale, no se mueve.
+            col = crear_seguridad(s.cadena, posturas[0]["q"], T_bt, T_mc)
+            malas = [f"{k + 1} ({col.motivo(p['q'])})" for k, p in enumerate(posturas) if not col.libre(p["q"])]
+            if malas:
+                sys.exit("✗ Hay posturas guardadas que ya no valen: " + "; ".join(malas[:4])
+                         + (f"… y {len(malas) - 4} más" if len(malas) > 4 else "")
+                         + ". Vuelve a calibrar con --auto (elige posturas nuevas y seguras).")
             malos = [k + 1 for k in range(len(posturas) - 1)
-                     if not col.camino_libre(posturas[k]["q"], posturas[k + 1]["q"], VEL_MAX)]
+                     if col.motivo_camino(posturas[k]["q"], posturas[k + 1]["q"], VEL_MAX) is not None]
             if malos:
-                sys.exit(f"✗ Los trayectos que salen de las posturas {malos} podrían chocar según el modelo de "
-                         "colisión. Vuelve a calibrar con --auto (planifica trayectos seguros).")
+                sys.exit(f"✗ Los trayectos que salen de las posturas guardadas {malos} no valen. "
+                         "Vuelve a calibrar con --auto (planifica trayectos seguros).")
+            motivo = col.motivo_camino(q_act, posturas[0]["q"], VEL_MAX, margen=MARGEN_TRAYECTO)
+            if motivo is not None:
+                sys.exit(f"✗ Desde donde está ahora el robot no puedo ir a la primera postura guardada: {motivo}. "
+                         "Llévalo (arrastre en la WebApp) cerca de la postura de inicio de la calibración.")
+            s.seguridad = col                            # ir_a: trayecto desde la postura real + vigilancia
             muestras = s.recorrer(posturas, "VERIFICAR" if verificar else "REPETIR",
                                   cada=None if verificar else (lambda m: _guardar_muestras(s, m)))
     except Cancelado:
         print("⏹  Cancelado.")
         return None
+    except Detenido as e:
+        sys.exit(f"⛔ Calibración detenida: {e}")
     finally:
         s.cerrar()
     if not verificar:
@@ -617,8 +802,8 @@ def modo_repetir_o_verificar(verificar, aqui=False):
     return ok
 
 
-def modo_manual():
-    s = Sesion(mover=False)
+def modo_manual(s=None):
+    s = s or Sesion(mover=False)
     muestras = []
     s.mano = choque_mano(s.cadena)
     t_aviso = 0.0
@@ -630,7 +815,7 @@ def modo_manual():
                                          f"muestras {len(muestras)} (min. {MIN_MUESTRAS})",
                                          "D = quitar ultima   C = calcular   Q = terminar"])
             if s.q is not None and time.monotonic() - t_aviso > 3.0 and not s.mano.ok(s.q):
-                s.avisar("¡CUIDADO! " + _texto_mano(s.mano, s.q))
+                s.avisar("¡CUIDADO! " + (s.mano.motivo(s.q) or "la mano está demasiado cerca de algo"))
                 t_aviso = time.monotonic()
             if key == 32:
                 m = s.capturar() if s.listo else None

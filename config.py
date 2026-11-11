@@ -1453,7 +1453,7 @@ AUTONOMO_HERRAMIENTAS_OLVIDO_S  = 2.0    # sin verla este tiempo → deja de apa
 # cuadro 20 mm, marcador 12,5 mm. Sus marcadores son los ids 0-16 del diccionario 4x4: por eso las
 # herramientas usan ids a partir del 20, y el detector de herramientas ignora los del tablero.
 # Si se cambia de tablero, poned aquí sus medidas REALES (con regla o pie de rey).
-CALIB_ROBOT_TABLERO = dict(cuadros=(7, 5), lado=0.020, marcador=0.0125, diccionario="DICT_4X4_50")
+CALIB_ROBOT_TABLERO = dict(cuadros=(7, 5), lado=0.0375, marcador=0.0275, diccionario="DICT_4X4_50")
 CALIB_ROBOT_ARCHIVO   = "camara_robot.json"     # resultado (T_mundo_cam, en el marco del MJCF)
 CALIB_ROBOT_POSTURAS  = "calib_posturas.json"   # posturas enseñadas (joints): se reutilizan siempre
 CALIB_ROBOT_MUESTRAS  = "calib_muestras.json"   # datos brutos de la última calibración (--recalcular)
@@ -1466,10 +1466,26 @@ CALIB_ROBOT_VERIFICAR_N = 4                     # posturas que usa --verificar
 # de colisión de la teleoperación (soporte, suelo y TELEOP_FR5_OBSTACULOS: ¡que la mesa esté bien!)
 CALIB_AUTO_POSTURAS   = 20                      # posturas de medida (además de las ~10 de explorar)
 CALIB_AUTO_RADIO_MANO = 0.13                    # m: la mano + el tablero (14x10 cm), para las colisiones
-CALIB_AUTO_AMPLITUD_DEG = (30, 20, 25, 45, 45, 70)   # cuánto puede alejarse cada joint de la postura de inicio
+# Cuánto puede alejarse cada joint (J1…J6) de la postura de inicio. Los tres de la muñeca (J4, J5,
+# J6) van contenidos (10-nov): son los que estrujan lo que sale de la mano y retuercen sus cables.
+# En simulación la calibración sale igual de precisa que con (…, 45, 45, 70).
+CALIB_AUTO_AMPLITUD_DEG = (30, 20, 25, 35, 30, 40)
 CALIB_AUTO_RESET      = True                    # colisión → borrar error, disable, enable solo (luego, P otra vez)
-# La mano NO puede acercarse al antebrazo ni al giro del J4 (si la muñeca se dobla mucho, la mano
-# vuelve hacia atrás, golpea el J4 y se rompe una pieza). Se mide con las piezas reales del gemelo
-# (skill_shield/autonomo/choque_mano.py), mano + tablero. Hueco mínimo que se exige, en metros.
-# Con la muñeca recta el hueco es de unos 6 cm, así que no subáis de 0.05.
-CALIB_MANO_HOLGURA    = 0.03
+# ── Huecos que se exigen al mover el robot solo (--auto, --repetir, --verificar), en metros ──
+# Se miden con las piezas reales del gemelo (skill_shield/autonomo/choque_mano.py): la mano y la
+# placa del tablero contra el hombro, el brazo, el antebrazo y el giro del J4 del robot, contra el
+# soporte (columna, placas, pie) y contra la cabeza con la cámara, las cajas de TELEOP_FR5_* y el suelo.
+# REGLA PRINCIPAL: ningún hueco puede cerrarse más de CALIB_MANO_ACERCAR_MAX respecto al que había
+# en la postura de inicio (la que deja el operario viendo que nada aprieta), salvo que siga siendo
+# mayor que su hueco objetivo. Y nunca baja de su mínimo. Así, lo que sobresale de la mano y no
+# está en el gemelo (conector, cables, cinta) no se estruja aunque no sepamos su forma.
+CALIB_MANO_HOLGURA    = 0.03                    # mínimo absoluto mano ↔ robot (con la muñeca recta hay ~6 cm)
+CALIB_MANO_SALIENTES  = 0.04                    # cuánto sobresale de la mano lo que NO está en el gemelo
+#                                                 (objetivo mano ↔ robot = HOLGURA + SALIENTES). ¡Medidlo!
+CALIB_MANO_ACERCAR_MAX = 0.01                   # cuánto puede cerrarse un hueco respecto a la postura de inicio
+CALIB_TABLERO_HOLGURA = 0.04                    # hueco objetivo tablero ↔ robot (mínimo absoluto: 1,5 cm)
+CALIB_TABLERO_MARGEN  = 0.025                   # placa/papel que sobresale alrededor del dibujo del tablero
+CALIB_ENTORNO_HOLGURA = 0.05                    # hueco objetivo de mano y tablero con soporte, cabeza, cajas y suelo
+#                                                 (mínimo absoluto: 3 cm)
+CALIB_MARGEN_LIMITES_DEG = 1.0                  # las posturas se piden a ≥ 1° de lo que fr5_servo deja pasar
+CALIB_SIN_AVANCE_S    = 5.0                     # pedal pisado y robot parado sin llegar → se deja esa postura

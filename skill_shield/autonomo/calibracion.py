@@ -191,6 +191,64 @@ def calibrar(T_mundo_brida, T_cam_tablero, P_tablero, refinar=True):
                 otros_metodos={k: round(v[0], 2) for k, v in resultados.items()})
 
 
+def estimar_escala(T_mundo_brida, T_cam_tablero):
+    """Tamaño REAL del tablero dividido por el que se le ha dado al detector (1.0 = el cuadrado
+    mide lo que dice config). Sale de comparar lo que el robot mueve la brida con lo que la
+    cámara ve moverse al tablero: si el cuadrado impreso es mayor que el de config, la cámara
+    cree que el tablero está más cerca y que se mueve menos de lo que se mueve.
+
+    El giro se saca como siempre (Park-Martin: no depende del tamaño) y, con él, las dos
+    traslaciones y la escala s por mínimos cuadrados lineales:
+        R_brida_i · t_brida_tablero − t_mundo_cam − s · R_mundo_cam · t_cam_tablero_i = −t_brida_i
+    Hacen falta posturas con giros en más de un eje (las de la exploración valen de sobra)."""
+    n = len(T_mundo_brida)
+    if n < 4:
+        raise ValueError("Hacen falta al menos 4 muestras para estimar la escala del tablero")
+    A, B = [], []
+    for i in range(n):
+        for j in range(i + 1, n):
+            A.append(T_mundo_brida[j] @ inv_T(T_mundo_brida[i]))
+            B.append(T_cam_tablero[j] @ inv_T(T_cam_tablero[i]))
+    R_X = resolver_ax_xb(A, B)[:3, :3]
+    M = np.zeros((3 * n, 7))
+    d = np.zeros(3 * n)
+    for i, (Tb, Tc) in enumerate(zip(T_mundo_brida, T_cam_tablero)):
+        M[3 * i:3 * i + 3, 0:3] = -np.eye(3)
+        M[3 * i:3 * i + 3, 3:6] = Tb[:3, :3]
+        M[3 * i:3 * i + 3, 6] = -(R_X @ Tc[:3, 3])
+        d[3 * i:3 * i + 3] = -Tb[:3, 3]
+    x, _, rango, sv = np.linalg.lstsq(M, d, rcond=None)
+    if rango < 7 or sv[-1] < 1e-4 * sv[0]:
+        raise ValueError("Las posturas no bastan para estimar la escala del tablero (giran poco o en un solo eje)")
+    return float(x[6])
+
+
+def revisar_exploracion(T_mundo_brida, T_cam_tablero, P_tablero, lado, tol_escala=0.03, error_max_mm=10.0):
+    """Calibración aproximada con las muestras de la exploración + comprobación de que se puede
+    planificar con ella. Devuelve dict(ok, problemas=[(código, texto)], aprox, escala,
+    lado_estimado). Problemas:
+      · "escala": el cuadrado del tablero no mide 'lado' (más de tol_escala de diferencia). Con
+        el tamaño mal, la cámara y el tablero quedan situados a decenas de cm de donde están.
+      · "error": las muestras no cuadran entre sí (error medio > error_max_mm): tablero que se
+        mueve respecto a la mano, mal detectado, intrínsecos…"""
+    aprox = calibrar(T_mundo_brida, T_cam_tablero, P_tablero)
+    problemas = []
+    try:
+        escala = estimar_escala(T_mundo_brida, T_cam_tablero)
+    except (ValueError, np.linalg.LinAlgError) as e:
+        escala = float("nan")
+        problemas.append(("escala", f"no se ha podido comprobar el tamaño del tablero ({e})"))
+    if np.isfinite(escala) and abs(escala - 1.0) > tol_escala:
+        problemas.append(("escala", f"según lo que se ha movido el robot, el cuadrado del tablero mide ≈ "
+                                    f"{escala * lado * 1000:.1f} mm, y en CALIB_ROBOT_TABLERO pone "
+                                    f"{lado * 1000:.1f} mm"))
+    if aprox["error_medio_mm"] > error_max_mm:
+        problemas.append(("error", f"las muestras de la exploración no cuadran entre sí (error medio "
+                                   f"{aprox['error_medio_mm']:.1f} mm, máximo admitido {error_max_mm:.0f} mm)"))
+    return dict(ok=not problemas, problemas=problemas, aprox=aprox, escala=escala,
+                lado_estimado=escala * lado)
+
+
 def descartar_peores(T_mundo_brida, T_cam_tablero, P_tablero, max_descartes=3, umbral_mm=8.0):
     """Calibra, quita la peor muestra si pasa de umbral_mm y repite (hasta max_descartes).
     Devuelve (resultado, índices usados)."""
@@ -270,28 +328,60 @@ GIROS_EXPLORAR_DEG = [  # (joint, grados) relativos a la postura de inicio
 
 
 class Colisiones:
-    """Envuelve ModeloColision: una postura vale si no aparece NINGUNA colisión nueva respecto a
-    la postura de inicio y las que ya hubiera no empeoran (el modelo es conservador: si la
-    postura de inicio ya «choca» en el modelo, es que el modelo no cuadra del todo).
-    Además, si se da 'mano', la mano (+ tablero) tiene que quedar SIEMPRE a más de su holgura del
-    antebrazo y del giro del J4 (eso no se tolera nunca: rompe la mano)."""
+    """Comprobador de posturas para que el robot se mueva solo. Dos capas:
+      · ModeloColision (cápsulas de la teleoperación): una postura vale si no aparece NINGUNA
+        colisión nueva respecto a la postura de inicio y las que ya hubiera no empeoran (el modelo
+        es conservador: si la postura de inicio ya «choca» en él, es que no cuadra del todo).
+      · 'mano' (choque_mano.ChoqueManoBrazo, ya con fijar_inicio): los huecos de la mano y del
+        tablero con el robot, el soporte y el entorno, medidos con las piezas del gemelo. Aquí no
+        se tolera nada: es lo que rompe la mano o estruja lo que sale de ella."""
 
     def __init__(self, modelo, q_inicio, tolerancia=0.005, mano=None):
         self.m = modelo
         self.base = {(a, b): p for a, b, p in modelo.colisiones(np.asarray(q_inicio, float))}
         self.tol = float(tolerancia)
-        self.mano = mano                     # choque_mano.ChoqueManoBrazo: mano vs antebrazo/J4 (sin tolerancias)
+        self.mano = mano                     # choque_mano.ChoqueManoBrazo (None = solo las cápsulas)
 
-    def libre(self, q):
-        if self.mano is not None and not self.mano.ok(q):
+    def libre(self, q, margen=0.0):
+        """¿Vale la postura q? margen (m): cuánto menos de lo exigido se tolera (para vigilar la
+        postura REAL del robot en marcha, que va unas décimas de grado por detrás de la pedida)."""
+        q = np.asarray(q, float)
+        if self.mano is not None and not self.mano.ok(q, margen):
             return False
-        for a, b, p in self.m.colisiones(np.asarray(q, float)):
-            if (a, b) not in self.base or p > self.base[(a, b)] + self.tol:
+        for a, b, p in self.m.colisiones(q):
+            if (a, b) not in self.base or p > self.base[(a, b)] + self.tol + margen:
                 return False
         return True
 
+    def motivo(self, q, margen=0.0):
+        """Por qué NO vale la postura q (texto para el operario), o None si vale."""
+        q = np.asarray(q, float)
+        if self.mano is not None:
+            txt = self.mano.motivo(q, margen)
+            if txt:
+                return txt
+        for a, b, p in self.m.colisiones(q):
+            if (a, b) not in self.base:
+                return f"en el modelo de cápsulas, «{a}» choca con «{b}»"
+            if p > self.base[(a, b)] + self.tol + margen:
+                return (f"en el modelo de cápsulas, «{a}» se acerca a «{b}» "
+                        f"{(p - self.base[(a, b)]) * 100:.1f} cm más que al empezar")
+        return None
+
     def camino_libre(self, qa, qb, v_max_deg=15.0, a_max_deg=300.0, dt=0.04):
         return all(self.libre(q) for q in simular_camino(qa, qb, v_max_deg, a_max_deg, dt))
+
+    def motivo_posturas(self, posturas, margen=0.0):
+        """None si todas las posturas valen; si no, el motivo de la primera que no vale."""
+        for q in posturas:
+            if not self.libre(q, margen):
+                return self.motivo(q, margen) or "una postura intermedia no vale"
+        return None
+
+    def motivo_camino(self, qa, qb, v_max_deg=15.0, a_max_deg=300.0, dt=0.04, margen=0.0):
+        """None si todo el trayecto qa→qb (tal como lo moverá fr5_servo) vale; si no, el motivo
+        de la primera postura del trayecto que no vale. margen (m): como en libre()."""
+        return self.motivo_posturas(simular_camino(qa, qb, v_max_deg, a_max_deg, dt), margen)
 
 
 def simular_camino(qa, qb, v_max_deg=15.0, a_max_deg=300.0, dt=0.04, max_pasos=4000):
@@ -341,12 +431,14 @@ def posturas_explorar(q0, colisiones, limites, v_max_deg=15.0):
 
 def planificar_posturas(q0, cadena, colisiones, T_mundo_cam, T_brida_tablero, K, ancho, alto, P,
                         n=20, candidatas=4000, amplitud_deg=(30, 20, 25, 45, 45, 70), v_max_deg=15.0,
-                        semilla=0):
+                        semilla=0, limites=None):
     """Posturas para la calibración definitiva. Devuelve (lista de dicts {q, capturar}, info).
-    Las de capturar=False son pasos intermedios (volver a la postura de inicio)."""
+    Las de capturar=False son pasos intermedios (volver a la postura de inicio).
+    limites: (6, 2) rad con el rango en el que el robot puede llegar de verdad (los límites que
+    aplica fr5_servo, más estrechos que los del MJCF); None = los de la cadena."""
     rng = np.random.default_rng(semilla)
     q0 = np.asarray(q0, float)
-    lim = cadena.limites
+    lim = cadena.limites if limites is None else np.asarray(limites, float).reshape(6, 2)
     amp = np.radians(amplitud_deg)
     T_cam_mundo = inv_T(T_mundo_cam)
     buenas = []                                     # (q, T_cam_tablero)
