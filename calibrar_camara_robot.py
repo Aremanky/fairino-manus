@@ -255,12 +255,30 @@ def modelo_colision(cadena, T_mundo_cam=None):
     return _mc(cadena, cfg, T_mundo_cam, radio_mano=RADIO_MANO)
 
 
+def girar_mano(ch, grados):
+    """(12-nov) La mano del gemelo girada 'grados' alrededor del eje de la brida (z de wrist3), en
+    un ChoqueManoBrazo ya creado: en la calibración la OrcaHand va montada dada la vuelta (180°)
+    respecto al gemelo. Solo cambia los puntos de la mano (el tablero se mide aparte, en el marco
+    de la brida; la cápsula de la mano es simétrica respecto a ese eje)."""
+    if not grados:
+        return ch
+    from skill_shield.autonomo.choque_mano import reducir
+    a = math.radians(float(grados))
+    R = np.array([[math.cos(a), -math.sin(a), 0.0], [math.sin(a), math.cos(a), 0.0], [0.0, 0.0, 1.0]])
+    ch.mano = np.asarray(ch.mano, float) @ R.T
+    ch._objetos["mano"] = ch.mano
+    ch._grueso["mano"] = reducir(ch.mano, 0.02)
+    return ch
+
+
 def choque_mano(cadena, T_brida_tablero=None, entorno=None):
     """Comprobación de la mano (+ el tablero) contra el propio robot y el soporte, con las piezas
     del gemelo; con 'entorno' (el del modelo de colisión), también contra la cabeza con la cámara,
-    las cajas de config y el suelo."""
+    las cajas de config y el suelo. La mano, girada CALIB_MANO_GIRO_DEG alrededor de la brida
+    (como va montada en la calibración)."""
     from skill_shield.autonomo.choque_mano import desde_config
-    return desde_config(cadena, cfg, T_brida_tablero, entorno)
+    return girar_mano(desde_config(cadena, cfg, T_brida_tablero, entorno),
+                      float(getattr(cfg, "CALIB_MANO_GIRO_DEG", 0.0)))
 
 
 def limites_articulares(cadena):

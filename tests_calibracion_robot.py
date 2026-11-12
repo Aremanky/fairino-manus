@@ -1029,3 +1029,18 @@ def test_la_sesion_real_ve_el_tablero_captura_y_lleva_el_robot(calib, cadena, re
     assert np.linalg.norm(T_visto[:3, 3] - T_real[:3, 3]) < 0.001
     assert C.angulo_R(T_visto[:3, :3].T @ T_real[:3, :3]) < 0.2
     assert llegado is True and np.degrees(np.abs(fr5.q_real_rad() - q1).max()) < 0.3
+
+
+def test_calibracion_gira_la_mano_180_alrededor_de_la_brida():
+    """(12-nov) En la calibración la mano va dada la vuelta: su modelo se gira CALIB_MANO_GIRO_DEG
+    alrededor del eje de la brida (z de wrist3) para las comprobaciones de choque."""
+    import calibrar_camara_robot as CR
+    from skill_shield.autonomo.choque_mano import desde_config
+    from skill_shield.teleop_fr5.cinematica import cargar_cadena
+    cad = cargar_cadena(CR.cfg.RUTA_XML, verbose=False)
+    normal = desde_config(cad, CR.cfg)
+    girada = CR.girar_mano(desde_config(cad, CR.cfg), 180.0)
+    assert np.allclose(girada.mano[:, :2], -normal.mano[:, :2]) and np.allclose(girada.mano[:, 2], normal.mano[:, 2])
+    assert girada._objetos["mano"] is girada.mano
+    q = np.radians([0, -90, 90, -90, -90, 0])
+    assert np.isfinite(girada.distancia(q)[0])
