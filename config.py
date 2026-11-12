@@ -1433,6 +1433,18 @@ AUTONOMO_CAM_RELLENAR_HUECOS = 0     # radio de relleno de huecos del estéreo (
 AUTONOMO_CAM_FILTRO_TEMPORAL = False
 AUTONOMO_CAM_CONFIANZA = 200         # confianza del estéreo (0-255, más bajo = más estricto)
 AUTONOMO_MAPA_Z_MIN    = 0.35        # m: más cerca la OAK-D no mide (lo que salga es ruido)
+# Rastro del brazo (12-nov): el robot se quita del mapa en todas sus poses de los últimos BARRIDO_S
+# (la profundidad llega con retraso) y los cubos por los que pasa quedan libres.
+AUTONOMO_MAPA_BARRIDO_S = 0.6
+# Autocorrección de la calibración con el propio brazo (12-nov, autocalib.py): con el brazo quieto
+# y a la vista se compara la profundidad con sus mallas y se corrige la traslación de la cámara.
+AUTONOMO_AUTOCALIB = True
+AUTONOMO_AUTOCALIB_GANANCIA = 0.8            # fracción de cada medida que se aplica
+AUTONOMO_AUTOCALIB_MAX_M = 0.15              # corrección máxima (más: recalibrar)
+AUTONOMO_AUTOCALIB_RESIDUO_MAX_M = 0.012     # medidas peores no se usan
+AUTONOMO_AUTOCALIB_QUIETO_S = 0.4
+AUTONOMO_AUTOCALIB_PASO_MAX_M = 0.08        # una medida que pida mover más de esto de golpe no se usa
+# (el botón «Borrar mapa» también borra la corrección: vuelve a la calibración del archivo)
 AUTONOMO_MAPA_MIN_PUNTOS = 4         # puntos en un cubo en una misma imagen para contar
 AUTONOMO_MAPA_MIN_GRUPO  = 4         # cubos ocupados juntos como mínimo (los sueltos son ruido)
 AUTONOMO_MAPA_OLVIDO_S = 30.0            # lo que no se ve en este tiempo vuelve a «desconocido»
@@ -1450,10 +1462,21 @@ AUTONOMO_MAPA_MAX_DIBUJO = 6000          # máx. de vóxeles que se dibujan (el 
 AUTONOMO_HERRAMIENTAS = [
     # ids desde el 20: del 0 al 16 son los del tablero de calibración (mismo diccionario 4x4)
     dict(id=20, nombre="Destornillador",  tipo="herramienta",  lado=0.093,
-         desplazamiento=(0.0, 0.0, -0.015), giro_deg=(0, 0, 0), caja=(0.10, 0.016, 0.016)),
+         desplazamiento=(0.0, 0.0, -0.015), giro_deg=(0, 0, 0), caja=(0.10, 0.016, 0.016),
+         hoja=(1.2, 1.3, 2.4)),                   # la hoja cuelga de una pinza: llega más abajo
     dict(id=21, nombre="Punto de uso",    tipo="punto_uso",    lado=0.124),
     dict(id=22, nombre="Punto de dejada", tipo="punto_dejada", lado=0.124),
 ]
+# Las hojas de los marcadores no son obstáculos (12-nov): se quita del mapa una caja del tamaño de la
+# hoja alrededor de cada marcador visto; lo de debajo cuenta. Tamaño, desde el centro del marcador y en
+# lados del marcador: (medio ancho, hasta arriba, hasta abajo). Cada marcador puede llevar la suya
+# (clave «hoja» en AUTONOMO_HERRAMIENTAS).
+AUTONOMO_MAPA_QUITAR_HOJAS = True
+# Halo de las pelotas (12-nov): en el borde de una pelota el estéreo mezcla pelota y fondo y salen
+# puntos sueltos alrededor y detrás de ella que la «envolvían» de cubos. Esos píxeles no van al mapa
+# (lo de debajo de la pelota, la mesa, sí). Las pelotas tampoco cuentan como obstáculo.
+AUTONOMO_MAPA_SIN_HALO_PELOTAS = True
+AUTONOMO_MAPA_HOJA = (1.2, 1.3, 1.3)
 AUTONOMO_HERRAMIENTAS_N_ESTABLE = 5      # imágenes seguidas antes de darla por buena
 AUTONOMO_HERRAMIENTAS_OLVIDO_S  = 2.0    # sin verla este tiempo → deja de aparecer
 
@@ -1511,7 +1534,9 @@ AUTONOMO_TAREA_OPCIONES    = 3      # formas de llegar a cada sitio que se guard
 # Comprobaciones del plan
 AUTONOMO_TAREA_USAR_MAPA  = True     # esquivar (comprobar) también el mapa de obstáculos de la cámara
 AUTONOMO_TAREA_EXCLUIR_RADIO = 0.15  # m alrededor de cada MARCADOR que no cuentan como obstáculo (pelotas: su radio + 2 cm)
-AUTONOMO_TAREA_MARGEN_MAPA = 0.03   # m de margen con los obstáculos del mapa
+AUTONOMO_TAREA_MARGEN_MAPA = 0.03   # m de margen de la MANO con los obstáculos del mapa
+AUTONOMO_TAREA_MARGEN_MAPA_BRAZO = 0.015  # m de margen del brazo (sus cápsulas ya son más gordas que él)
+AUTONOMO_TAREA_GUARDAR_FALLOS = True  # si no hay plan, guardar pose + sitios + mapa en diagnosticos/
 AUTONOMO_TAREA_PASO_DEG   = 2.0     # cada cuánto se comprueba una postura en los tramos articulares
 AUTONOMO_TAREA_MARGEN_LIMITES_DEG = 2.0
 # Posturas de la mano (índices de ctrl 0..16, los de LIMITES_CTRL; lo no indicado = 0)
@@ -1530,6 +1555,35 @@ AUTONOMO_TAREA_RODEO_TOTAL_S = 25.0  # s máx. de rodeos en todo un plan
 # sobre el marcador del punto de dejada. Lo que no cuenta como obstáculo: solo la pelota (+2 cm).
 AUTONOMO_TAREA_PELOTA_HOLGURA_PALMA = 0.03  # m entre la pelota y el centro de la palma (sobre ella)
 AUTONOMO_TAREA_PELOTA_SUBIDA = 0.12         # m que sube/baja en vertical para cogerla o dejarla
+# Zona de agarre (12-nov): alrededor de la pelota (y de donde se deja) y por debajo de su parte de
+# arriba, los vóxeles del mapa no cuentan (es por donde tiene que pasar la mano y donde la profundidad
+# tiene más ruido); en su lugar la mano no puede bajar de la parte de abajo de la pelota.
+AUTONOMO_TAREA_PELOTA_ZONA_APOYO = 0.20     # m (+ el radio), en horizontal: lo que ocupa la mano abierta
+AUTONOMO_TAREA_MARGEN_APOYO = 0.005         # m por encima de la parte de abajo de la pelota
+AUTONOMO_TAREA_LEJOS_HOMBRO = 1.0           # m: más lejos, el plan avisa (límite del alcance)
+# Alcance del FR5 + OrcaHand medido con el modelo (12-nov), desde el hombro (eje del J2): brida 0,93 m,
+# centro de la palma 1,14 m, puntas de los dedos 1,26 m (con todo estirado). Desde el plato de la base
+# (15 cm por debajo del hombro) se llega a 1,29 m, pero solo estirando el brazo en la línea del J1.
+# Para coger algo con la palma mirándolo, la IK encuentra posturas hasta ~1,1 m del hombro; cómodo
+# (varias formas de llegar), < 1,0 m.
+AUTONOMO_TAREA_ALCANCE_PALMA_M = 1.14
+AUTONOMO_TAREA_LEJOS_CAMARA = 1.0           # m: más lejos, el plan avisa (profundidad con ruido)
+AUTONOMO_TAREA_RUIDO_PROF_K = 0.02          # ruido de la profundidad ≈ k·d² (m): 1 cm a 0,7 m, 2,4 cm a 1,1 m
+# Formas de cogerla (12-nov): se prueban todas las inclinaciones a la vez, desde arriba hasta de lado,
+# y se queda la que menos mueve el brazo (con algo de preferencia por llegar derecho); primero
+# rodeándola con la palma y, si no se puede, con los dedos (la palma más lejos: deja más sitio).
+AUTONOMO_TAREA_PELOTA_INCLINACION_MAX_DEG = 90.0   # 90 = de lado (la palma en horizontal)
+AUTONOMO_TAREA_PELOTA_PREFERIR_DERECHO = 0.3      # coste extra por radián de inclinación
+AUTONOMO_TAREA_PELOTA_DEDOS_EXTRA = 0.035         # m más lejos la palma «con los dedos» (0 = no probarlo)
+AUTONOMO_TAREA_PELOTA_APOYO_GRUESO = 0.06         # m bajo la pelota que aún son «la mesa con ruido»
+# Afinar (12-nov): encima de la pelota se para AFINAR_S con el brazo quieto; la cámara corrige la
+# calibración con el propio brazo y vuelve a medir la pelota; si se ha movido más de AFINAR_MIN_M
+# se rehace la bajada (si es más de AFINAR_MAX_M, se para: la pelota se ha movido de verdad).
+AUTONOMO_TAREA_PELOTA_AFINAR_S = 2.0
+AUTONOMO_TAREA_AFINAR_MIN_M = 0.005
+AUTONOMO_TAREA_AFINAR_MAX_M = 0.10
+AUTONOMO_TAREA_MARGEN_PROPIO = 0.05          # m: cubos pegados al robot al planificar = el propio robot
+AUTONOMO_TAREA_MARGEN_MAPA_MALLA = 0.02      # m entre las mallas del brazo y el mapa (el brazo va desplazado de sus cápsulas)
 AUTONOMO_TAREA_PELOTA_TACTIL_N = 0.3        # N para que un dedo cuente como «la noto»
 AUTONOMO_TAREA_PELOTA_TACTIL_DEDOS = 2      # dedos que la tienen que notar (si no, se para)
 # Posturas (ctrl 0..16: 0 muñeca · 1-3 meñique abd/mcp/pip · 4-6 anular · 7-9 corazón · 10-12 índice
@@ -1571,7 +1625,7 @@ CALIB_AUTO_RESET      = True                    # colisión → borrar error, di
 # ── Huecos que se exigen al mover el robot solo (--auto, --repetir, --verificar), en metros ──
 # Se miden con las piezas reales del gemelo (skill_shield/autonomo/choque_mano.py): la mano y la
 # placa del tablero contra el hombro, el brazo, el antebrazo y el giro del J4 del robot, contra el
-# soporte (columna, placas, pie) y contra la cabeza con la cámara, las cajas de TELEOP_FR5_* y el suelo.
+# # soporte (columna, placas, pie) y contra la cabeza con la cámara, las cajas de TELEOP_FR5_* y el suelo.
 # REGLA PRINCIPAL: ningún hueco puede cerrarse más de CALIB_MANO_ACERCAR_MAX respecto al que había
 # en la postura de inicio (la que deja el operario viendo que nada aprieta), salvo que siga siendo
 # mayor que su hueco objetivo. Y nunca baja de su mínimo. Así, lo que sobresale de la mano y no

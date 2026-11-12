@@ -103,8 +103,11 @@ def _tipo_razon(m):
         return "la muñeca tendría que doblarse más de lo que permiten sus límites (J4-J6)"
     if m.startswith(("J1", "J2", "J3")):
         return "el brazo tendría que salirse de sus límites (J1-J3)"
-    if "mapa" in m:
-        return "hay obstáculos del mapa en medio"
+    if "bajaría de la mesa" in m:
+        return "la mano bajaría más que la pelota (se metería en la mesa)"
+    if "mapa" in m or "apoyo" in m:
+        return ("la mano tocaría la mesa u otro obstáculo que ve la cámara" if m.startswith(("la mano", "la pelota"))
+                else "el brazo tocaría un obstáculo que ve la cámara")
     if m.startswith("la mano queda"):
         return "la mano queda demasiado cerca del propio brazo o del soporte"
     return "chocaría (" + m.split(" (")[0] + ")"
@@ -141,6 +144,7 @@ class Fase:
         self.mano = mano
         self.dur = dur
         self.comprobar = comprobar          # p. ej. "agarre": la Tarea mira los táctiles al empezarla
+        self.mano_chk = (None, None)        # (postura de la mano, carga) con la que se comprobó el tramo
 
     def __repr__(self):
         que = (f"mano {self.mano}" if self.mano else f"{len(self.qs)} posturas" if self.qs is not None
@@ -153,6 +157,7 @@ class Plan:
         self.q0 = np.asarray(q0, float)
         self.fases = list(fases)
         self.nombre = nombre
+        self.pelota = None                  # (pelotas) lo necesario para afinar la bajada al ejecutar
 
     @property
     def q_final(self):
@@ -204,7 +209,22 @@ class Planificador:
         self._arbol, self._res = None, 0.02
         # la mano contra el mapa: con los puntos de sus mallas (marco de wrist3), no con su cápsula
         P = getattr(self.choque, "mano", None)
-        self._mano_pts = None if P is None else np.asarray(P, float)[::max(1, len(P) // 400)]
+        self._mano_pts0 = None if P is None else np.asarray(P, float)[::max(1, len(P) // 400)]
+        self._mano_pts = self._mano_pts0          # la que se usa ahora (cambia con la postura de la fase)
+        self._carga = None                         # puntos de lo que lleva la mano (marco de wrist3)
+        self._ruta_xml = g.get("RUTA_XML")
+        self._posturas = {k: _postura_cfg(g, c, d) for k, c, d in (
+            ("pelota_abierta", "AUTONOMO_TAREA_MANO_PELOTA_ABIERTA", MANO_PELOTA_ABIERTA),
+            ("pelota_cerrada", "AUTONOMO_TAREA_MANO_PELOTA_CERRADA", MANO_PELOTA_CERRADA))}
+        self._nubes = {}
+        self._C = np.zeros((0, 3))                # vóxeles ocupados (ya sin lo excluido)
+        self._arbol_suave = None                  # (ya no se usa: ver zonas_apoyo)
+        self._C_quitado = np.zeros((0, 3))        # vóxeles quitados por «excluir» (la pelota y lo de debajo)
+        self._suelo = None                        # (árbol 2D de las columnas quitadas, z mínima de cada una)
+        self._choques = []                        # vóxeles del mapa con los que ha chocado la mano (para explicarlo)
+        self.margen_suave = float(_g(g, "AUTONOMO_TAREA_MARGEN_APOYO", 0.005))
+        # las cápsulas del brazo ya son más gordas que el brazo de verdad: con el mapa basta menos margen
+        self.margen_mapa_brazo = float(_g(g, "AUTONOMO_TAREA_MARGEN_MAPA_BRAZO", 0.015))
         # rodear obstáculos (paso 8)
         self.rodeo = bool(_g(g, "AUTONOMO_TAREA_RODEAR", True))
         self.rodeo_s = float(_g(g, "AUTONOMO_TAREA_RODEO_S", 6.0))           # por tramo
@@ -216,20 +236,125 @@ class Planificador:
         # pelotas
         self.pel_holgura = float(_g(g, "AUTONOMO_TAREA_PELOTA_HOLGURA_PALMA", 0.03))
         self.pel_subida = float(_g(g, "AUTONOMO_TAREA_PELOTA_SUBIDA", 0.12))
+        self.zona_apoyo = float(_g(g, "AUTONOMO_TAREA_PELOTA_ZONA_APOYO", 0.20))   # + radio, en horizontal
+        self.apoyo_grueso = float(_g(g, "AUTONOMO_TAREA_PELOTA_APOYO_GRUESO", 0.06))  # capa de mesa con ruido
+        self.grosor_suelo = float(_g(g, "AUTONOMO_TAREA_PELOTA_GROSOR_SUELO", 0.08))  # grosor de ese «suelo»
+        self.pel_inc_max = float(_g(g, "AUTONOMO_TAREA_PELOTA_INCLINACION_MAX_DEG", 90.0))  # 90 = de lado
+        self.pel_dedos = float(_g(g, "AUTONOMO_TAREA_PELOTA_DEDOS_EXTRA", 0.035))     # 0 = sin «con los dedos»
+        self.margen_propio = float(_g(g, "AUTONOMO_TAREA_MARGEN_PROPIO", 0.05))     # cubos pegados al robot: él
+        self.margen_mapa_malla = float(_g(g, "AUTONOMO_TAREA_MARGEN_MAPA_MALLA", 0.02))
+        # puntos de las mallas del brazo (marco de su eslabón), para mirarlo contra el mapa
+        self._brazo_pts = []
+        arboles = getattr(self.choque, "arboles", None) or {}
+        if arboles:
+            from skill_shield.autonomo.choque_mano import reducir
+            nombres = {"upperarm_Link": "el brazo", "forearm_Link": "el antebrazo", "wrist1_Link": "la muñeca"}
+            self._brazo_pts = [(marco, reducir(np.asarray(a.data), 0.02), nombres[k])
+                               for k, (marco, a) in arboles.items() if k in nombres]
+        self.quitados_propios = 0
+        self.afinar_s = float(_g(g, "AUTONOMO_TAREA_PELOTA_AFINAR_S", 2.0))   # 0 = sin parar a afinar
+        self.pref_derecho = float(_g(g, "AUTONOMO_TAREA_PELOTA_PREFERIR_DERECHO", 0.3))  # coste por rad de inclinación
+        self.lejos_hombro = float(_g(g, "AUTONOMO_TAREA_LEJOS_HOMBRO", 1.0))
+        self.alcance_palma = float(_g(g, "AUTONOMO_TAREA_ALCANCE_PALMA_M", 1.14))   # máx. hombro → centro de la palma
+        self.lejos_camara = float(_g(g, "AUTONOMO_TAREA_LEJOS_CAMARA", 1.0))
+        self.k_ruido = float(_g(g, "AUTONOMO_TAREA_RUIDO_PROF_K", 0.02))     # m de ruido por m² de distancia
+        self.T_cam = None if T_mundo_cam is None else np.asarray(T_mundo_cam, float)
+        self.dejar_de_pie = False
+        self.modo_pelota = None                   # cómo se cogió la pelota en el último plan
 
     # ── mapa ──
     def poner_mapa(self, centros, res, excluir=()):
         """centros: vóxeles ocupados (N x 3). excluir: [(centro, radio)] que no cuentan."""
         C = np.asarray(centros if centros is not None else [], float).reshape(-1, 3)
+        quitado = []
         for c, r in excluir:
-            C = C[np.linalg.norm(C - np.asarray(c, float), axis=1) > float(r)]
-        if len(C):
-            from scipy.spatial import cKDTree
-            self._arbol = cKDTree(C)
-        else:
-            self._arbol = None
+            dentro = np.linalg.norm(C - np.asarray(c, float), axis=1) <= float(r)
+            quitado.append(C[dentro])
+            C = C[~dentro]
+        self._C = C
+        self._C_quitado = np.vstack(quitado) if quitado else np.zeros((0, 3))
         self._res = float(res or 0.02)
+        self.zonas_apoyo(())
         return len(C)
+
+    def zonas_apoyo(self, zonas):
+        """zonas: [(centro de la pelota, radio horizontal, radio de la pelota)]. Es el sitio por el que
+        TIENE que pasar la mano para cogerla (o dejarla): alrededor de la pelota y por debajo de
+        su parte de arriba. Ahí solo puede haber la pelota y la mesa en la que está, y es justo
+        donde la profundidad tiene más ruido (bordes de la pelota, mesa vista en ángulo y de
+        lejos: sale como una capa de 4-6 cm de grueso). Así que ahí los vóxeles NO cuentan y, en
+        su lugar, nada de la mano (ni la pelota que lleva) puede bajar de la parte de abajo de la
+        pelota (+ AUTONOMO_TAREA_MARGEN_APOYO): un suelo plano donde está la mesa de verdad.
+        Lo que haya más alto que la pelota (una caja al lado, una bolsa…) sigue contando, y lo
+        que esté muy por debajo también (AUTONOMO_TAREA_PELOTA_APOYO_GRUESO + el ruido): si la
+        pelota está en alto (en una caja, en la mano de alguien), la mesa de abajo y el brazo de
+        quien la sujeta son obstáculos de verdad y no ponen «suelo» a la altura de la pelota."""
+        from scipy.spatial import cKDTree
+        C, Q = self._C, self._C_quitado
+        fuera = np.zeros(len(C), bool)
+        suelo_C, suelo_Q = np.full(len(C), np.inf), np.full(len(Q), np.inf)
+        for c, rh, rb in zonas:
+            c = np.asarray(c, float)
+            # hasta un vóxel por encima de la pelota (su parte de arriba cae en el vóxel de encima) +
+            # el ruido de la profundidad a esa distancia (crece con la distancia al cuadrado)
+            techo = c[2] + float(rb) + self._res + self.ruido_prof(c)
+            fondo = c[2] - float(rb) - self.apoyo_grueso - self._res - self.ruido_prof(c)
+            z_min = float(c[2] - rb + self.margen_suave)
+            en = ((np.linalg.norm(C[:, :2] - c[:2], axis=1) < float(rh)) & (C[:, 2] < techo)
+                  & (C[:, 2] > fondo))
+            fuera |= en
+            suelo_C[en] = np.minimum(suelo_C[en], z_min)      # si se solapan, el suelo más bajo
+            enq = (np.linalg.norm(Q[:, :2] - c[:2], axis=1) < float(rh)) & (Q[:, 2] > fondo)
+            suelo_Q[enq] = np.minimum(suelo_Q[enq], z_min)
+        self._arbol = cKDTree(C[~fuera]) if (~fuera).any() else None
+        # el suelo solo está donde la cámara vio algo (la mesa, o la pelota apoyada en ella):
+        # donde no hay nada no se inventa una mesa
+        # y siempre, justo debajo de cada pelota (lo que ocupa), lo que la sostiene: aunque la cámara no
+        # lo vea (la tapa la propia pelota, o se quitó su halo del mapa), los dedos no pasan por debajo
+        D = []
+        for c, rh, rb in zonas:
+            c = np.asarray(c, float)
+            g_ = np.arange(-float(rb), float(rb) + 1e-9, 0.5 * self._res)
+            X, Y = np.meshgrid(g_, g_)
+            k = X ** 2 + Y ** 2 <= float(rb) ** 2
+            D.append(np.column_stack([X[k] + c[0], Y[k] + c[1], np.full(k.sum(), c[2] - rb + self.margen_suave)]))
+        D = np.vstack(D) if D else np.zeros((0, 3))
+        S = np.vstack([C[fuera], Q[np.isfinite(suelo_Q)], np.column_stack([D[:, :2], np.zeros(len(D))])])
+        z = np.r_[suelo_C[fuera], suelo_Q[np.isfinite(suelo_Q)], D[:, 2]]
+        self._suelo = (cKDTree(S[:, :2]), z) if len(S) else None
+        self._arbol_suave = None
+
+    def ruido_prof(self, p):
+        """Ruido (m) de la profundidad estéreo en el punto p: k · distancia² a la cámara."""
+        if self.T_cam is None:
+            return 0.0
+        d = float(np.linalg.norm(np.asarray(p, float) - self.T_cam[:3, 3]))
+        return self.k_ruido * d * d
+
+    def _nube_postura(self, clave):
+        """Puntos de la mano (marco de wrist3) con los dedos en la postura «clave» (None = a 0)."""
+        if clave is None or self._ruta_xml is None or self._mano_pts0 is None:
+            return self._mano_pts0
+        if clave not in self._nubes:
+            from skill_shield.autonomo.choque_mano import nube_mano
+            P = nube_mano(self._ruta_xml, tuple(sorted(self._posturas[clave].items())))
+            self._nubes[clave] = P[::max(1, len(P) // 400)]
+        return self._nubes[clave]
+
+    def con_mano(self, clave=None, carga=None):
+        """Contexto: comprobar las posturas con la mano en la postura «clave» y llevando «carga»
+        (puntos en el marco de wrist3, p. ej. la pelota cogida)."""
+        pl = self
+
+        class _Ctx:
+            def __enter__(self):
+                self.antes = (pl._mano_pts, pl._carga)
+                pl._mano_pts, pl._carga = pl._nube_postura(clave), carga
+                return pl
+
+            def __exit__(self, *a):
+                pl._mano_pts, pl._carga = self.antes
+        return _Ctx()
 
     # ── ¿vale esta postura? ──
     def motivo(self, q):
@@ -247,21 +372,54 @@ class Planificador:
         m = self.choque.motivo(q)
         if m:
             return m
-        if self._arbol is not None:
-            umbral = self.margen_mapa + 0.5 * self._res
-            if self._mano_pts is not None:
-                Tb = marcos[5]
-                d, _ = self._arbol.query(self._mano_pts @ Tb[:3, :3].T + Tb[:3, 3])
+        if self._suelo is not None:
+            arbol2d, z_suelo = self._suelo
+            Tb = marcos[5]
+            for pts, que, tol in ((self._mano_pts, "la mano", 0.0),
+                                  (self._carga, "la pelota que lleva", 2 * self.margen_suave)):   # apoyada: sí toca
+                if pts is None:
+                    continue
+                P = pts @ Tb[:3, :3].T + Tb[:3, 3] + np.array([0.0, 0.0, tol])
+                d, i = arbol2d.query(P[:, :2], distance_upper_bound=self._res)
+                sobre = np.isfinite(d)
+                # el «suelo» es una capa (la mesa o lo que sostiene la pelota), no infinito hacia
+                # abajo: muy por debajo (al llevar la pelota a una dejada más baja) no cuenta
+                zs = z_suelo[i[sobre]] if sobre.any() else None
+                if sobre.any() and np.any((P[sobre, 2] < zs) & (P[sobre, 2] > zs - self.grosor_suelo)):
+                    return f"{que} bajaría de la mesa (por debajo de la pelota)"
+        for arbol, margen, m_brazo, donde in (
+                (self._arbol, self.margen_mapa, self.margen_mapa_brazo, "un obstáculo del mapa"),
+                (self._arbol_suave, self.margen_suave, self.margen_suave, "la superficie de apoyo")):
+            if arbol is None:
+                continue
+            umbral = margen + 0.5 * self._res
+            Tb = marcos[5]
+            for pts, que in ((self._mano_pts, "la mano"), (self._carga, "la pelota que lleva")):
+                if pts is None:
+                    continue
+                d, i = arbol.query(pts @ Tb[:3, :3].T + Tb[:3, 3])
                 if float(np.min(d)) < umbral:
-                    return "la mano toca un obstáculo del mapa"
+                    if arbol is self._arbol and len(self._choques) < 5000:
+                        self._choques.append(arbol.data[i[int(np.argmin(d))]])
+                    return f"{que} toca {donde}"
+            if self._brazo_pts:
+                # el brazo con los puntos de sus MALLAS (12-nov): la cápsula «brazo» va por la línea
+                # entre joints, pero el tramo del brazo del FR5 va desplazado ~14 cm de ella
+                for marco, pts, nombre in self._brazo_pts:
+                    T = marcos[marco]
+                    d, _ = arbol.query(pts @ T[:3, :3].T + T[:3, 3])
+                    if float(np.min(d)) < self.margen_mapa_malla + 0.5 * self._res:
+                        return f"{nombre} toca {donde}"
             for cap in self.modelo.capsulas(q, marcos):
                 if cap.nombre == "base" or (cap.nombre == "mano" and self._mano_pts is not None):
                     continue
+                if self._brazo_pts and cap.nombre in ("brazo", "antebrazo"):
+                    continue                              # ya mirados con sus mallas
                 n = max(2, int(math.ceil(np.linalg.norm(cap.b - cap.a) / 0.02)) + 1)
                 pts = cap.a + np.linspace(0.0, 1.0, n)[:, None] * (cap.b - cap.a)
-                d, _ = self._arbol.query(pts)
-                if float(np.min(d)) < cap.r + self.margen_mapa + 0.5 * self._res:
-                    return f"{NOMBRES.get(cap.nombre, cap.nombre)} toca un obstáculo del mapa"
+                d, _ = arbol.query(pts)
+                if float(np.min(d)) < cap.r + m_brazo + 0.5 * self._res:
+                    return f"{NOMBRES.get(cap.nombre, cap.nombre)} toca {donde}"
         return None
 
     # ── IK ──
@@ -480,7 +638,7 @@ class Planificador:
             inc += self.inc_paso
         return grupos
 
-    def _opciones(self, T_m, q_ref, T_pose, intentar):
+    def _opciones(self, T_m, q_ref, T_pose, intentar, todas=False):
         """Hasta n_opciones formas distintas de llegar (q de llegada, resultado de intentar,
         inclinación), de menos a más inclinadas y, dentro de cada inclinación, de la que menos
         mueve el brazo a la que más. intentar(q_llegada, a) da el tramo recto o el ciclo de uso
@@ -488,6 +646,32 @@ class Planificador:
         razones, fallos = Counter(), Counter()
         opciones = []
         grupos = self._direcciones(T_m[:3, 2])
+        if todas:
+            # todas las inclinaciones a la vez (pelotas, 12-nov): la mejor es la que menos mueve el
+            # brazo, con un poco de preferencia por llegar derecho; de arriba, de lado o como sea
+            cands = []
+            for inc, dirs in grupos:
+                for a in dirs:
+                    for ang in self._vueltas():
+                        for q_l in self.ik(T_pose(a, ang), q_ref, 2, razones):
+                            cands.append((self._coste(q_l, q_ref) + self.pref_derecho * math.radians(inc),
+                                          q_l, a, inc))
+            cands.sort(key=lambda c: c[0])
+            probados = 0
+            for _, q_l, a, inc in cands:
+                if any(float(np.max(np.abs(q_l - o[0]))) < math.radians(15) for o in opciones):
+                    continue
+                if probados >= self.n_probar * 3:
+                    break
+                probados += 1
+                try:
+                    opciones.append((q_l, intentar(q_l, a), inc))
+                except ErrorPlan as e:
+                    fallos[str(e)] += 1
+                    continue
+                if len(opciones) >= self.n_opciones:
+                    break
+            return opciones, (razones, fallos)
         for g_i, (inc, dirs) in enumerate(grupos):
             cands = []
             for a in dirs:
@@ -517,7 +701,10 @@ class Planificador:
         razones, fallos = info
         txt = f"no encuentro cómo {que}"
         if razones:
-            r, _ = razones.most_common(1)[0]
+            # el motivo más «avanzado» (motivo() mira en orden: límites → choques → mano → mapa):
+            # si alguna postura solo fallaba por el mapa, eso es lo que hay que contar
+            orden = ("cámara", "la mano queda", "chocaría", "J1-J3", "J4-J6")
+            r = min(razones, key=lambda k: (next((i for i, o in enumerate(orden) if o in k), 9), -razones[k]))
             txt += f": casi siempre {r}"
             if r.startswith("la muñeca"):
                 txt += (" (el marcador está demasiado cerca del robot o mirándolo de frente: aléjalo "
@@ -533,7 +720,8 @@ class Planificador:
             T_m, q_ref, lambda a, ang: self.T_palma(T_m, ang, self.d_previa, a),
             lambda q_l, a: self.recta(q_l, OFFSET_PALMA_ORCA, p_m + _unit(a) * self.d_agarre, f"acercar a {que}"))
         if not ops:
-            raise self._no_encuentro(f"poner la mano delante de {que}", info)
+            raise self._con_aviso(self._no_encuentro(f"poner la mano delante de {que}", info), p_m,
+                                  "acércalo al robot")
         return ops
 
     def opciones_uso(self, T_m, q_ref):
@@ -545,7 +733,8 @@ class Planificador:
             return self._ciclo_uso(q_l, p_m + a * self.uso_cerca, p_m + a * self.uso_lejos, p_m + a * self.uso_previa)
         ops, info = self._opciones(T_m, q_ref, lambda a, ang: self.T_punta(T_m, ang, self.uso_previa, a), ciclo)
         if not ops:
-            raise self._no_encuentro("usar la herramienta en el punto de uso", info)
+            raise self._con_aviso(self._no_encuentro("usar la herramienta en el punto de uso", info), p_m,
+                                  "acércalo al robot")
         return ops
 
     def _ciclo_uso(self, q_l, cerca, lejos, previa):
@@ -575,8 +764,9 @@ class Planificador:
         return fases
 
     # ── plan completo ──
-    def _combinar(self, q0, sitios):
-        """sitios: [(nombre del tramo para llegar, [(q_llegada, q_salida, datos, inclinación)])].
+    def _combinar(self, q0, sitios, mano_vuelta=None):
+        """sitios: [(nombre del tramo para llegar, [(q_llegada, q_salida, datos, inclinación)])
+        [, (postura de la mano, carga) en ese tramo]]. mano_vuelta: lo mismo para la vuelta.
         Prueba combinaciones (una opción por sitio) hasta que todos los tramos entre ellos y la
         vuelta a q0 están libres. Primero sin rodeos (rápido) y, si no hay, permitiéndolos.
         Devuelve ([opción elegida por sitio], [tramo para llegar a cada sitio], tramo de vuelta)."""
@@ -587,11 +777,12 @@ class Planificador:
             self._permitir_rodeo = rodeo
             cache = {}
 
-            def tramo(qa, qb, nombre):
-                clave = (qa.tobytes(), qb.tobytes())
+            def tramo(qa, qb, nombre, mano=None):
+                clave = (qa.tobytes(), qb.tobytes(), nombre)
                 if clave not in cache:
                     try:
-                        cache[clave] = self.conectar(qa, qb, q0, nombre)
+                        with self.con_mano(*(mano or (None, None))):
+                            cache[clave] = self.conectar(qa, qb, q0, nombre)
                     except ErrorPlan as e:
                         cache[clave] = e
                 r = cache[clave]
@@ -602,11 +793,12 @@ class Planificador:
 
             def buscar(k, q_actual, elegidas, tramos):
                 if k == len(sitios):
-                    vuelta = tramo(q_actual, q0, "volver al inicio")
+                    vuelta = tramo(q_actual, q0, "volver al inicio", mano_vuelta)
                     return None if vuelta is None else (elegidas, tramos, vuelta)
-                nombre, opciones = sitios[k]
+                nombre, opciones = sitios[k][:2]
+                mano = sitios[k][2] if len(sitios[k]) > 2 else None
                 for op in opciones:
-                    ir = tramo(q_actual, op[0], nombre)
+                    ir = tramo(q_actual, op[0], nombre, mano)
                     if ir is None:
                         continue
                     r = buscar(k + 1, op[1], elegidas + [op], tramos + [ir])
@@ -623,7 +815,29 @@ class Planificador:
     def _empezar(self, q0):
         q0 = np.asarray(q0, float)
         self.inclinaciones, self.rodeos = [], 0
+        self._choques = []
         self._rodeo_resto = self.rodeo_total_s
+        self._mano_pts, self._carga = self._mano_pts0, None
+        # donde está ahora el robot no puede haber nada: si quedan cubos ahí (el brazo visto con
+        # retraso o con la calibración algo desajustada), son el propio brazo
+        if len(self._C):
+            caps = self.modelo.capsulas(q0)
+            A = np.array([c.a for c in caps]); B = np.array([c.b for c in caps])
+            R = np.array([c.r for c in caps]) + self.margen_propio
+            lejos = np.ones(len(self._C), bool)
+            for a, b, rr in zip(A, B, R):
+                ab = b - a
+                t = np.clip((self._C - a) @ ab / max(float(ab @ ab), 1e-12), 0.0, 1.0)
+                lejos &= np.linalg.norm(self._C - (a + t[:, None] * ab), axis=1) > rr
+            if self._brazo_pts:
+                from scipy.spatial import cKDTree
+                marcos = self.c.fk_marcos(q0)
+                M = np.vstack([P @ marcos[k][:3, :3].T + marcos[k][:3, 3] for k, P, _ in self._brazo_pts])
+                d, _ = cKDTree(M).query(self._C, distance_upper_bound=self.margen_propio + 0.5 * self._res)
+                lejos &= ~np.isfinite(d)
+            self.quitados_propios = int((~lejos).sum())
+            self._C = self._C[lejos]
+        self.zonas_apoyo(())
         self.choque.fijar_inicio(q0)
         m = self.motivo(q0)
         if m:
@@ -659,47 +873,209 @@ class Planificador:
         T[:3, 3] = p
         return T
 
+    def _aviso_lejos(self, p, accion="acércala"):
+        """Si el sitio está lejos (del hombro o de la cámara), lo dice: suele ser la causa."""
+        avisos = []
+        m = self.c.fk_marcos(np.zeros(6))
+        d_h = float(np.linalg.norm(np.asarray(p) - m[1][:3, 3]))
+        d_b = float(np.linalg.norm(np.asarray(p) - m[0][:3, 3]))
+        if d_h > self.lejos_hombro:
+            donde = f"está a {d_h:.2f} m del hombro (eje del J2; {d_b:.2f} m desde la base del brazo)"
+            if d_h < self.alcance_palma:
+                avisos.append(donde + ", al límite del alcance (con el brazo casi estirado la muñeca apenas "
+                              "puede girar)")
+            else:
+                avisos.append(donde + f", FUERA DEL ALCANCE: la palma llega como mucho a {self.alcance_palma:.2f} m "
+                              f"del centro del hombro con el brazo estirado del todo (las puntas de los dedos, "
+                              f"{self.alcance_palma + 0.12:.2f} m)")
+        if self.T_cam is not None:
+            d_c = float(np.linalg.norm(np.asarray(p) - self.T_cam[:3, 3]))
+            if d_c > self.lejos_camara:
+                avisos.append(f"está a {d_c:.2f} m de la cámara, donde la profundidad tiene ruido de varios cm")
+        return (" · OJO: " + " y ".join(avisos) + f": {accion}") if avisos else ""
+
+    def _con_aviso(self, texto, p, accion="acércala"):
+        """El error con el aviso de distancia; si está fuera del alcance, eso lo primero (es la causa)."""
+        a = self._aviso_lejos(p, accion)
+        if "FUERA DEL ALCANCE" in a:
+            return ErrorPlan(a[len(" · OJO: "):] + " · (detalle: " + str(texto) + ")")
+        return ErrorPlan(str(texto) + a)
+
+    def _que_estorba(self, c, r):
+        """Describe lo del mapa con lo que ha chocado la mano cerca de la pelota (a < 35 cm):
+        a qué distancia está y cuánto se levanta sobre la mesa. Vacío si no ha chocado con nada."""
+        if not self._choques:
+            return ""
+        V = np.asarray(self._choques, float)
+        V = V[np.linalg.norm(V[:, :2] - c[:2], axis=1) < 0.35]
+        if not len(V):
+            return ""
+        dh = np.linalg.norm(V[:, :2] - c[:2], axis=1)
+        # lo alto del objeto: los vóxeles del mapa en las columnas de los choques
+        C = self._C
+        cerca = np.zeros(len(C), bool)
+        for v in np.unique(np.round(V[:, :2] / self._res).astype(int), axis=0) * self._res:
+            cerca |= np.linalg.norm(C[:, :2] - v, axis=1) < 1.5 * self._res
+        alto = (float(C[cerca, 2].max()) if cerca.any() else float(V[:, 2].max())) + 0.5 * self._res - (c[2] - r)
+        return (f" · lo que estorba (el mapa lo ve a unos {100 * float(np.median(dh)):.0f} cm de la pelota, "
+                f"de unos {100 * max(alto, 0.0):.0f} cm de alto) no deja sitio a la mano abierta: "
+                f"separa la pelota de eso o quítalo")
+
+    def _pelota_en_mano(self, r, extra=0.0):
+        """Puntos de la pelota cogida, en el marco de wrist3 (centro a r + holgura (+ extra, si se
+        coge con los dedos) delante de la palma)."""
+        m = self.c.fk_marcos(np.zeros(6))
+        T_w_mm = np.linalg.inv(m[5]) @ m[6]                     # wrist3 → mano_mount (fijo)
+        c = OFFSET_PALMA_ORCA + np.array([-(r + self.pel_holgura + extra), 0.0, 0.0])   # la palma mira a −X
+        k = np.arange(120) + 0.5                                # puntos repartidos por la esfera
+        phi, th = np.arccos(1 - 2 * k / 120), math.pi * (1 + 5 ** 0.5) * k
+        S = c + r * np.column_stack([np.cos(th) * np.sin(phi), np.sin(th) * np.sin(phi), np.cos(phi)])
+        return S @ T_w_mm[:3, :3].T + T_w_mm[:3, 3]
+
     def planificar_pelota(self, q0, T_pelota, diametro, T_dejada):
-        """Coger una pelota desde arriba, apretarla un poco y dejarla en el punto de dejada."""
+        """Coger una pelota, apretarla un poco y dejarla en el punto de dejada. Se prueban, por
+        orden, varias formas de cogerla y, para cada una, de llegar:
+          · rodeándola con la mano (la palma pegada a la pelota) y, si no se puede,
+          · con los dedos (la palma AUTONOMO_TAREA_PELOTA_DEDOS_EXTRA más lejos: la cogen las
+            yemas, deja más sitio alrededor);
+          · desde arriba primero y, si no, cada vez más inclinada hasta de lado
+            (AUTONOMO_TAREA_PELOTA_INCLINACION_MAX_DEG; 90 = la palma en horizontal).
+        Cada tramo se comprueba con la mano en la postura que tiene en ese momento (abierta al ir
+        y acercarse; cerrada y con la pelota al retirarse, llevarla y dejarla), y alrededor de la
+        pelota y del sitio de dejada la mesa se trata aparte (zonas_apoyo)."""
+        modos = [("rodeándola", 0.0)] + ([("con los dedos", self.pel_dedos)] if self.pel_dedos > 0 else [])
+        errores = []
+        inc_antes = self.inc_max
+        self.inc_max = self.pel_inc_max
+        try:
+            for nombre, extra in modos:
+                try:
+                    plan = self._plan_pelota(q0, T_pelota, diametro, T_dejada, extra)
+                    plan.nombre = f"coger ({nombre}), apretar y dejar la pelota"
+                    self.modo_pelota = nombre
+                    return plan
+                except ErrorPlan as e:
+                    errores.append((nombre, str(e)))
+        finally:
+            self.inc_max = inc_antes
+        if len(errores) == 1:
+            raise ErrorPlan(errores[0][1])
+        # el de la primera forma (la normal) y, resumido, que la otra tampoco
+        raise ErrorPlan(errores[0][1] + " · tampoco " + " ni ".join(n for n, _ in errores[1:]))
+
+    def _plan_pelota(self, q0, T_pelota, diametro, T_dejada, extra=0.0):
         q0 = self._empezar(q0)
         r = float(diametro) / 2.0
-        d_palma = r + self.pel_holgura                 # centro de la pelota ↔ centro de la palma
+        d_palma = r + self.pel_holgura + extra         # centro de la pelota ↔ centro de la palma
         c = np.asarray(T_pelota, float)[:3, 3]
-        T_p = self._marco_arriba(c)
+        # dejar: si el marcador está tumbado, la pelota encima; si está de pie (en una hoja), se
+        # suelta delante de él y cae. Siempre llegando desde arriba.
+        Tm_d = np.asarray(T_dejada, float)
+        n_d = _unit(Tm_d[:3, 2])
+        self.dejar_de_pie = bool(n_d[2] < math.cos(math.radians(45)))
+        c_d = Tm_d[:3, 3] + (n_d * (r + 0.03) if self.dejar_de_pie else np.array([0.0, 0.0, r + 0.01]))
+        T_p, T_d = self._marco_arriba(c), self._marco_arriba(c_d)
+        # (la pelota se suelta 1 cm por encima del marcador de dejada: su «suelo» es el marcador)
+        self.zonas_apoyo([(c, r + self.zona_apoyo, r), (c_d, r + self.zona_apoyo, r + 0.01)])
+        abierta, cerrada = ("pelota_abierta", None), ("pelota_cerrada", self._pelota_en_mano(r, extra))
 
-        def bajar_a(Tm, que):
-            centro = Tm[:3, 3]
-            return lambda q_l, a: self.recta(q_l, OFFSET_PALMA_ORCA, centro + _unit(a) * d_palma, f"bajar {que}")
-        ops_p, info = self._opciones(T_p, q0, lambda a, ang: self.T_palma(T_p, ang, d_palma + self.pel_subida, a),
-                                     bajar_a(T_p, "a la pelota"))
+        def coger(q_l, a):
+            centro = c + _unit(a) * d_palma
+            with self.con_mano(*abierta):
+                qs = self.recta(q_l, OFFSET_PALMA_ORCA, centro, "bajar a la pelota")
+            with self.con_mano(*cerrada):                # al subir ya la lleva
+                for q in qs[::-1]:
+                    m = self.motivo(q)
+                    if m:
+                        raise ErrorPlan(f"subir con la pelota: {m}")
+            return qs
+
+        def dejar(q_l, a):
+            centro = c_d + _unit(a) * d_palma
+            with self.con_mano(*cerrada):
+                qs = self.recta(q_l, OFFSET_PALMA_ORCA, centro, "bajar a dejarla")
+            with self.con_mano(*abierta):                # ya la ha soltado
+                for q in qs[::-1]:
+                    m = self.motivo(q)
+                    if m:
+                        raise ErrorPlan(f"subir tras dejarla: {m}")
+            return qs
+        with self.con_mano(*abierta):
+            ops_p, info = self._opciones(T_p, q0, lambda a, ang: self.T_palma(T_p, ang, d_palma + self.pel_subida, a),
+                                         coger, todas=True)
         if not ops_p:
-            raise self._no_encuentro("llegar a la pelota desde arriba", info)
-        # dejar: la pelota apoyada sobre el marcador (su centro a r de él, por su lado de delante)
-        T_d = np.array(T_dejada, float)
-        T_d[:3, 3] = T_d[:3, 3] + _unit(T_d[:3, 2]) * (r + 0.005)
-        ops_d, info = self._opciones(T_d, q0, lambda a, ang: self.T_palma(T_d, ang, d_palma + self.pel_subida, a),
-                                     bajar_a(T_d, "al punto de dejada"))
+            raise self._con_aviso(str(self._no_encuentro("llegar a la pelota (ni desde arriba ni de lado)", info))
+                                  + self._que_estorba(c, r), c)
+        with self.con_mano(*cerrada):
+            ops_d, info = self._opciones(T_d, q0, lambda a, ang: self.T_palma(T_d, ang, d_palma + self.pel_subida, a),
+                                         dejar, todas=True)
         if not ops_d:
-            raise self._no_encuentro("dejar la pelota en el punto de dejada", info)
-        (p, d), (ir_p, ir_d), vuelta = self._combinar(
-            q0, [("ir a la pelota", [(q, q, qs, inc) for q, qs, inc in ops_p]),
-                 ("ir al punto de dejada", [(q, q, qs, inc) for q, qs, inc in ops_d])])
+            raise self._con_aviso(self._no_encuentro("llevar la pelota al punto de dejada", info), c_d,
+                                  "acerca el punto de dejada")
+        self._choques = []                                # solo los del camino
+        try:
+            (p, d), (ir_p, ir_d), vuelta = self._combinar(
+                q0, [("ir a la pelota", [(q, q, qs, inc) for q, qs, inc in ops_p], abierta),
+                     ("ir al punto de dejada", [(q, q, qs, inc) for q, qs, inc in ops_d], cerrada)],
+                mano_vuelta=abierta)
+        except ErrorPlan as e:
+            raise self._con_aviso(str(e) + self._que_estorba(c, r), c) from None
         self.inclinaciones = [p[3], d[3]]
-        fases = [Fase("Abrir la mano", mano="pelota_abierta"),
-                 Fase("Ir encima de la pelota", ir_p),
-                 Fase("Bajar a la pelota", p[2]),
-                 Fase("Cerrar la mano", mano="pelota_cerrada"),
-                 Fase("Apretar un poco", mano="pelota_apretar"),
-                 Fase("Aflojar", mano="pelota_cerrada"),
-                 Fase("Comprobar que la tengo", dur=0.3, comprobar="agarre"),
-                 Fase("Subir con la pelota", p[2][::-1]),
-                 Fase("Ir al punto de dejada", ir_d),
-                 Fase("Bajar a dejarla", d[2]),
-                 Fase("Abrir la mano (dejar)", mano="pelota_abierta"),
-                 Fase("Subir", d[2][::-1]),
-                 Fase("Volver al inicio", vuelta),
-                 Fase("Mano en reposo", mano="abierta")]
-        return Plan(q0, fases, nombre="coger, apretar y dejar la pelota")
+        f_ir, f_bajar, f_subir = (Fase("Ir encima de la pelota", ir_p), Fase("Bajar a la pelota", p[2]),
+                                  Fase("Subir con la pelota", p[2][::-1]))
+        f_llevar, f_dejar, f_alejar, f_volver = (
+            Fase("Ir al punto de dejada", ir_d),
+            Fase("Bajar a dejarla" if not self.dejar_de_pie else "Bajar delante del marcador", d[2]),
+            Fase("Subir", d[2][::-1]), Fase("Volver al inicio", vuelta))
+        # parada encima de la pelota para afinar con la cámara (12-nov): con el brazo quieto y la
+        # mano al lado de la pelota, la cámara corrige la calibración con el brazo y vuelve a medir
+        # la pelota; si se ha movido, se rehace la bajada (Tarea._afinar)
+        afinar = [Fase("Afinar con la cámara", dur=self.afinar_s, comprobar="afinar")] if self.afinar_s > 0 else []
+        fases = ([Fase("Abrir la mano", mano="pelota_abierta"), f_ir] + afinar +
+                 [f_bajar,
+                  Fase("Cerrar la mano", mano="pelota_cerrada"),
+                  Fase("Apretar un poco", mano="pelota_apretar"),
+                  Fase("Aflojar", mano="pelota_cerrada"),
+                  Fase("Comprobar que la tengo", dur=0.3, comprobar="agarre"),
+                  f_subir, f_llevar, f_dejar,
+                  Fase("Abrir la mano (dejar)", mano="pelota_abierta"),
+                  f_alejar, f_volver,
+                  Fase("Mano en reposo", mano="abierta")])
+        for f, chk in ((f_ir, abierta), (f_bajar, abierta), (f_subir, cerrada), (f_llevar, cerrada),
+                       (f_dejar, cerrada), (f_alejar, abierta), (f_volver, abierta)):
+            f.mano_chk = chk
+        plan = Plan(q0, fases, nombre="coger, apretar y dejar la pelota")
+        plan.pelota = dict(c=c.copy(), r=r, d_palma=d_palma, extra=extra,
+                           i_bajar=fases.index(f_bajar), i_subir=fases.index(f_subir),
+                           c_dejada=c_d.copy())
+        return plan
+
+    def rehacer_bajada(self, plan, c_nueva):
+        """(12-nov) La bajada a la pelota rehecha hacia c_nueva (medida otra vez desde encima),
+        desde la misma postura de encima y con la misma dirección de llegada. ErrorPlan si no se
+        puede. La subida es la misma al revés."""
+        pz = plan.pelota
+        fb, fs = plan.fases[pz["i_bajar"]], plan.fases[pz["i_subir"]]
+        Tt = self.c.fk_marcos(fb.qs[-1])[6]
+        palma = Tt[:3, :3] @ OFFSET_PALMA_ORCA + Tt[:3, 3]
+        a = _unit(palma - pz["c"])                          # de la pelota hacia la palma
+        centro = np.asarray(c_nueva, float) + a * pz["d_palma"]
+        r = pz["r"]                                        # la zona de agarre, donde está ahora la pelota
+        self.zonas_apoyo([(np.asarray(c_nueva, float), r + self.zona_apoyo, r),
+                          (pz["c_dejada"], r + self.zona_apoyo, r + 0.01)])
+        with self.con_mano(*fb.mano_chk):
+            qs = self.recta(fb.qs[0], OFFSET_PALMA_ORCA, centro, "bajar a la pelota")
+        with self.con_mano(*fs.mano_chk):
+            for q in qs[::-1]:
+                m = self.motivo(q)
+                if m:
+                    raise ErrorPlan(f"subir con la pelota: {m}")
+        return qs
+
+    def valida(self, fase, q):
+        """motivo(q) con la mano como estaba en ese tramo del plan (para comprobar un plan hecho)."""
+        with self.con_mano(*fase.mano_chk):
+            return self.motivo(q)
 
     def plan_volver(self, q_actual, q_inicio):
         self.choque.fijar_inicio(np.asarray(q_actual, float))
@@ -786,6 +1162,8 @@ class Ejecutor:
             usar = min(dt, max(T - self.t, 0.0))
             fin = self.t + usar >= T - 1e-9
             dt = dt - usar if fin else 0.0           # (sin restos de coma flotante que no avanzan)
+            if fin and f.comprobar == "afinar":
+                dt = 0.0                             # se para aquí: la Tarea puede rehacer el siguiente tramo
             t = self.t = T if fin else self.t + usar
             if f.qs is not None:
                 si = s(t)
@@ -813,6 +1191,13 @@ class Ejecutor:
 
     def mano(self):
         return dict(self._mano)
+
+    def cambiar_tramo(self, i, qs):
+        """Sustituye las posturas de un tramo que aún no ha empezado (o justo empieza)."""
+        f = self.plan.fases[i]
+        f.qs = np.asarray(qs, float).reshape(-1, 6)
+        self._prep[i] = self._preparar(f)
+        self.duracion = sum(p[0] for p in self._prep)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -942,6 +1327,10 @@ class Tarea:
         self._t_desvio = 0.0
         self.mano_activa = None
         self._hilo_mano = None
+        self._pelota_id = None
+        self.afinado_cm = None
+        self.afinar_min = float(_g(self.cfg, "AUTONOMO_TAREA_AFINAR_MIN_M", 0.005))
+        self.afinar_max = float(_g(self.cfg, "AUTONOMO_TAREA_AFINAR_MAX_M", 0.10))
 
     # ── órdenes de la web ──
     def orden(self, mando, contexto):
@@ -988,6 +1377,7 @@ class Tarea:
             uso = next((h for h in lista if h.get("tipo") == "punto_uso"), None)
             dej = next((h for h in lista if h.get("tipo") == "punto_dejada"), None)
             pelota = herr is not None and herr.get("tipo") == "pelota"
+            self._pelota_id = herr.get("id") if pelota else None
             necesarios = [("la herramienta o la pelota (elígela en la lista)", herr)] + \
                 ([] if pelota else [("el punto de uso", uso)]) + [("el punto de dejada", dej)]
             falta = [n for n, h in necesarios if h is None]
@@ -1000,10 +1390,10 @@ class Tarea:
             datos = dict(volver=False, q=np.asarray(q, float), pelota=pelota,
                          T=[np.asarray(h["T_mundo"], float) for h in sitios],
                          nombres=[h["nombre"] for h in sitios],
-                         # lo que NO cuenta como obstáculo: la pelota justo ella (+2 cm); de los
+                         # lo que NO cuenta como obstáculo: la pelota justo ella (+3 cm: vóxeles y ruido); de los
                          # marcadores, su hoja y su soporte (AUTONOMO_TAREA_EXCLUIR_RADIO)
                          excluir=[(np.asarray(h["T_mundo"], float)[:3, 3],
-                                   float(h.get("diametro_m") or 0.07) / 2 + 0.02 if h.get("tipo") == "pelota"
+                                   float(h.get("diametro_m") or 0.07) / 2 + 0.03 if h.get("tipo") == "pelota"
                                    else self.excluir_r) for h in sitios],
                          diametro=float(herr.get("diametro_m") or 0.07) if pelota else None)
         datos["mapa"] = ctx.get("mapa") if self.usar_mapa else None
@@ -1032,13 +1422,38 @@ class Tarea:
                 plan = pl.planificar(d["q"], *d["T"])
             res = ("ok", plan, time.monotonic() - t0, n_vox)
         except ErrorPlan as e:
-            res = ("error", str(e), time.monotonic() - t0, 0)
+            res = ("error", str(e) + self._guardar_fallo(d, str(e)), time.monotonic() - t0, 0)
         except Exception as e:                          # fallo de programa: que se vea
             import traceback
             traceback.print_exc()
-            res = ("error", f"fallo al planificar: {e}", time.monotonic() - t0, 0)
+            res = ("error", f"fallo al planificar: {e}" + self._guardar_fallo(d, repr(e)), time.monotonic() - t0, 0)
         if d["gen"] == self._gen:                       # si entretanto se canceló o se pidió otro, no vale
             self._resultado = res
+
+    def _guardar_fallo(self, d, error):
+        """Guarda lo que se usó para planificar (pose, sitios, mapa) en diagnosticos/, para poder
+        reproducir el fallo fuera del robot. Devuelve el texto a añadir al mensaje."""
+        if not _g(self.cfg, "AUTONOMO_TAREA_GUARDAR_FALLOS", True):
+            return ""
+        try:
+            import json
+            import os
+            carpeta = os.path.join(self.raiz, "diagnosticos")
+            os.makedirs(carpeta, exist_ok=True)
+            ruta = os.path.join(carpeta, time.strftime("plan_fallido_%Y%m%d_%H%M%S.npz"))
+            res, centros = d["mapa"] if d.get("mapa") else (0.02, None)
+            np.savez_compressed(
+                ruta, q=d["q"], T=np.array(d.get("T", []), float).reshape(-1, 4, 4),
+                q_inicio=d.get("q_inicio", np.full(6, np.nan)),
+                mapa=np.zeros((0, 3)) if centros is None else np.asarray(centros, float), res=float(res),
+                excluir=np.array([[*np.asarray(c, float), r] for c, r in d.get("excluir", ())]).reshape(-1, 4),
+                info=json.dumps(dict(error=error, nombres=d.get("nombres"), pelota=bool(d.get("pelota")),
+                                     diametro=d.get("diametro"), volver=bool(d.get("volver")))))
+            print(f"💾 Tarea: datos del plan fallido en {ruta}")
+            return f" (guardado en diagnosticos/{os.path.basename(ruta)})"
+        except Exception as e:
+            print(f"⚠️  Tarea: no se pudo guardar el plan fallido ({e})")
+            return ""
 
     def _crear_planificador(self):
         import os
@@ -1098,8 +1513,9 @@ class Tarea:
         self._enviando = False
 
     # ── cada vuelta del bucle ──
-    def paso(self, dt, q_real, pedal):
-        """Devuelve la q que debe enseñar el gemelo en simulacro (o None: la pose real)."""
+    def paso(self, dt, q_real, pedal, contexto=None):
+        """Devuelve la q que debe enseñar el gemelo en simulacro (o None: la pose real).
+        contexto: como en orden() (para afinar la pelota al llegar encima de ella)."""
         if self.estado == "planificando" and self._resultado is not None:
             r, x, seg, n_vox = self._resultado
             self._resultado = None
@@ -1115,6 +1531,11 @@ class Tarea:
                               + (f"; llega de lado, hasta {max(inc):.0f}° de la perpendicular" if inc else "")
                               + (f"; rodea obstáculos en {nr} tramo{'s' if nr > 1 else ''}"
                                  if (nr := getattr(self._planificador, "rodeos", 0)) else "")
+                              + (f"; la coge {self._planificador.modo_pelota}"
+                                 if getattr(self._planificador, "modo_pelota", None) and x.pelota is not None else "")
+                              + ("; el punto de dejada está de pie: la soltará delante del marcador"
+                                 if x.nombre.endswith("pelota") and getattr(self._planificador, "dejar_de_pie", False)
+                                 else "")
                               + ". Pulsa «Ejecutar».")
                 print(f"🗺️  Tarea: {self.texto}")
                 if self._auto:
@@ -1150,7 +1571,13 @@ class Tarea:
                     self._error(fallo)
                     return None
             if listo:
+                i0 = self.ejec.i
                 self.ejec.avanzar(dt)
+                if (self.ejec.i > i0 and self.plan.fases[i0].comprobar == "afinar"):
+                    fallo = self._afinar(contexto)
+                    if fallo:
+                        self._error(fallo)
+                        return None
                 if not self.simulacro and q_real is not None:
                     if float(np.max(np.abs(np.asarray(q_real) - self.ejec.q()))) > self.desvio_max:
                         self._t_desvio += dt
@@ -1199,6 +1626,45 @@ class Tarea:
             return (f"No noto la pelota en los dedos (solo {n} con más de {self.tactil_n:g} N): tarea parada. "
                     "La mano se queda como está.")
         print(f"✋ Tarea: pelota cogida ({n} dedos la notan).")
+        return None
+
+    def _afinar(self, contexto):
+        """(12-nov) Encima de la pelota y con el brazo quieto: la cámara ha corregido la calibración
+        con el brazo (que ahora está justo al lado de la pelota) y ha vuelto a medir la pelota. Si
+        está en otro sitio que al planificar, se rehace la bajada hacia donde está de verdad.
+        None si todo bien (o si no se puede medir: se sigue con el plan); texto si hay que parar."""
+        pz = getattr(self.plan, "pelota", None)
+        if pz is None or self._planificador is None:
+            return None
+        try:
+            ctx = contexto() if callable(contexto) else (contexto or {})
+        except Exception:
+            ctx = {}
+        pelotas = [h for h in (ctx.get("herramientas") or []) if h.get("tipo") == "pelota" and h.get("T_mundo")
+                   is not None and (h.get("edad_s") or 0.0) <= 0.5]
+        if not pelotas:
+            print("⚠️  Tarea: al afinar no veo la pelota (¿la tapa la mano?): sigo con el plan.")
+            return None
+        h = next((h for h in pelotas if h.get("id") == self._pelota_id), None)
+        if h is None:                                   # perdió el seguimiento: la más cercana
+            h = min(pelotas, key=lambda h: np.linalg.norm(np.asarray(h["T_mundo"])[:3, 3] - pz["c"]))
+        c2 = np.asarray(h["T_mundo"], float)[:3, 3]
+        n = float(np.linalg.norm(c2 - pz["c"]))
+        if n < self.afinar_min:
+            print(f"🎯 Tarea: afinado: la pelota está donde se planificó ({n * 100:.1f} cm).")
+            return None
+        if n > self.afinar_max:
+            return (f"La pelota está a {n * 100:.0f} cm de donde estaba al planificar (¿se ha movido?): "
+                    "tarea parada. Vuelve a planificar.")
+        try:
+            qs = self._planificador.rehacer_bajada(self.plan, c2)
+        except ErrorPlan as e:
+            return f"Al afinar (la pelota está {n * 100:.1f} cm desplazada) no puedo rehacer la bajada: {e}"
+        self.ejec.cambiar_tramo(pz["i_bajar"], qs)
+        self.ejec.cambiar_tramo(pz["i_subir"], qs[::-1])
+        pz["c"] = c2
+        self.afinado_cm = round(n * 100, 1)
+        print(f"🎯 Tarea: afinado con la cámara: la pelota estaba {n * 100:.1f} cm desplazada → bajada corregida.")
         return None
 
     def _q_gemelo(self):

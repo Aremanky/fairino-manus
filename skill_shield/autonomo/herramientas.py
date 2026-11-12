@@ -26,6 +26,8 @@ import time
 import cv2
 import numpy as np
 
+from skill_shield.autonomo.autocalib import ConCorreccion
+
 DICCIONARIO = "DICT_4X4_50"
 TIPOS = ("herramienta", "punto_uso", "punto_dejada")
 
@@ -208,7 +210,7 @@ class _Seguimiento:
         return float(np.linalg.norm(np.std(np.array(self.hist), axis=0)) * 1000)
 
 
-class DetectorHerramientas:
+class DetectorHerramientas(ConCorreccion):
     """Detecta, sigue y publica las herramientas del catálogo. paso(img, K, dist) por imagen."""
 
     def __init__(self, cfg, raiz, n_estable=5, olvido_s=2.0, max_error_px=2.0):
@@ -316,6 +318,30 @@ class DetectorHerramientas:
         T = self.T_mundo_cam @ s.T
         semi = np.abs(T[:3, :3]) @ np.asarray(e["caja"], float) + 0.02
         return T[:3, 3].tolist(), semi.tolist()
+
+    def cajas_hojas(self, ahora=None, margen=(0.02, 0.02, 0.035), hoja=(1.2, 1.3, 1.3)):
+        """(12-nov) Las hojas de los marcadores NO son obstáculos: una caja orientada por marcador
+        visto (centro, semiejes, R en el mundo) del tamaño de la hoja y con un grosor que cubre el
+        ruido de la profundidad. Lo que haya debajo (la mesa, una caja) sigue contando.
+        hoja = (medio ancho, hasta arriba, hasta abajo) desde el centro del marcador, en lados del
+        marcador; cada marcador del catálogo puede llevar la suya (clave «hoja»): p. ej. el del
+        destornillador, con la hoja colgando de una pinza, llega más abajo."""
+        ahora = time.time() if ahora is None else ahora
+        if self.T_mundo_cam is None:
+            return []
+        out = []
+        for i, s in self.seg.items():
+            e = self.cat.get(i)
+            if e is None or s.T is None or ahora - s.t > self.olvido_s:
+                continue
+            T = self.T_mundo_cam @ s.T @ np.linalg.inv(e["T_marcador_herramienta"])     # el marcador
+            lado = float(e["lado"])
+            ancho, arriba, abajo = (float(v) for v in (e.get("hoja") or hoja))
+            # marcador de OpenCV: x a la derecha, y hacia ARRIBA, z saliendo de la hoja
+            semi = np.array([lado * ancho + margen[0], lado * (arriba + abajo) / 2 + margen[1], margen[2]])
+            centro = T[:3, :3] @ np.array([0.0, lado * (arriba - abajo) / 2, 0.0]) + T[:3, 3]
+            out.append((centro, semi, T[:3, :3].copy()))
+        return out
 
     def dibujar(self, img, K, dist):
         """Marcadores, ejes y nombres sobre la imagen de la cámara (para la web)."""

@@ -87,8 +87,14 @@ def _grabar(dev, K, n):
         T = cargar(ruta_c)["T_mundo_cam"]
     os.makedirs(os.path.join(raiz, "diagnosticos"), exist_ok=True)
     ruta = os.path.join(raiz, "diagnosticos", time.strftime("escena_%Y%m%d_%H%M%S.npz"))
+    corr = np.zeros(3)
+    if T is not None:                                     # la autocorrección con el brazo (12-nov)
+        from skill_shield.autonomo.autocalib import Correccion
+        c = Correccion(ruta_c)
+        c.nueva_calibracion(os.path.getmtime(ruta_c))
+        corr = c.t
     np.savez_compressed(ruta, color=np.array(colores), profundidad=np.array(profs), K=K,
-                        T_mundo_cam=T if T is not None else np.full((4, 4), np.nan))
+                        T_mundo_cam=T if T is not None else np.full((4, 4), np.nan), correccion=corr)
     print(f"💾 [autónomo] {n} imágenes guardadas en {ruta}")
     return 0
 
@@ -169,7 +175,15 @@ def main():
                 prof = pd.getFrame()
                 if constructor is not None:
                     try:
-                        constructor.paso(prof, K, img_ult)
+                        constructor.paso(prof, K, img_ult, halos=(
+                            pelotas.pixeles_halo() if pelotas is not None and getattr(cfg_, "AUTONOMO_MAPA_SIN_HALO_PELOTAS", True)
+                            else None))
+                        # lo que corrige el brazo vale para todo lo que ve la cámara (12-nov)
+                        T_corr = constructor.T_corr
+                        if detector is not None:
+                            detector.correccion = T_corr
+                        if pelotas is not None:
+                            pelotas.correccion = T_corr
                     except Exception as e:                # el mapa nunca debe tirar la cámara
                         print(f"⚠️  [autónomo] Mapa de obstáculos: {e}")
             pc = _ultimo(qc)
@@ -207,7 +221,11 @@ def main():
                                 if objetivo is not None:
                                     caja = detector.caja_mundo(objetivo) or (
                                         pelotas.caja_mundo(objetivo) if pelotas is not None else None)
-                                constructor.excluir_extra = [caja] if caja else []
+                                constructor.excluir_extra = ([caja] if caja else []) + (
+                                    pelotas.cajas_mundo() if pelotas is not None and getattr(cfg, "AUTONOMO_MAPA_SIN_HALO_PELOTAS", True)
+                                    else []) + (
+                                    detector.cajas_hojas(hoja=tuple(getattr(cfg, "AUTONOMO_MAPA_HOJA", (1.2, 1.3, 1.3))))
+                                    if getattr(cfg, "AUTONOMO_MAPA_QUITAR_HOJAS", True) else [])
                     except Exception as e:                        # nunca debe tirar la cámara
                         print(f"⚠️  [autónomo] Herramientas: {e}")
                 if ahora - t_fps >= 1.0:

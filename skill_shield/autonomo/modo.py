@@ -403,7 +403,7 @@ def ejecutar(cfg):
                               "(AUTONOMO_MAPA_MAX_DIBUJO): se planifica con una muestra.")
                     return dict(q_real=q, herramientas=lista, objetivo_id=(mando or {}).get("objetivo_id"), mapa=mp)
                 tarea.orden(mando, _contexto)
-                q_tarea_sim = tarea.paso(dt_vuelta, q, control.web_viva and control.pedal_pisado)
+                q_tarea_sim = tarea.paso(dt_vuelta, q, control.web_viva and control.pedal_pisado, _contexto)
             robot_listo = fr5 is not None and fr5.conectado
             permitido = control.movimiento_permitido(robot_listo)
             if permitido != permitido_antes:

@@ -144,6 +144,10 @@ def main():
     ruta_calib = args.calibracion if os.path.isabs(args.calibracion) else \
         os.path.join(os.path.dirname(os.path.abspath(cfg.__file__)), args.calibracion)
     calib, mtime_calib, render_cam = None, None, None
+    # la misma corrección de la calibración que usa la cámara (autocalib.py, 12-nov): si no, la vista
+    # desde la cámara no cuadraría con los cubos y las pelotas, que ya vienen corregidos
+    from skill_shield.autonomo.autocalib import Correccion
+    corr, mtime_corr, t_corr = Correccion(ruta_calib), None, 0.0
     periodo = 1.0 / max(args.fps, 1.0)
     t_cam = 0.0
     try:
@@ -198,6 +202,7 @@ def main():
                 if m != mtime_calib:
                     mtime_calib = m
                     calib = C.cargar(ruta_calib) if m is not None else None
+                    corr.nueva_calibracion(m)
                     if render_cam is not None:
                         _cerrar(render_cam)
                         render_cam = None
@@ -211,13 +216,22 @@ def main():
                         render_cam = mujoco.Renderer(modelo, h, w)
                         print(f"🎯 [gemelo web] Vista desde la cámara de cabeza calibrada ({calib['fecha']}, "
                               f"error medio {calib['error_medio_mm']} mm)")
+                if t0 - t_corr >= 1.0:
+                    t_corr = t0
+                    try:
+                        mc = os.path.getmtime(corr.ruta)
+                    except OSError:
+                        mc = None
+                    if mc != mtime_corr:
+                        mtime_corr = mc
+                        corr.nueva_calibracion(mtime_calib)      # (vale 0 si no es de esta calibración)
                 if render_cam is not None and calib is not None:
                     render_cam.update_scene(datos, camera=cam)
                     scn = render_cam.scene
                     if voxeles[1] is not None:              # así se ve si caen sobre los objetos reales
                         dibujar_voxeles(scn, voxeles[1], voxeles[0])
                     dibujar_herramientas(scn, *herr)
-                    g = C.camara_gl(calib["T_mundo_cam"], Kc, w, h, float(scn.camera[0].frustum_near))
+                    g = C.camara_gl(corr.T() @ calib["T_mundo_cam"], Kc, w, h, float(scn.camera[0].frustum_near))
                     for c in (scn.camera[0], scn.camera[1]):
                         c.pos[:] = g["pos"]
                         c.forward[:] = g["forward"]

@@ -240,3 +240,6 @@ __marimo__/
 # Calibración cámara→robot (datos de cada robot; calib_posturas.json SÍ se versiona)
 calib_muestras.json*
 tablero_calib_robot.png
+
+# autocorrección de la calibración con el brazo (la genera el modo autónomo)
+*.correccion.json

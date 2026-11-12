@@ -73,6 +73,22 @@ def distancia_a_segmentos(P, A, B):
     return d
 
 
+def _en_caja(P, caja):
+    """Puntos dentro de una caja (centro, semiejes) alineada con el mundo o (centro, semiejes, R)
+    orientada (R: columnas = ejes de la caja en el mundo)."""
+    c, semi = np.asarray(caja[0], float), np.asarray(caja[1], float)
+    lo, hi = c - np.linalg.norm(semi), c + np.linalg.norm(semi)
+    sel = np.nonzero(np.all((P >= lo) & (P <= hi), axis=1))[0]
+    out = np.zeros(len(P), bool)
+    if not len(sel):
+        return out
+    D = P[sel] - c
+    if len(caja) > 2 and caja[2] is not None:
+        D = D @ np.asarray(caja[2], float)
+    out[sel[np.all(np.abs(D) <= semi, axis=1)]] = True
+    return out
+
+
 class MapaOcupacion:
     """Rejilla de vóxeles con evidencia (log-odds) de ocupado / libre."""
 
@@ -101,6 +117,7 @@ class MapaOcupacion:
         self._dist_desc = None
         self.excluir = []                                         # cajas (centro, semi) a ignorar
         self.ultima = dict(puntos=0, robot=0, suelo=0, ms=0.0)
+        self.ultimos_puntos = None
 
     # ── utilidades ──
     def borrar(self):
@@ -134,19 +151,20 @@ class MapaOcupacion:
         return self._centros[(e == OCUPADO).reshape(-1)]
 
     # ── actualización con una imagen de profundidad ──
-    def _cerca(self, P, capsulas):
+    def _cerca(self, P, capsulas, margen=None):
         """Máscara de los puntos a menos de (radio + margen_robot) de alguna cápsula. Antes de
         medir se descartan los puntos fuera de la caja que envuelve TODAS las cápsulas: con las
         ~30 piezas pequeñas de la mano solo se miden los pocos puntos que hay cerca de ella."""
         fuera = np.zeros(len(P), bool)
         if capsulas is None or not len(capsulas) or not len(P):
             return fuera
+        margen = self.margen_robot if margen is None else float(margen)
         if isinstance(capsulas, np.ndarray) and capsulas.ndim == 2 and capsulas.shape[1] == 7:
-            A, B, r = capsulas[:, 0:3], capsulas[:, 3:6], capsulas[:, 6] + self.margen_robot
+            A, B, r = capsulas[:, 0:3], capsulas[:, 3:6], capsulas[:, 6] + margen
         else:
             A = np.array([c[0] for c in capsulas], float)
             B = np.array([c[1] for c in capsulas], float)
-            r = np.array([c[2] for c in capsulas], float) + self.margen_robot
+            r = np.array([c[2] for c in capsulas], float) + margen
         lo = np.minimum(A, B).min(0) - r.max()
         hi = np.maximum(A, B).max(0) + r.max()
         sel = np.nonzero(np.all((P >= lo) & (P <= hi), axis=1))[0]
@@ -160,7 +178,7 @@ class MapaOcupacion:
         return fuera
 
     def actualizar(self, prof_mm, K, T_mundo_cam, capsulas_robot=(), ahora=None, paso=2, capsulas_mano=(),
-                   img_bgr=None):
+                   img_bgr=None, nube_robot=None):
         """capsulas_robot: lista de (a, b, radio) en el mundo (la pose REAL del robot).
         capsulas_mano: lo mismo para las piezas de la OrcaHand con su postura real (PiezasMano)."""
         t0 = time.perf_counter()
@@ -168,6 +186,7 @@ class MapaOcupacion:
         R, t = T_mundo_cam[:3, :3], T_mundo_cam[:3, 3]
         fiables = pixeles_fiables(prof_mm, img_bgr)
         P = nube_desde_profundidad(prof_mm, K, paso, self.z_min, fiables=fiables) @ R.T + t
+        self.ultimos_puntos = P                          # (para la autocorrección de la calibración)
         n_total = len(P)
         idx, dentro = self.indices(P)
         P, idx = P[dentro], idx[dentro]
@@ -182,8 +201,14 @@ class MapaOcupacion:
             q = self._cerca(P, grupo)
             n_robot += int((q & ~quitar).sum())
             quitar |= q
-        for c, semi in self.excluir:
-            quitar |= np.all(np.abs(P - np.asarray(c)) <= np.asarray(semi), axis=1)
+        if nube_robot is not None and len(nube_robot):
+            # las MALLAS del brazo (12-nov): el brazo del FR5 no va por la línea entre sus joints
+            # (el tramo del brazo va desplazado ~14 cm), así que con las cápsulas quedaban restos
+            q = self._cerca_nube(P, nube_robot, self.margen_robot)
+            n_robot += int((q & ~quitar).sum())
+            quitar |= q
+        for caja in self.excluir:
+            quitar |= _en_caja(P, caja)
         idx = idx[~quitar]
 
         # aciertos: vóxeles con al menos min_puntos puntos en esta imagen
@@ -196,11 +221,45 @@ class MapaOcupacion:
         libre &= ~golpe
         self.L[golpe] += self.L_OCUPADO
         self.L[libre] -= self.L_LIBRE
+        for caja in self.excluir:                        # lo excluido no es obstáculo (tampoco lo de antes)
+            dentro = _en_caja(self._centros, caja)
+            if dentro.any():
+                d = dentro.reshape(self.L.shape)
+                self.L[d] = np.minimum(self.L[d], 0.0)
         np.clip(self.L, self.L_MIN, self.L_MAX, out=self.L)
         self.t_visto[golpe | visto] = ahora
         self._dist = self._dist_desc = None
         self.ultima = dict(puntos=n_total, robot=n_robot, suelo=n_suelo,
                            ms=round((time.perf_counter() - t0) * 1000, 1))
+
+    @staticmethod
+    def _cerca_nube(P, nube, margen):
+        from scipy.spatial import cKDTree
+        out = np.zeros(len(P), bool)
+        if not len(P):
+            return out
+        nube = np.asarray(nube, float)
+        lo, hi = nube.min(0) - margen, nube.max(0) + margen
+        sel = np.nonzero(np.all((P >= lo) & (P <= hi), axis=1))[0]
+        if len(sel):
+            d, _ = cKDTree(nube).query(P[sel], distance_upper_bound=margen)
+            out[sel[np.isfinite(d)]] = True
+        return out
+
+    def vaciar(self, capsulas_robot=(), capsulas_mano=(), nube_robot=None):
+        """Los vóxeles por los que pasa (o acaba de pasar) el robot están LIBRES: el robot estaba
+        ahí. Borra los «fantasmas» que deja el brazo al moverse (la imagen de profundidad llega
+        con algo de retraso respecto a la pose con la que se quita el robot)."""
+        dentro = np.zeros(len(self._centros), bool)
+        for g in (capsulas_robot, capsulas_mano):
+            dentro |= self._cerca(self._centros, g, margen=0.0)
+        if nube_robot is not None and len(nube_robot):
+            dentro |= self._cerca_nube(self._centros, nube_robot, 0.5 * self.res + 0.005)
+        if dentro.any():
+            d = dentro.reshape(self.L.shape)
+            self.L[d] = np.minimum(self.L[d], self.L_MIN)
+            self._dist = self._dist_desc = None
+        return int(dentro.sum())
 
     def _visibilidad(self, prof_mm, K, T_mundo_cam):
         """(visto, libre) por vóxel. visto = en el campo de visión con profundidad medida en su
@@ -466,6 +525,27 @@ class ConstructorMapa:
         self.mano_real = False
         self._excluir_web = []
         self.excluir_extra = []                          # p. ej. la herramienta que se va a coger
+        # poses recientes del robot (12-nov): se quita del mapa el robot en TODAS ellas (la
+        # profundidad llega con retraso: si no, al moverse deja un rastro de cubos «fantasma»)
+        self.barrido_s = float(g.get("AUTONOMO_MAPA_BARRIDO_S", 0.6))
+        self._poses = []                                 # [(t monotónico, q, cápsulas de la mano o None)]
+        # autocorrección de la calibración con el propio brazo (12-nov)
+        from skill_shield.autonomo.autocalib import Correccion
+        self.correccion = Correccion(self.ruta_calib, float(g.get("AUTONOMO_AUTOCALIB_GANANCIA", 0.8)),
+                                     float(g.get("AUTONOMO_AUTOCALIB_MAX_M", 0.15)),
+                                     float(g.get("AUTONOMO_AUTOCALIB_RESIDUO_MAX_M", 0.012)),
+                                     float(g.get("AUTONOMO_AUTOCALIB_PASO_MAX_M", 0.08)))
+        self.autocalib = None                            # (también da las mallas del brazo para quitarlo)
+        self.autocalib_activa = bool(g.get("AUTONOMO_AUTOCALIB", True))
+        try:
+            from skill_shield.autonomo.autocalib import AutoCalib
+            self.autocalib = AutoCalib(self.modelo.c, g.get("RUTA_XML"))
+        except Exception as e:                           # sin mallas: con las cápsulas y sin autocorrección
+            print(f"⚠️  [autónomo] Sin las mallas del brazo (ni autocorrección de la calibración): {e}")
+        self.quieto_s = float(g.get("AUTONOMO_AUTOCALIB_QUIETO_S", 0.4))
+        self._nube_barrido = None
+        self._t_autocalib = 0.0
+        self._t_mapa = np.zeros(3)                       # corrección con la que se hizo el mapa actual
 
     def _recargar_calibracion(self):
         import os
@@ -481,6 +561,45 @@ class ConstructorMapa:
                 from skill_shield.autonomo.calibracion import cargar
                 self.T = cargar(self.ruta_calib)["T_mundo_cam"]
                 self.mapa.borrar()                       # calibración nueva: lo de antes no vale
+            self.correccion.nueva_calibracion(m)
+            self._t_mapa = self.correccion.t.copy()
+
+    @property
+    def T_corr(self):
+        """La corrección de la calibración (4x4, en el mundo) para los detectores."""
+        return self.correccion.T()
+
+    def T_efectiva(self):
+        return None if self.T is None else self.correccion.T() @ self.T
+
+    def _recordar_pose(self, q, caps_mano, ahora):
+        if q is None:
+            return
+        q = np.asarray(q, float)
+        self._poses = [p for p in self._poses if ahora - p[0] <= self.barrido_s]
+        self._poses.append((ahora, q.copy(), caps_mano))
+
+    def _quieto(self, ahora):
+        """El brazo lleva quieto al menos quieto_s (para medir sin el retraso de la imagen)."""
+        if len(self._poses) < 2 or ahora - self._poses[0][0] < min(self.quieto_s, self.barrido_s) * 0.9:
+            return False
+        q = self._poses[-1][1]
+        return all(float(np.max(np.abs(p[1] - q))) < math.radians(0.3) for p in self._poses)
+
+    def _capsulas_barrido(self):
+        """Cápsulas (y mallas del brazo) del robot en las poses recientes (sin repetir las casi iguales)."""
+        robot, mano, nube, ult = [], [], [], None
+        for _, q, caps in self._poses:
+            if ult is not None and float(np.max(np.abs(q - ult))) < math.radians(0.5):
+                continue
+            ult = q
+            robot += capsulas_robot(self.modelo, q, con_mano=caps is None)
+            if caps is not None and len(caps):
+                mano.append(np.asarray(caps, float))
+            if self.autocalib is not None:
+                nube.append(self.autocalib.modelo(q)[0])
+        self._nube_barrido = np.vstack(nube) if nube else None
+        return robot, (np.vstack(mano) if mano else ())
 
     def _mandos(self):
         if self.canal_mando is None:
@@ -497,6 +616,8 @@ class ConstructorMapa:
         if bid is not None and bid != self._borrado_visto:
             if self._borrado_visto is not None or m.get("mapa_borrar_nuevo"):
                 self.mapa.borrar()
+                self.correccion.borrar()                 # y vuelta a la calibración del archivo
+                self._t_mapa = self.correccion.t.copy()
             self._borrado_visto = bid
         self._excluir_web = [(np.asarray(c, float), np.asarray(s, float)) for c, s in (m.get("mapa_excluir") or [])]
 
@@ -510,7 +631,27 @@ class ConstructorMapa:
         q, real, caps = desempaquetar_pose(b)
         return (q, caps) if real else (None, None)
 
-    def paso(self, prof_mm, K, img_bgr=None):
+    @staticmethod
+    def quitar_pixeles(prof_mm, halos):
+        """Copia de la profundidad sin los píxeles de los halos [(u, v, radio px, z mín, z máx)]."""
+        if not halos:
+            return prof_mm
+        prof = prof_mm.copy()
+        h, w = prof.shape[:2]
+        for halo in halos:
+            u, v, r, z0, z1 = halo[:5]
+            v_max = halo[5] if len(halo) > 5 else v + r           # filas de más abajo: la mesa, se queda
+            x0, x1 = max(int(u - r), 0), min(int(u + r) + 1, w)
+            y0, y1 = max(int(v - r), 0), min(int(min(v + r, v_max)) + 1, h)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            yy, xx = np.mgrid[y0:y1, x0:x1]
+            trozo = prof[y0:y1, x0:x1]
+            quita = ((xx - u) ** 2 + (yy - v) ** 2 <= r * r) & (trozo >= z0 * 1000.0) & (trozo <= z1 * 1000.0)
+            trozo[quita] = 0
+        return prof
+
+    def paso(self, prof_mm, K, img_bgr=None, halos=None):
         ahora = time.monotonic()
         if ahora - self._t_ult < self.periodo:
             return False
@@ -522,8 +663,8 @@ class ConstructorMapa:
         if self.T is None:
             self.aviso = "sin calibrar (camara_robot.json)"
             return False
-        self.mapa.excluir = list(self._excluir_web) + [(np.asarray(c, float), np.asarray(s, float))
-                                                       for c, s in self.excluir_extra]
+        self.mapa.excluir = list(self._excluir_web) + [tuple(np.asarray(x, float) for x in caja)
+                                                       for caja in self.excluir_extra]
         q, caps_mano = self._q_real()
         self.robot_quitado = q is not None
         self.mano_real = caps_mano is not None
@@ -533,10 +674,40 @@ class ConstructorMapa:
             self.aviso = "sin la postura real de la mano: se quita con una cápsula recta (puede dejar restos)"
         else:
             self.aviso = ""
-        self.mapa.actualizar(prof_mm, K, self.T,
-                             capsulas_robot(self.modelo, q, con_mano=caps_mano is None) if q is not None else (),
-                             capsulas_mano=caps_mano if caps_mano is not None else (),
-                             img_bgr=img_bgr)
+        self._recordar_pose(q, caps_mano, ahora)
+        if q is not None:
+            caps_r, caps_m = self._capsulas_barrido()
+        else:
+            caps_r, caps_m = (), ()
+        nube = self._nube_barrido if q is not None else None
+        prof_mm = self.quitar_pixeles(prof_mm, halos)        # sin el halo de las pelotas (12-nov)
+        self.mapa.actualizar(prof_mm, K, self.T_efectiva(), caps_r, capsulas_mano=caps_m, img_bgr=img_bgr,
+                             nube_robot=nube)
+        if q is not None:
+            self.mapa.vaciar(caps_r, caps_m, nube)
+            # autocorrección: con el brazo quieto y a la vista, como mucho 2 veces por segundo
+            if (self.autocalib is not None and self.autocalib_activa and ahora - self._t_autocalib >= 0.5
+                    and self._quieto(ahora)):
+                self._t_autocalib = ahora
+                try:
+                    antes = self.correccion.t.copy()
+                    medida = self.autocalib.estimar(self.mapa.ultimos_puntos, q, prof_mm=prof_mm, K=K,
+                                                    T_mundo_cam=self.T_efectiva())
+                    if self.correccion.aplicar(medida):
+                        # lo que se marcó con la calibración de antes alrededor del brazo era el
+                        # propio brazo mal colocado: fuera
+                        if np.linalg.norm(self.correccion.t - self._t_mapa) > 0.01:
+                            self.mapa.borrar()            # lo de antes se marcó con otra calibración
+                            self._t_mapa = self.correccion.t.copy()
+                        h = float(np.linalg.norm(self.correccion.t - antes)) + self.mapa.margen_robot + self.mapa.res
+                        if h > self.mapa.margen_robot + self.mapa.res + 0.003:
+                            gr = [(a, b, r + h) for a, b, r in caps_r]
+                            gm = caps_m.copy() if len(caps_m) else ()
+                            if len(gm):
+                                gm[:, 6] += h
+                            self.mapa.vaciar(gr, gm)
+                except Exception as e:
+                    print(f"⚠️  [autónomo] Autocorrección de la calibración: {e}")
         if self.canal_mapa is not None:
             b = empaquetar(self.mapa.centros_ocupados(), self.mapa.res, self.max_dibujo)
             if len(b) <= self.canal_mapa.capacidad:
@@ -553,7 +724,12 @@ class ConstructorMapa:
         n_ocu = int((e == OCUPADO).sum())
         return dict(estado="ok" if self.robot_quitado else "aviso",
                     texto=f"{n_ocu} vóxeles" + ("" if self.robot_quitado else " (robot sin quitar)")
-                    + (" (mano aproximada)" if self.robot_quitado and not self.mano_real else ""),
+                    + (" (mano aproximada)" if self.robot_quitado and not self.mano_real else "")
+                    + (f" · calibración: {self.correccion.texto()}" if np.linalg.norm(self.correccion.t) > 0.003
+                       else ""),
                     mano_real=self.mano_real,
                     ocupados=n_ocu, libres=int((e == LIBRE).sum()), res=self.mapa.res,
-                    hz=round(self.hz, 1), ms=self.mapa.ultima.get("ms"), aviso=self.aviso)
+                    hz=round(self.hz, 1), ms=self.mapa.ultima.get("ms"), aviso=self.aviso,
+                    correccion=[round(float(v), 4) for v in self.correccion.t],
+                    correccion_texto=self.correccion.texto() if self.correccion.n_medidas or
+                    np.linalg.norm(self.correccion.t) > 0 else "")

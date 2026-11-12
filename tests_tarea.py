@@ -407,7 +407,7 @@ def test_plan_pelota_desde_arriba(cadena, pl):
         assert palma[2] > BOLA[2]                                         # desde arriba
     for f in plan.fases:
         if f.qs is not None:
-            assert all(pl.motivo(q) is None for q in f.qs[::3])
+            assert all(pl.valida(f, q) is None for q in f.qs[::3])
 
 
 def test_rodea_un_obstaculo_en_medio(cadena, pl):
@@ -425,7 +425,7 @@ def test_rodea_un_obstaculo_en_medio(cadena, pl):
         assert pl.rodeos >= 1
         for f in plan2.fases:
             if f.qs is not None:
-                assert all(pl.motivo(q) is None for q in f.qs), f.nombre
+                assert all(pl.valida(f, q) is None for q in f.qs), f.nombre
                 assert np.max(np.abs(np.diff(f.qs, axis=0))) <= max(pl.salto_max, pl.paso) + 1e-9
         pl.rodeo = False                                                  # sin rodeos: no hay plan
         with pytest.raises(TA.ErrorPlan):
@@ -463,7 +463,7 @@ def _plano_pelota_falso():
 HERR_PELOTA = [dict(id=100, nombre="Pelota roja", tipo="pelota", estable=True, diametro_m=0.08,
                     T_mundo=_plano((0.3, -0.5, 0.0)).tolist()),
                dict(id=101, nombre="Pelota verde", tipo="pelota", estable=True, diametro_m=0.045,
-                    T_mundo=_plano((0.39, -0.5, 0.0)).tolist()),
+                    T_mundo=_plano((0.42, -0.5, 0.0)).tolist()),
                dict(id=22, nombre="Punto de dejada", tipo="punto_dejada", estable=True, T_mundo=np.eye(4).tolist())]
 
 
@@ -485,10 +485,10 @@ def test_pelota_no_necesita_punto_de_uso_y_solo_excluye_la_pelota():
     T, d, _ = cap["pelota"]
     assert d == 0.08 and np.allclose(T[:3, 3], (0.3, -0.5, 0.0))
     radios = sorted(r for _, r in cap["excluir"])
-    assert radios[0] == pytest.approx(0.06) and radios[1] == pytest.approx(G["AUTONOMO_TAREA_EXCLUIR_RADIO"])
+    assert radios[0] == pytest.approx(0.07) and radios[1] == pytest.approx(G["AUTONOMO_TAREA_EXCLUIR_RADIO"])
     # la verde está a 9 cm de la roja (antes se ignoraba todo a 15 cm): ahora sigue siendo obstáculo
-    c_roja = next(c for c, r in cap["excluir"] if r == pytest.approx(0.06))
-    assert np.linalg.norm(np.array((0.39, -0.5, 0.0)) - c_roja) - 0.0225 > 0.06
+    c_roja = next(c for c, r in cap["excluir"] if r == pytest.approx(0.07))
+    assert np.linalg.norm(np.array((0.42, -0.5, 0.0)) - c_roja) - 0.0225 > 0.07
 
 
 def test_si_los_tactiles_no_notan_la_pelota_se_para():
@@ -501,3 +501,95 @@ def test_si_los_tactiles_la_notan_sigue():
     t, fr5, _ = _tarea_pelota(lambda: dict(estado="ok", dedos=[dict(fz=1.2)] * 3 + [dict(fz=0.0)] * 2))
     _ejecutar_pelota(t, fr5)
     assert t.estado == "terminada"
+
+
+# ══════════════════════ pelota sobre una mesa (12-nov) ══════════════════════
+def test_nube_de_la_mano_sigue_la_postura():
+    """Con los dedos a 0 el pulgar sobresale ~10 cm por el lado de la palma: así no se puede bajar
+    sobre una pelota de una mesa. Con la postura de coger pelotas sobresale bastante menos."""
+    from skill_shield.autonomo.choque_mano import nube_mano
+    T_w_mm = np.array([[1, 0, 0, 0], [0, 0, -1, 0.0099], [0, 1, 0, 0.16], [0, 0, 0, 1.0]])
+    Ti = np.linalg.inv(T_w_mm)
+
+    def sale(post):
+        P = nube_mano(config.RUTA_XML, tuple(sorted(post.items())))
+        return float(np.max(OFFSET_PALMA_ORCA[0] - (P @ Ti[:3, :3].T + Ti[:3, 3])[:, 0]))
+    assert sale({}) > 0.09
+    assert sale(TA.MANO_PELOTA_ABIERTA) < 0.06
+
+
+def _mesa(zt, y0=-0.30):
+    X, Y = np.meshgrid(np.arange(-0.25, 0.71, 0.02), np.arange(-0.85, y0, 0.02))
+    return np.column_stack([X.ravel(), Y.ravel(), np.full(X.size, zt - 0.01)])
+
+
+@pytest.mark.parametrize("bxy", [(0.35, -0.45), (0.20, -0.50)])
+def test_pelota_encima_de_una_mesa_del_mapa(cadena, pl, bxy):
+    """Caso del 12-nov: la pelota en una mesa que la cámara ve. Antes no había plan («colisión de
+    la mano»): la mano se comprobaba con el pulgar estirado hacia la mesa."""
+    zt, r = -0.25, 0.035
+    bola = np.array([*bxy, zt + r])
+    dej = np.array([0.40 if bxy[0] < 0.3 else 0.10, -0.50, zt + 0.002])
+    try:
+        pl.poner_mapa(_mesa(zt), 0.02, [(bola, r + 0.02), (dej, 0.15)])
+        plan = pl.planificar_pelota(Q0, _plano(bola), 2 * r, _plano(dej))
+        nombres = [f.nombre for f in plan.fases]
+        fb = plan.fases[nombres.index("Bajar a la pelota")]
+        # la última postura (con la mano cerrada y la pelota) sigue sin tocar la mesa
+        with pl.con_mano("pelota_cerrada", pl._pelota_en_mano(r)):
+            assert pl.motivo(fb.qs[-1]) is None
+            Tb = cadena.fk_marcos(fb.qs[-1])[5]
+            P = pl._mano_pts @ Tb[:3, :3].T + Tb[:3, 3]
+            assert P[:, 2].min() > zt                                   # nada de la mano bajo la mesa
+    finally:
+        pl.poner_mapa(None, 0.02)
+
+
+def test_mensaje_dice_el_motivo_mas_util(pl):
+    from collections import Counter
+    razones = Counter({"la muñeca tendría que doblarse más de lo que permiten sus límites (J4-J6)": 40,
+                       "la mano tocaría la mesa u otro obstáculo que ve la cámara": 3})
+    e = pl._no_encuentro("llegar a la pelota", (razones, Counter()))
+    assert "cámara" in str(e) and "muñeca" not in str(e)
+
+
+def test_plan_fallido_se_guarda(tmp_path):
+    t = TA.Tarea(dict(G), str(tmp_path), FR5Falso(), simulacro=False)
+    txt = t._guardar_fallo(dict(q=np.zeros(6), T=[np.eye(4)], mapa=(0.02, np.ones((5, 3))),
+                                excluir=[(np.zeros(3), 0.1)], nombres=["Pelota roja"], pelota=True,
+                                diametro=0.07), "no hay camino")
+    f = list((tmp_path / "diagnosticos").glob("plan_fallido_*.npz"))
+    assert f and "guardado" in txt
+    d = np.load(f[0])
+    assert d["mapa"].shape == (5, 3) and d["T"].shape == (1, 4, 4) and "no hay camino" in str(d["info"])
+
+
+def test_zona_de_agarre_ignora_el_ruido_y_pone_suelo(cadena, pl):
+    """Lejos de la cámara la mesa sale como una capa gruesa (ruido) que llega a la altura de la
+    pelota: en la zona de agarre no cuenta, pero la mano no puede bajar de la parte de abajo de la
+    pelota. Lo que sea más alto que la pelota sigue contando."""
+    zt, r = -0.25, 0.035
+    bola = np.array([0.35, -0.45, zt + r])
+    capa = np.vstack([_mesa(zt + dz) for dz in (0.0, 0.02, 0.04)])              # mesa de 4 cm de grueso (ruido)
+    try:
+        pl.poner_mapa(capa, 0.02, [(bola, r + 0.03)])
+        plan = pl.planificar_pelota(Q0, _plano(bola), 2 * r, _plano((0.10, -0.50, zt + 0.002)))
+        fb = next(f for f in plan.fases if f.nombre == "Bajar a la pelota")
+        assert pl.valida(fb, fb.qs[-1]) is None
+        # una caja de 15 cm justo al lado de la pelota sí cuenta
+        caja = bola + np.stack(np.meshgrid(np.arange(0.06, 0.15, 0.02), np.arange(-0.08, 0.09, 0.02),
+                                           np.arange(0.0, 0.16, 0.02)), -1).reshape(-1, 3)
+        pl.poner_mapa(np.vstack([capa, caja, caja * [1, 1, 1] - [0.18, 0, 0]]), 0.02, [(bola, r + 0.03)])
+        pl.zonas_apoyo([(bola, r + pl.zona_apoyo, r)])
+        pl._choques = []
+        with pl.con_mano("pelota_abierta"):
+            assert pl.motivo(fb.qs[-1]) is not None
+        assert "cm de alto" in pl._que_estorba(bola, r)               # y dice qué estorba
+    finally:
+        pl.poner_mapa(None, 0.02)
+
+
+def test_avisa_si_la_pelota_esta_lejos(pl):
+    lejos = np.array([0.0, -1.15, 0.0])
+    assert "alcance" in pl._aviso_lejos(lejos).lower()
+    assert pl._aviso_lejos(np.array([0.3, -0.45, -0.2])) == "" or "cámara" in pl._aviso_lejos(np.array([0.3, -0.45, -0.2]))

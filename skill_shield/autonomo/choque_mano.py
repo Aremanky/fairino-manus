@@ -272,6 +272,69 @@ def nubes_mjcf(ruta_xml, paso=0.006, semilla=0, paso_soporte=0.010):
     return nubes
 
 
+# Joints de la mano en el orden de sus actuadores (índice de ctrl 0..16 de la mano, el de
+# LIMITES_CTRL y OrcaHardwareWrapper.JOINT_A_CTRL; ctrl 16 «thumb_dip» = right_t-pip).
+JOINTS_MANO = ("right_wrist", "right_p-abd", "right_p-mcp", "right_p-pip", "right_r-abd", "right_r-mcp",
+               "right_r-pip", "right_m-abd", "right_m-mcp", "right_m-pip", "right_i-abd", "right_i-mcp",
+               "right_i-pip", "right_t-cmc", "right_t-abd", "right_t-mcp", "right_t-pip")
+
+
+@functools.lru_cache(maxsize=16)
+def nube_mano(ruta_xml, postura=(), paso=0.006, semilla=0):
+    """La mano (subárbol de mano_mount) en el marco de wrist3_Link con los dedos en una POSTURA
+    (12-nov): postura = ((índice de ctrl 0..16, rad), …); lo que no se indica, a 0. Los puntos
+    salen en el mismo orden de geoms que nubes_mjcf()["mano"] (con postura vacía son los mismos)."""
+    angulos = {JOINTS_MANO[int(k)]: float(v) for k, v in postura}
+    base = os.path.dirname(os.path.abspath(ruta_xml))
+    root = ET.parse(ruta_xml).getroot()
+    _expandir_includes(root, base)
+    comp = root.find("compiler")
+    grados = comp is not None and comp.get("angle", "degree") == "degree"
+    meshdir = os.path.join(base, comp.get("meshdir", "")) if comp is not None else base
+    mallas = {}
+    for m in root.iter("mesh"):
+        if m.get("file"):
+            esc = np.array([float(v) for v in m.get("scale", "1 1 1").split()])
+            mallas[m.get("name") or os.path.splitext(os.path.basename(m.get("file")))[0]] = \
+                (os.path.join(meshdir, m.get("file")), esc)
+    cuerpos = {b.get("name"): b for b in root.iter("body")}
+    if CUERPO_MANO not in cuerpos:
+        return np.zeros((0, 3))
+    rng = np.random.default_rng(semilla)
+    cache = {}
+
+    def giro_joint(b):
+        T = np.eye(4)
+        for j in b.findall("joint"):
+            a = angulos.get(j.get("name"), 0.0)
+            if a == 0.0 or j.get("type", "hinge") != "hinge":
+                continue
+            p = np.array([float(v) for v in j.get("pos", "0 0 0").split()])
+            G = np.eye(4)
+            G[:3, :3] = _rot([float(v) for v in j.get("axis", "0 0 1").split()], a)
+            G[:3, 3] = p - G[:3, :3] @ p                 # giro alrededor del eje que pasa por pos
+            T = T @ G
+        return T
+
+    def nube_body(b, T):
+        T = T @ giro_joint(b)
+        out = []
+        for g in b.findall("geom"):
+            nm = g.get("mesh")
+            if not nm or nm not in mallas:
+                continue
+            if nm not in cache:
+                ruta, esc = mallas[nm]
+                cache[nm] = muestrear(leer_stl(ruta) * esc, paso, rng) if os.path.exists(ruta) else np.zeros((0, 3))
+            Tg = T @ _T_local(g, grados)
+            out.append(cache[nm] @ Tg[:3, :3].T + Tg[:3, 3])
+        for h in b.findall("body"):
+            out.extend(nube_body(h, T @ _T_local(h, grados)))
+        return out
+    P = nube_body(cuerpos[CUERPO_MANO], _T_local(cuerpos[CUERPO_MANO], grados))
+    return reducir(np.vstack(P), paso) if P else np.zeros((0, 3))
+
+
 # ── distancias de una nube de puntos a las formas del entorno ──
 def _dist_arbol(arbol, grueso, fino, T, cota):
     """Distancia mínima de los puntos 'fino' (llevados con T al marco del árbol) a la nube del

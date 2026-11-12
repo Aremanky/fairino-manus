@@ -26,6 +26,8 @@ import time
 import cv2
 import numpy as np
 
+from skill_shield.autonomo.autocalib import ConCorreccion
+
 ID_BASE = 100              # ids de las pelotas en la lista (las herramientas ArUco van del 20 al 49)
 DIAM_MIN, DIAM_MAX = 0.03, 0.20
 
@@ -117,7 +119,7 @@ class _Pista:
         return None if len(self.hist) < 5 else float(np.linalg.norm(np.std(np.array(self.hist), 0)) * 1000)
 
 
-class DetectorPelotas:
+class DetectorPelotas(ConCorreccion):
     """paso(img, K, prof_mm) por imagen; lista() para publicar (mismo formato que las herramientas)."""
 
     def __init__(self, cfg, raiz, n_estable=5, olvido_s=2.0, salto_m=0.08):
@@ -209,6 +211,34 @@ class DetectorPelotas:
             return None
         c = self.T_mundo_cam[:3, :3] @ s.p + self.T_mundo_cam[:3, 3]
         return c.tolist(), [s.diam / 2.0 + 0.02] * 3
+
+    def pixeles_halo(self, factor=1.4, extra_px=3, delante=0.05, detras=0.30):
+        """(12-nov) Píxeles de la profundidad que NO van al mapa: alrededor de cada pelota vista en
+        la última imagen (su círculo × factor) y desde un poco delante de ella hasta bastante
+        detrás. En el borde de una pelota el estéreo mezcla la pelota con el fondo y salen puntos
+        sueltos detrás y alrededor de ella: en el mapa la «envolvían» de cubos que no existen.
+        [(u, v, radio px, z mínima m, z máxima m)]."""
+        out = []
+        for e, p, diam, (u, v, r) in self.ultimas:
+            d = float(np.linalg.norm(p))
+            z_sup = float(p[2]) * max(d - diam / 2.0, 0.05) / max(d, 1e-6)       # profundidad (Z) de su cara
+            out.append((float(u), float(v), float(r) * factor + extra_px, z_sup - delante, z_sup + diam + detras,
+                        float(v) + 0.5 * float(r)))       # por debajo de esta fila, la mesa: no se toca
+        return out
+
+    def cajas_mundo(self, margen=0.04):
+        """Caja (centro, semi) en el mundo alrededor de cada pelota vista: lo que hubiera marcado
+        antes en el mapa ahí (el halo) se borra."""
+        if self.T_mundo_cam is None:
+            return []
+        out = []
+        for e, p, diam, _ in self.ultimas:
+            c = self.T_mundo_cam[:3, :3] @ p + self.T_mundo_cam[:3, 3]
+            r = diam / 2.0
+            # de 1 cm por encima de su parte de abajo hacia arriba: lo que la sujeta (la mesa) se queda
+            z0, z1 = c[2] - r + 0.01, c[2] + r + margen
+            out.append((np.array([c[0], c[1], (z0 + z1) / 2]), np.array([r + margen, r + margen, (z1 - z0) / 2])))
+        return out
 
     def dibujar(self, img):
         for e, p, diam, (u, v, r) in self.ultimas:
