@@ -243,3 +243,5 @@ tablero_calib_robot.png
 
 # autocorrección de la calibración con el brazo (la genera el modo autónomo)
 *.correccion.json
+
+diagnosticos/*.npz
