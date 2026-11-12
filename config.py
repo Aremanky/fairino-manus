@@ -1616,10 +1616,11 @@ CALIB_ROBOT_VERIFICAR_N = 4                     # posturas que usa --verificar
 # Calibración automática (--auto): el programa elige las posturas comprobando choques con el modelo
 # de colisión de la teleoperación (soporte, suelo y TELEOP_FR5_OBSTACULOS: ¡que la mesa esté bien!)
 CALIB_AUTO_POSTURAS   = 20                      # posturas de medida (además de las ~10 de explorar)
-# (12-nov) En la calibración la OrcaHand va montada dada la vuelta respecto al gemelo: para las
-# comprobaciones de choque de la mano (contra el brazo, el giro del J4, el soporte…) se gira su
-# modelo este ángulo alrededor del eje de la brida. 0 = como en el gemelo.
-CALIB_MANO_GIRO_DEG = 180.0
+# (12-nov) Si en la calibración la OrcaHand fuera montada girada respecto al GEMELO, este ángulo
+# (alrededor del eje de la brida) gira su modelo en las comprobaciones de choque de la calibración.
+# Con la mano ya bien montada (como el gemelo), 0. Las posturas guardadas cuando la mano estaba al
+# revés se adaptan una vez con:  python calibrar_camara_robot.py --girar-posturas 180
+CALIB_MANO_GIRO_DEG = 0.0
 CALIB_AUTO_RADIO_MANO = 0.13                    # m: la mano + el tablero (14x10 cm), para las colisiones
 # Cuánto puede alejarse cada joint (J1…J6) de la postura de inicio. Los tres de la muñeca (J4, J5,
 # J6) van contenidos (10-nov): son los que estrujan lo que sale de la mano y retuercen sus cables.

@@ -1044,3 +1044,25 @@ def test_calibracion_gira_la_mano_180_alrededor_de_la_brida():
     assert girada._objetos["mano"] is girada.mano
     q = np.radians([0, -90, 90, -90, -90, 0])
     assert np.isfinite(girada.distancia(q)[0])
+
+
+def test_girar_posturas_deja_el_tablero_donde_estaba():
+    """(12-nov) Mano montada girada 180° en la brida: con el J6 girado al revés, el tablero (girado
+    con la mano) queda en el mismo sitio del mundo; las que no caben en el J6 se quitan."""
+    import calibrar_camara_robot as CR
+    from skill_shield.teleop_fr5.cinematica import cargar_cadena
+    cad = cargar_cadena(CR.cfg.RUTA_XML, verbose=False)
+    lim = np.radians([[-175, 175]] * 6)
+    T_bt = np.eye(4)
+    T_bt[:3, 3] = (0.137, 0.003, 0.316)
+    T_bt[:3, :3] = np.linalg.qr(np.random.default_rng(0).normal(size=(3, 3)))[0] * [1, 1, 1]
+    if np.linalg.det(T_bt[:3, :3]) < 0:
+        T_bt[:3, 2] *= -1
+    T_bt2 = CR.T_brida_tablero_girado(T_bt, 180)
+    posturas = [dict(q=list(np.radians([87, -35, 87, 21, 78, q6])), capturar=True) for q6 in (-104, 60, 2)]
+    nuevas, quitadas = CR.girar_posturas(posturas, 180, lim)
+    assert quitadas == 1 and len(nuevas) == 2                    # J6 = 2° → ±178°: no cabe
+    for p_ant, p_nueva in zip(posturas[:2], nuevas):
+        a = cad.fk_marcos(np.array(p_ant["q"]))[5] @ T_bt
+        b = cad.fk_marcos(np.array(p_nueva["q"]))[5] @ T_bt2
+        assert np.allclose(a, b, atol=1e-6)

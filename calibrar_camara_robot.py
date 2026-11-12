@@ -19,6 +19,9 @@ Uso (cierra antes el modo autónomo / la teleoperación: la cámara y el robot t
   python calibrar_camara_robot.py --manual            # MANUAL: mueves tú el robot (arrastre en la
                                                       #   WebApp) y pulsas ESPACIO en cada postura
   python calibrar_camara_robot.py --recalcular        # recalcula con las muestras guardadas
+  python calibrar_camara_robot.py --girar-posturas 180  # la mano se ha vuelto a montar girada 180° en la
+                                                      #   brida: adapta UNA VEZ las posturas guardadas
+                                                      #   (J6 ± 180°) y el tablero de camara_robot.json
 
 El robot solo se mueve MIENTRAS se mantiene el pedal de hombre muerto (TELEOP_FR5_PEDAL =
 "teclado": tecla P con la ventana delante, o "evdev"); al soltarlo se queda quieto. Velocidad
@@ -152,6 +155,66 @@ def _normalizar_posturas(lista):
     """calib_posturas.json admite q sueltas (se captura en todas) o {q, capturar}."""
     return [dict(q=list(map(float, p["q"])), capturar=bool(p.get("capturar", True))) if isinstance(p, dict)
             else dict(q=list(map(float, p)), capturar=True) for p in lista]
+
+
+def girar_posturas(posturas, grados, limites):
+    """(12-nov) Posturas guardadas con la mano montada de otra forma: si ahora la mano (y el tablero)
+    está girada 'grados' alrededor del eje de la brida respecto a entonces, girando el J6 al revés
+    el tablero vuelve a quedar donde estaba (mismo sitio, misma cara hacia la cámara). De las dos
+    opciones (J6 − grados, J6 − grados ± 360°) se coge la que cabe en los límites y queda más cerca
+    de la anterior (sin vueltas de los cables). Las que no caben se quitan.
+    Devuelve (posturas nuevas, cuántas se han quitado)."""
+    g = math.radians(float(grados))
+    lo, hi = float(limites[5][0]), float(limites[5][1])
+    out, quitadas, ant = [], 0, None
+    for p in posturas:
+        q = list(map(float, p["q"]))
+        cands = [q[5] - g + k * 2 * math.pi for k in (-1, 0, 1)]
+        cands = [c for c in cands if lo <= c <= hi]
+        if not cands:
+            quitadas += 1
+            continue
+        q[5] = min(cands, key=lambda c: abs(c - (ant if ant is not None else q[5] - g)))
+        ant = q[5]
+        out.append(dict(p, q=q))
+    return out, quitadas
+
+
+def T_brida_tablero_girado(T_bt, grados):
+    """El tablero, en el marco de la brida, con la mano girada 'grados' alrededor de su eje (z)."""
+    a = math.radians(float(grados))
+    R = np.eye(4)
+    R[:2, :2] = [[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]]
+    return R @ np.asarray(T_bt, float)
+
+
+def modo_girar_posturas(grados):
+    """Adapta UNA VEZ calib_posturas.json y el tablero de camara_robot.json a la mano girada (con
+    copia de seguridad *.antes_giro). La cámara (T_mundo_cam) no cambia: no depende de la mano."""
+    from skill_shield.teleop_fr5.cinematica import cargar_cadena
+    import shutil
+    cadena = cargar_cadena(cfg.RUTA_XML, verbose=False)
+    posturas = _normalizar_posturas(_leer_json(POSTURAS, []))
+    if not posturas:
+        sys.exit(f"✗ No hay posturas en {POSTURAS}.")
+    nuevas, quitadas = girar_posturas(posturas, grados, limites_articulares(cadena))
+    shutil.copy(POSTURAS, POSTURAS + ".antes_giro")
+    _escribir_json(POSTURAS, nuevas)
+    print(f"✓ {POSTURAS}: {len(nuevas)} posturas con el J6 girado {-float(grados):+.0f}°"
+          + (f" ({quitadas} no cabían en los límites del J6 y se han quitado)" if quitadas else "")
+          + f". Copia de las de antes: {POSTURAS}.antes_giro")
+    if os.path.exists(ARCHIVO):
+        with open(ARCHIVO, encoding="utf-8") as f:
+            d = json.load(f)
+        if d.get("T_brida_tablero") is not None:
+            shutil.copy(ARCHIVO, ARCHIVO + ".antes_giro")
+            d["T_brida_tablero"] = T_brida_tablero_girado(d["T_brida_tablero"], grados).round(6).tolist()
+            d["mano_girada_deg"] = float(d.get("mano_girada_deg", 0.0)) + float(grados)
+            _escribir_json(ARCHIVO, d)
+            print(f"✓ {ARCHIVO}: tablero girado {float(grados):.0f}° con la mano (la cámara no cambia). "
+                  f"Copia: {ARCHIVO}.antes_giro")
+    print("Ahora:  python calibrar_camara_robot.py --verificar   (y si sale mal, --repetir)")
+    return True
 
 
 def calcular_y_guardar(muestras, cadena, info_cam):
@@ -834,7 +897,17 @@ def modo_repetir_o_verificar(verificar, aqui=False, s=None):
         return None
     Tb = [s.cadena.fk_marcos(np.array(m["q"]))[5] for m in muestras]
     Tc = [np.array(m["T_cam_tablero"]) for m in muestras]
-    e = C.verificar(calib, Tb, Tc, s.P)
+    e_guardado = C.verificar(calib, Tb, Tc, s.P)
+    e = e_guardado
+    if len(muestras) >= 3:
+        # (12-nov) Si el tablero se ha vuelto a pegar en la mano (o la mano se ha montado de otra
+        # forma), el T_brida_tablero guardado ya no vale aunque la cámara esté perfecta. Se vuelve
+        # a medir dónde está el tablero en la mano con estas mismas muestras y la cámara guardada:
+        # si con eso cuadran, la CÁMARA está bien (lo que se movió fue el tablero).
+        T_bt = C.promediar([C.inv_T(b) @ calib["T_mundo_cam"] @ c for b, c in zip(Tb, Tc)])
+        e = C.verificar(dict(calib, T_brida_tablero=T_bt), Tb, Tc, s.P)
+        print(f"   con el tablero como estaba guardado: error medio {np.mean(e_guardado):.1f} mm · "
+              f"con el tablero medido ahora en la mano: {np.mean(e):.1f} mm (esto es lo que mide la cámara)")
     ok = float(np.max(e)) <= ERROR_MAX
     _escribir_json(os.path.splitext(ARCHIVO)[0] + "_verificacion.json",
                    dict(fecha=datetime.datetime.now().isoformat(timespec="seconds"),
@@ -902,6 +975,8 @@ def main():
     g.add_argument("--repetir", action="store_true", help="el robot repite solo las posturas guardadas (con pedal)")
     g.add_argument("--verificar", action="store_true", help="comprueba la calibración guardada")
     g.add_argument("--recalcular", action="store_true", help="recalcula con calib_muestras.json")
+    g.add_argument("--girar-posturas", type=float, metavar="GRADOS", default=None,
+                   help="la mano se ha montado girada GRADOS en la brida: adapta las posturas guardadas")
     ap.add_argument("--aqui", action="store_true", help="con --verificar: en la postura actual, sin mover el robot")
     args = ap.parse_args()
 
@@ -917,6 +992,8 @@ def main():
                                    dict(mxid=d.get("mxid"), K=np.array(i["K"]), dist=np.array(i["dist"]),
                                         ancho=i["ancho"], alto=i["alto"]))
         return 0 if ok else 1
+    if args.girar_posturas is not None:
+        return 0 if modo_girar_posturas(args.girar_posturas) else 1
     if args.verificar and not os.path.exists(ARCHIVO):
         sys.exit(f"✗ No hay calibración ({ARCHIVO}): calibra primero con --auto.")
     if args.repetir or args.verificar:
