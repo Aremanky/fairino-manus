@@ -22,15 +22,6 @@ def _salida_sin_retraso(xout):
         print(f"⚠️  [OAK] No se pudo ajustar la cola de '{xout.getStreamName()}': {e}")
 
 
-def latencia_s(paquete) -> float:
-    """Segundos desde que el sensor capturó el fotograma hasta AHORA (en el PC).
-    getTimestamp() va en el reloj del PC (DepthAI lo sincroniza), igual que dai.Clock.now()."""
-    try:
-        return (dai.Clock.now() - paquete.getTimestamp()).total_seconds()
-    except Exception:
-        return float("nan")
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # PIPELINE DEPTHAI  (OAK-D: color + estéreo para profundidad real)
 # ══════════════════════════════════════════════════════════════════════════════

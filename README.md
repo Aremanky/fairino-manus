@@ -13,18 +13,17 @@ Descargar dependencias
 ```bash
 pip install -r requirements.txt
 ```
-Luego escribir esto
+`requirements.txt` ya lleva todo (opencv-contrib, depthai, mediapipe 0.10.14, mujoco, torch, fastapi…).
+**No instales `opencv-python` aparte**: choca con `opencv-contrib-python` y desaparece `cv2.aruco`.
+
+Si mediapipe dice que no hay versión para tu Python, el entorno tiene que ser de Python 3.12:
 ```bash
-pip install opencv-python depthai mediapipe=0.10.14 mujoco torch
-```
-En caso de que mediapipe te diga que no fufa en su versión escribir esto
-```bash
-sudo rm -rf venv_nivel6
+rm -rf venv_nivel6
 python3.12 -m venv venv_nivel6
 source venv_nivel6/bin/activate
 pip install -r requirements.txt
-pip install opencv-python depthai mediapipe=0.10.14 mujoco torch
 ```
+Submódulo de los táctiles (una vez): `git submodule update --init orca_core_touch`
 
 ---
 O simplemente arrancar con la opción
@@ -32,20 +31,12 @@ O simplemente arrancar con la opción
 ./arrancar_nivel6.sh
 ```
 
----
-Lo más probable es que falle, pero es bueno para ir depurando el .txt
+Paquetes del sistema (no van por pip): `sudo apt install zenity python3.12-tk`
 
-> [!NOTE]  
-> Falta depurarlo probando en otros ordenadores, es decir, ver cuales módulos son intrínsecos del SO
-
-> [!WARNING]  
-> Si te da fallo al descargar dependencias ve al requirements.txt y borra de esa lista el modulo que te da problemas, debería de funcionar todo sin ese modulo ya que algunos son intrínsecos del SO y para ti no serán necesarios
-
-> [!CAUTION]
-> si el que te da error es PyGObject instala esto y no lo elimines de la lista
-> ```bash
-> sudo apt update && sudo apt install libcairo2-dev libgirepository1.0-dev
-> ```
+Pruebas sin hardware (no hace falta robot, mano, guante ni cámaras), en `tests/`:
+```bash
+python -m pytest tests -q
+```
 
 ---
 ## Modos de arranque (menú del principio)
@@ -98,7 +89,7 @@ Lo más probable es que falle, pero es bueno para ir depurando el .txt
    - Para revisar posturas guardadas sin mover nada: `python -m skill_shield.autonomo.choque_mano` (tabla J4×J5: `--mapa`).
 3. `python calibrar_camara_robot.py --verificar` → comprueba en 4 posturas guardadas (`--aqui`: en la postura actual, sin moverlo). Si falla, algo se ha movido → `--repetir` (repite las posturas guardadas) o `--auto`. Los dos se mueven con las mismas tres barreras, con la primera postura guardada como referencia y el tablero donde lo dejó la última calibración: **si has cambiado el tablero de sitio, usa `--auto`**.
 4. `--manual` (mueves tú el robot y pulsas ESPACIO; avisa en pantalla si la mano se acerca al robot o al soporte) y `--recalcular` (con las muestras guardadas) siguen disponibles.
-El robot solo se mueve con el pedal y a ≤ `CALIB_ROBOT_VEL_MAX_DEG_S` (10 °/s). **Revisa que el soporte y la mesa (`TELEOP_FR5_OBSTACULOS`) del modelo coinciden con la realidad**: lo que no esté en el modelo, no se evita. Cierra antes el modo autónomo: la cámara y el robot tienen que estar libres. Pruebas sin robot: `python -m pytest tests_calibracion_robot.py -q`.
+El robot solo se mueve con el pedal y a ≤ `CALIB_ROBOT_VEL_MAX_DEG_S` (10 °/s). **Revisa que el soporte y la mesa (`TELEOP_FR5_OBSTACULOS`) del modelo coinciden con la realidad**: lo que no esté en el modelo, no se evita. Cierra antes el modo autónomo: la cámara y el robot tienen que estar libres. Pruebas sin robot: `python -m pytest tests/test_calibracion_robot.py -q`.
 
 ### Mano Física + Gemelo Digital (teleoperación con el FR5 físico)
 - Arranca el FR5 real (bloque `TELEOP_REAL_*` de `config.py`; `TELEOP_REAL_FR5_SIMULACRO = True` para probar sin que se mueva).

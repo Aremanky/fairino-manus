@@ -15,17 +15,16 @@ MODO_EJECUCION = "SIMULACION"  # Opciones: "SIMULACION" | "GEMELO_SLIDERS" | "HA
 # Puerto mano
 PUERTO_HARDWARE = "/dev/ttyUSB0"
 
-# Ruta al MJCF del brazo ARCTOS + mano OrcaHand ya fusionados
-RUTA_XML  = os.path.join(_BASE_DIR, "arctos_description-main",
-                          "arctos_urdf_description", "urdf", "arctos_mjcf.xml")
+# MJCF del brazo FR5 + OrcaHand (el del ARCTOS, arctos_description-main/, ya no está en el repo)
+RUTA_XML  = os.path.join(_BASE_DIR, "fairino_description", "mjcf", "fairino_mjcf.xml")
+
+# Vista inicial del visor de MuJoCo (teleoperación) y del gemelo de la web (modo autónomo)
+VISOR_VISTA_INICIAL = dict(azimut=90.0, elevacion=-20.0, distancia=1.1, mirar=(0.15, 0.0, 0.25))
 
 # Ruta al logo IDI / Grupo Elecnor (Apuntando a la nueva carpeta Nivel6)
 RUTA_LOGO = os.path.join(_BASE_DIR, "orcahand_description-main", "v2", "I+D+I_DENOMIN_GRUPO_RGB.png")
 
 # ── PARÁMETROS DE LA CÁMARA OAK-D Y PROYECCIÓN ────────────────────────────────
-RES            = 300    # (LEGADO) resolución cuadrada antigua. Ya no se usa en el teleop;
-                        # se deja por si algún script auxiliar (p.ej. test_ia_mano.py) la importa.
-
 # Formato 4:3 (SENSOR COMPLETO). El sensor de color de la OAK-D (IMX378) es 4:3.
 # Al pedir 1080p (16:9) el firmware RECORTA franjas arriba y abajo: se pierde ~24 %
 # de altura de visión. Pidiendo 12 MP (4056x3040, 4:3) y escalando en el ISP se
@@ -50,88 +49,23 @@ POSE_COMPLEJIDAD         = 1      # 0 = rápido | 1 = equilibrado | 2 = más pre
 POSE_CONF_DETECCION      = 0.6
 POSE_CONF_SEGUIMIENTO    = 0.45   # BAJADO: con el bucle a ~12 FPS un 0.6 hace que Pose
                                   # pierda el "lock" y reinicie la detección constantemente
-POSE_MEDIR_FPS           = True   # imprime los FPS reales del bucle de teleoperación
 
-# ── DETECCIÓN DE PELOTA POR COLOR HSV ─────────────────────────────────────────
-COLORES_HSV = {
-    "pelota_amarilla": ((22,  80, 100), (38, 255, 255)),
-    "pelota_roja":     ((0,   95,  95), (10, 105, 105)),
-    "verde":           ((36,  50,  70), (89, 255, 255)),
-    "pelota_azul":     ((94,  80,  20), (126, 255, 255)),
-}
-COLOR_PELOTA       = "pelota_amarilla"
-MIN_AREA_PELOTA    = 800
-N_FRAMES_DEBOUNCE  = 10
+# (Pelotas del modo autónomo: AUTONOMO_PELOTAS, más abajo)
 
-# ── PUNTOS DE APARICIÓN (SPAWN) DINÁMICOS POR POSE ────────────────────────────
-PUNTOS_SPAWN = {
-    "arriba": {
-        "pelota":         {"pos": ( 0.0, 0.08, 0.30), "euler": (0.0, 0.0, 0.0)},
-        "destornillador": {"pos": ( 0.0, 0.08, 0.30), "euler": (1.5708, 0.0, -1.70)},
-        "soporte":        {"pos": ( 0.0, 0.09, 0.17), "euler": (0.0, 0.0, -0.3)}
-    },
-    "izquierda": {
-        "pelota":         {"pos": ( 0.0, -10, 0.20),  "euler": (0.0, 0.0, 0.0)},
-        "destornillador": {"pos": ( 0.185, 0.035, 0.0), "euler": (0.0, 0.0, 0.0)},
-        "soporte":        {"pos": ( 0.0, 0.0, 0.10),  "euler": (0.0, 0.0, 0.0)}
-    },
-    "abajo": {
-        "pelota":         {"pos": ( 0.0, 0.2, -0.05), "euler": (0.0, 0.0, 0.0)},
-        "destornillador": {"pos": ( -0.005, 0.2, -0.05), "euler": (1.5708, 0.0, -1.70)},
-        "soporte":        {"pos": ( 0.0, 0.0, 0.10),  "euler": (0.0, 0.0, 0.0)}
-    },
-    "derecha": {
-        "pelota":         {"pos": ( 0.0, -0.20, 0.25), "euler": (0.0, 0.0, 0.0)},
-        "destornillador": {"pos": ( 0.02, -0.20, 0.0), "euler": (1.5708, 0.0, -1.70)},
-        "soporte":        {"pos": ( 0.0, 10.0, -10.10), "euler": (0.0, 0.0, 0.0)}
-    }
-}
-
-# ── BRAZO ARCTOS: JOINTS, LÍMITES Y OFFSET DE ACTUADORES ──────────────────────
-# En arctos_mjcf.xml el <actuator> define PRIMERO los 6 del brazo y DESPUÉS
+# ── BRAZO: JOINTS Y OFFSET DE ACTUADORES ─────────────────────────────────────
+# (Límites, reposo y mapeo del FR5: bloque «BRAZO FAIRINO FR5», más abajo.)
+# En el MJCF el <actuator> define PRIMERO los 6 del brazo y DESPUÉS
 # los 17 de la mano. OFFSET_MANO es cuánto hay que desplazar cualquier índice
 # "de mano" (0..16, los mismos de siempre) para caer en el actuador correcto
 # de datos.ctrl[] una vez cargado el modelo fusionado.
 ARM_JOINTS = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
-
-LIMITES_CTRL_BRAZO = [
-    (-3.14, 3.14),   # joint1 (base)
-    (-2.5,  2.5),    # joint2 (hombro)
-    (-2.5,  2.5),    # joint3 (codo)
-    (-3.14, 3.14),   # joint4 (muñeca 1)
-    (-3.14, 3.14),   # joint5 (muñeca 2)
-    (-3.14, 3.14),   # joint6 (muñeca 3)
-]
-
-# Postura de reposo del brazo mientras no haya IK conectada (paso 1) o cuando
-# no se esté siguiendo la cámara. AJUSTA ESTOS VALORES en el visor MuJoCo a
-# una postura cómoda, sin autocolisión con la mano ni con la mesa.
-POSICION_STANDBY_BRAZO = [0.0, -0.3, 0.6, 0.0, 0.0, 0.0]
 
 OFFSET_MANO = len(ARM_JOINTS)  # = 6
 
 # ── ACTUADORES Y LÍMITES ANATÓMICOS DE SEGURIDAD (MANO) ───────────────────────
 N_ACT = 17
 
-LIMITES_CTRL = [
-    (-1.134,  0.610),  #  0: muñeca
-    (-0.20,   0.50),   #  1: meñique abd
-    ( 0.0,    1.80),   #  2: meñique mcp
-    ( 0.0,    1.80),   #  3: meñique pip
-    (-0.20,   0.50),   #  4: anular abd
-    ( 0.0,    1.80),   #  5: anular mcp
-    ( 0.0,    1.80),   #  6: anular pip
-    ( 0.0,    0.0),    #  7: corazón abd (fijo)
-    ( 0.0,    1.80),   #  8: corazón mcp
-    ( 0.0,    1.80),   #  9: corazón pip
-    (-0.50,   0.50),   # 10: índice abd
-    ( 0.0,    1.80),   # 11: índice mcp
-    ( 0.0,    1.80),   # 12: índice pip
-    (-0.785,  1.85),   # 13: pulgar oposición/CMC
-    (-0.35,   1.35),   # 14: pulgar abd
-    (-0.15,   1.80),   # 15: pulgar mcp  ← permite extensión activa
-    ( 0.0,    1.80),   # 16: pulgar ip
-]
+# LIMITES_CTRL (límites de la mano): bloque «RECORRIDO COMPLETO DE LA MANO», más abajo.
 
 POSICION_STANDBY = [
     0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
@@ -305,88 +239,20 @@ HOMBRO_PROF_HACIA_TORSO = 0.6
 PROF_RELLENO_MEDIAPIPE = True
 
 # ── DATASET E IA (ARCHIVOS) ───────────────────────────────────────────────────
-ARCHIVO_DATASET = "movimientos_mano.csv"
 ARCHIVO_PESOS   = "cerebro_orca.pth"
 
-# ── MAPEO MUÑECA HUMANA → OBJETIVO DEL EFECTOR DEL BRAZO ARCTOS ──────────────
-# Punto (en metros, en el frame BASE del ARCTOS) donde debe estar el efector
-# final (Link_6_1) cuando la muñeca humana está en su posición NEUTRA
-# (la que tenga en el instante en que actives la cámara con [A]).
-# Ajusta esto a un punto cómodo y alcanzable del brazo (ni muy cerca de la
-# base ni estirado al límite).
-ARM_OBJETIVO_NEUTRO = (0.30, 0.0, 0.30)   # (X adelante, Y lateral, Z altura)
-
-# Cuántos metros se mueve el efector del brazo por cada metro que se mueve
-# la muñeca humana respecto a la cámara. 1.0 = movimiento 1:1.
-ARM_ESCALA_MOVIMIENTO = (1.0, 1.0, 1.0)   # (X, Y, Z) del robot
-
-# La cámara entrega (x_m, y_m, z_m) con: x = lateral (+derecha),
-# y = vertical (+hacia ABAJO, porque el eje Y de imagen crece hacia abajo),
-# z = profundidad (+alejándose de la cámara).
-# Aquí decides qué eje de CÁMARA alimenta cada eje del ROBOT, y con qué signo.
-# Son valores de partida — muy probablemente tocará invertir algún signo tras
-# la primera prueba (ver más abajo cómo hacerlo).
-#
-# AJUSTE (tras la primera prueba con el brazo): el mapeo "intuitivo" de
-# arriba (adelante←profundidad, lateral←x) resultó estar CRUZADO en la
-# práctica — mover la muñeca hacia la cámara movía el brazo a la derecha, y
-# moverla a la izquierda lo movía hacia delante. Así que aquí abajo la
-# profundidad ("z") alimenta ahora el lateral del robot, y el lateral de
-# cámara ("x") alimenta el "adelante" del robot.
-#
-# Los signos son una PRIMERA HIPÓTESIS para que "izquierda → delante" y
-# "hacia la cámara → derecha" salgan en el sentido correcto — pruébalo y, si
-# alguno sale invertido (p.ej. "hacia delante" te lleva hacia atrás), cambia
-# solo el signo de esa fila (+1.0 ↔ -1.0), no el eje de cámara.
-ARM_MAPEO_EJES = {
-    "robot_x": ("x", 1.0),   # "adelante" del robot ← lateral de la cámara
-    "robot_y": ("z", 1.0),   # lateral del robot ← profundidad de la cámara
-    "robot_z": ("y", -1.0),   # altura del robot ← vertical de cámara (invertido)
-}
-
-# Seguridad: nunca apuntar el efector a más de este radio desde la base,
-# ni por debajo de esta altura (evita objetivos de IK imposibles o que
-# choquen contra la mesa).
-ARM_RADIO_MAX  = 0.55   # metros
+# Altura mínima del objetivo del brazo (con la peana; con el soporte de hombros, más abajo)
 ARM_Z_MINIMA   = 0.05   # metros
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PASO 4 — IMITACIÓN DEL BRAZO HUMANO POR ÁNGULOS ARTICULARES (ARCTOS)
 # ══════════════════════════════════════════════════════════════════════════════
 # "imitacion" → el brazo copia los ÁNGULOS del brazo humano (joint1..3), sin IK.
-# "ik"        → el modo anterior: la punta del brazo persigue tu muñeca (IK).
+# (El antiguo "ik" —la punta del brazo persigue tu muñeca— ya no existe.)
 MODO_BRAZO = "imitacion"
 
-# Cómo se convierte cada ángulo humano (en RADIANES) en el ángulo de un joint:
-#
-#       q_joint = offset + signo * escala * angulo_humano
-#
-# Sale de la geometría del arctos_mjcf.xml (con todos los q = 0 el brazo apunta
-# HACIA ARRIBA y el antebrazo horizontal hacia delante; "delante" del robot = -Y):
-#   · joint1 (giro de base, eje +Z): q>0 gira el brazo hacia la IZQUIERDA del robot.
-#       Tu azimut es + hacia FUERA (tu derecha) → signo -1  (tu derecha = su derecha).
-#   · joint2 (hombro, eje +X): q=0 brazo vertical hacia arriba; q crece hacia delante y abajo.
-#       Tu elevación es 0 con el brazo colgando y 180° con él arriba → q2 = π - elevación.
-#   · joint3 (codo, eje -X): con q≈1.52 el antebrazo sigue la línea del brazo (codo
-#       estirado); q baja al flexionar → q3 = 1.52 - flexión.
-#
-# Si al probar un joint se mueve al revés, cambia SOLO su signo (+1 ↔ -1).
-# Si un joint sale "descentrado" (p.ej. el codo estirado no queda recto), retoca su offset.
-ARM_IMITACION = {
-    #  joint      (ángulo humano, signo, offset [rad],  escala)
-    "joint1": ("azimut",    -1.0, 0.0,      1.0),
-    "joint2": ("elevacion", -1.0, math.pi,  1.0),
-    "joint3": ("codo",      -1.0, 1.52,     1.0),
-}
-
-# Límites de SEGURIDAD para la imitación (rad). Más estrechos que los del actuador:
-#   · joint2 máx 2.3 evita que el brazo baje del todo y golpee la mesa
-#   · joint3 evita plegar el codo contra el propio brazo
-IMITAR_LIMITES = {
-    "joint1": (-3.14, 3.14),
-    "joint2": (-2.5, 2.5),
-    "joint3": (-2.5, 2.5),
-}
+# Ángulo humano → joint: q_joint = offset + signo * escala * angulo_humano.
+# ARM_IMITACION e IMITAR_LIMITES del FR5: bloque «BRAZO FAIRINO FR5», más abajo.
 
 IMITAR_VEL_MAX   = 1.5   # (antes 2.5; con física en tiempo real era demasiado brusco) rad/s: velocidad máxima de cada joint (protege de saltos)
 
@@ -435,7 +301,6 @@ PRONO_ESCALA   = 1.2
 PRONO_LIMITE   = 1.5        # rad (~86°) a cada lado del neutro
 PRONO_VEL_MAX  = 2.0        # (antes 3.0) rad/s
 PRONO_SUAVIZADO = 0.35      # 0..1 (filtro exponencial; más bajo = más suave)
-JOINT5_FIJO    = 0.0        # muñeca del ARCTOS recta: la flexión la hace la OrcaHand
 
 # Vertical para medir el brazo:
 #   "caderas" → línea cadera→hombro (bien de pie; SENTADO la mesa tapa las caderas)
@@ -699,6 +564,7 @@ CAM_B_MXID          = "1944301081B5FA4800"    # MxId de la cámara secundaria. S
 EXTRINSECAS_ARCHIVO = "camaras_extrinsecas.json"   # lo genera calibrar_extrinseca.py
 MULTICAM_SYNC_MAX_S = 0.04    # máx. desfase (s) entre el fotograma de A y el de B para emparejarlos
 MULTICAM_MOSTRAR_B  = True    # ventana de depuración "Camara B"
+CAM_A_IR_MA         = 800     # proyector IR de la A (mA, máx. ~1200 en la OAK-D Pro; 0 = apagado)
 CAM_B_IR_MA         = 800     # proyector IR de la B (mA)
 
 # Fusión: incertidumbre de cada medida (σ_z = K·z², lateral = σ_pix·z/f) y rechazo de discrepancias
@@ -722,7 +588,7 @@ FUSION_MEMORIA_S    = 0.5     # validez del último punto bueno para desempatar
 REUBICAR_OBJETIVOS = True    # False = comportamiento anterior (recorte a ARM_Z_MINIMA)
 COMPRIMIR_ABAJO    = True
 PALMA_Z_MIN        = 0.15    # m: altura mínima del centro de la palma (los dedos cuelgan algo más)
-CODO_Z_MIN         = 0.12    # m: altura mínima del codo (también lo usa limites_humanos.py)
+CODO_Z_MIN         = 0.0     # m: altura mínima del codo (FR5 en peana; con el soporte, más abajo)
 
 # 2) CODO SOLO CUANDO SE MIDE BIEN. En el vídeo el codo salía casi siempre reconstruido
 #    ("c:R", CODO ESTIMADO) y su objetivo quedaba a 22-34 cm: tiraba de la postura.
@@ -774,37 +640,9 @@ MANUS_CALIBRACION = os.path.join(_BASE_DIR, "manus_calibracion.json")   # lo gen
 MANUS_TIMEOUT_S = 0.3       # s sin datos del guante → los dedos se quedan donde estén
 MANUS_TAU_S     = 0.025     # s: suavizado de los dedos (0 = sin suavizado)
 # Vibración: fuerza de contacto en cada yema de la OrcaHand (simulación) → ese dedo del guante
-MANUS_HAPTICA       = True
-MANUS_HAPTICA_HZ    = 30.0
-MANUS_FUERZA_MIN    = 0.05  # N
-MANUS_FUERZA_MAX    = 3.0   # N
-MANUS_VIBRACION_MAX = 1.0
+MANUS_HAPTICA       = True     # (HZ, VIBRACION_MAX y el resto: bloque HÁPTICA REAL, más abajo)
 
-# ── Rangos del ROBOT (rad) en los extremos de TU mano: (cuando estás en tu mínimo, cuando
-# estás en tu máximo). Tus ángulos en esos extremos los mide calibrar_manus.py. Si un dedo
-# va al revés, intercambia los dos valores de su par; si no cierra del todo, sube el máximo;
-# si choca, bájalo. Claves = índice de ctrl de la mano (0..16, como LIMITES_CTRL).
-# Sentidos de la OrcaHand (cinemática del MJCF):
-#   abd de los dedos: + = la yema va HACIA EL PULGAR (índice + = abre; anular/meñique + = cierran)
-#   t-abd (14):  + = pulgar tumbado en el plano de la palma ; − = pulgar perpendicular a la palma
-#   t-cmc (13):  + = pulgar barre hacia la base del meñique (oposición) ; − = hacia fuera
-MANUS_RANGO_ROBOT = {
-    # flexión (mano abierta → puño). Hardware: mcp hasta 100° (1.745 rad), pip hasta 107° (1.867)
-    2:  (0.0, 1.70),  3:  (0.0, 1.80),      # meñique mcp, pip
-    5:  (0.0, 1.70),  6:  (0.0, 1.80),      # anular
-    8:  (0.0, 1.70),  9:  (0.0, 1.80),      # corazón
-    11: (0.0, 1.70),  12: (0.0, 1.80),      # índice
-    # abducción (dedos JUNTOS → SEPARADOS). Los "juntos" son la convergencia de retargeting.py
-    10: (-0.27, 0.45),                      # índice
-    4:  (0.225, -0.25),                     # anular
-    1:  (0.42, -0.25),                      # meñique
-    7:  (0.0, 0.0),                         # corazón: fijo
-    # pulgar
-    14: (0.90, -0.25),     # CMC_SPREAD:  pulgar en el plano de la palma → perpendicular a ella
-    13: (-0.60, 0.576),    # CMC_STRETCH: pulgar extendido hacia fuera → cruzado hacia el meñique
-    15: (0.0, 1.50),       # MCP: recto → doblado
-    16: (0.175, 1.50),     # IP:  recto → doblado
-}
+# MANUS_RANGO_ROBOT (robot en tus extremos): bloque «RECORRIDO COMPLETO DE LA MANO», más abajo.
 # Ganancia extra sobre la fracción de recorrido (1.0 = tu extremo = extremo del robot). Con 1.15
 # llegas al extremo del robot con el 87 % de tu recorrido: útil si con el guante no aprietas el
 # puño del todo o quieres pinzas más "decididas". Claves: nombres de actuador.
@@ -814,13 +652,6 @@ MANUS_GANANCIA = {
     "indice_abd": 1.00, "anular_abd": 1.00, "menique_abd": 1.00,
     "pulgar_cmc": 1.00, "pulgar_abd": 1.00, "pulgar_mcp": 1.00, "pulgar_ip": 1.00,
 }
-# ── Pinzas con el guante ──
-# Cuando tu mano se parece (RMS en grados sobre pulgar + dedo) a una de las 7 pinzas grabadas en
-# calibrar_manus.py, el comando se mezcla con la pose de contacto del robot (PINZA_CTRL_CONTACTO,
-# retargeting.py): 0 % por encima de OFF, 100 % por debajo de ON, continuo entre medias.
-MANUS_PINZA_ACTIVA  = True
-MANUS_PINZA_ON_DEG  = 7.0    # súbelo si la pinza "parpadea"; bájalo si entra en pinza sin querer
-MANUS_PINZA_OFF_DEG = 14.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -877,20 +708,6 @@ MANUS_RANGO_ROBOT = {
     16: (0.0, 1.867),      # IP:  recto → doblado del todo
 }
 
-# Márgenes: qué parte de TU recorrido ya cuenta como extremo (inicio, final). Con (0.10, 0.20)
-# el robot cierra el puño del todo con el 80 % de tu puño de calibración y se estira del todo
-# con tu mano "casi" abierta. Claves: "flex", "abd", "pulgar" o el nombre de un actuador
-# (p. ej. "indice_pip": (0.10, 0.30)). (0, 0) = como antes.
-MANUS_MARGEN = {"flex": (0.10, 0.20), "abd": (0.10, 0.15), "pulgar": (0.10, 0.15)}
-
-# Poses intermedias: el robot pasa EXACTAMENTE por aquí cuando repites esa pose (rad).
-MANUS_ROBOT_INTERMEDIO = {
-    7:  {"abierta": 0.0},        # corazón recto con la mano abierta
-    13: {"pulgar_perp": -0.16},  # pulgar perpendicular = lo más lejos de la palma
-    14: {"pulgar_perp": -0.31},
-    15: {"pulgar_cruz": 1.40},   # pulgar cruzado = yema APOYADA en la palma
-}
-
 # 3) Mano física (orca_hardware.py)
 ORCA_HW_SIGNOS             = {}      # tu mano va en el MISMO sentido que el sim (comprobado)
 ORCA_HW_CIERRE_COMPLETO    = True    # "cerrado" del sim → tope de flexión calibrado + sobrecarrera
@@ -900,22 +717,8 @@ ORCA_HW_APERTURA_COMPLETA  = False   # True = "abierto" del sim → tope de EXTE
 ORCA_HW_TRAMO_FIEL         = (0.25, 0.60)   # zona central sin estirar (fracción del recorrido)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# POSE DEL BRAZO AL PULSAR [A] (9-oct) — pega este bloque AL FINAL de config.py
+# MUÑECA DEL PIPELINE ANTIGUO (solo con TELEOP_FR5_V2 = False)
 # ═══════════════════════════════════════════════════════════════════════════
-# Los 6 joints del ARCTOS (rad) a los que va el brazo al pulsar [A], en vez de la T-pose.
-# Se queda ahí mientras calibras la T-pose (~2 s) y, cuando empieza a imitarte, sale desde
-# ahí (la muñeca del ARCTOS vuelve a JOINT5_FIJO). None = como antes (T-pose).
-# Sacada de la foto del brazo real con la cinemática y las mallas del ARCTOS (el modelo
-# superpuesto a la foto coincide en base, hombro, codo y antebrazo):
-#   joint1 +90°  brazo girado a SU izquierda (la cara de la base con las rejillas mira a la
-#                cámara; desde la vista inicial del visor se ve igual que en la foto)
-#   joint2 −21°  hombro inclinado hacia atrás
-#   joint3 −34°  antebrazo casi horizontal (13° hacia abajo)
-#   joint4   0°
-#   joint5 −77°  muñeca doblada hasta que la brida mira al suelo
-#   joint6   0°  (en la foto no se ve el giro de la brida)
-POSE_BRAZO_ACTIVAR = [1.571, -0.37, -0.60, 0.0, 0.0, 0.0]
-
 # Velocidad / aceleración del comando continuo de joint4 y joint5 (como SUAVE_VEL_MAX)
 SUAVE_VEL_MUNECA_ARCTOS  = 1.5    # rad/s
 SUAVE_ACEL_MUNECA_ARCTOS = 15.0   # rad/s²
@@ -966,60 +769,51 @@ MANUS_HAPTICA_DEBUG = False               # True: imprime fuerza y vibración po
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BRAZO: ARCTOS <-> FAIRINO FR5 (26-oct) — añadido por aplicar_fr5.py
+# BRAZO FAIRINO FR5 (26-oct)
 # ═══════════════════════════════════════════════════════════════════════════
-# Al ir al final MANDA sobre los valores del ARCTOS de más arriba.
-# "ARCTOS" = todo exactamente como antes · "FR5" = brazo FAIRINO FR5.
-ROBOT_BRAZO = "FR5"
+# (El ARCTOS ya no está en el repo: estos son los únicos valores del brazo.)
+ROBOT_BRAZO = "FR5"     # solo informativo (se guarda en los episodios)
 
-if ROBOT_BRAZO == "FR5":
-    # Modelo: lo genera crear_fairino_mjcf.py (mismo arctos_mjcf.xml con el FR5 en vez del ARCTOS)
-    RUTA_XML = os.path.join(_BASE_DIR, "fairino_description", "mjcf", "fairino_mjcf.xml")
+# Rangos reales del FR5: ±175° · -265°..+85° · ±160° · -265°..+85° · ±175° · ±175°
+LIMITES_CTRL_BRAZO = [
+    (-3.0543, 3.0543),   # joint1 (base)
+    (-4.6251, 1.4835),   # joint2 (hombro)  — 0 = brazo horizontal, -π/2 = vertical
+    (-2.8274, 2.8274),   # joint3 (codo)    — 0 = antebrazo recto
+    (-4.6251, 1.4835),   # joint4 (muñeca 1)
+    (-3.0543, 3.0543),   # joint5 (muñeca 2)
+    (-3.0543, 3.0543),   # joint6 (muñeca 3, giro de la brida)
+]
 
-    # Rangos reales del FR5: ±175° · -265°..+85° · ±160° · -265°..+85° · ±175° · ±175°
-    LIMITES_CTRL_BRAZO = [
-        (-3.0543, 3.0543),   # joint1 (base)
-        (-4.6251, 1.4835),   # joint2 (hombro)  — 0 = brazo horizontal, -π/2 = vertical
-        (-2.8274, 2.8274),   # joint3 (codo)    — 0 = antebrazo recto
-        (-4.6251, 1.4835),   # joint4 (muñeca 1)
-        (-3.0543, 3.0543),   # joint5 (muñeca 2)
-        (-3.0543, 3.0543),   # joint6 (muñeca 3, giro de la brida)
-    ]
+# Muñeca "recta" (la OrcaHand sigue la línea del antebrazo): joint4 = 0 y joint5 = +90°.
+# (El FR5 tiene muñeca tipo UR; en el ARCTOS la recta era joint5 = 0.)
+JOINT5_FIJO = 1.5708
 
-    # Muñeca "recta" (la OrcaHand sigue la línea del antebrazo): joint4 = 0 y joint5 = +90°.
-    # (El FR5 tiene muñeca tipo UR; en el ARCTOS la recta era joint5 = 0.)
-    JOINT5_FIJO = 1.5708
+# Reposo: brazo vertical, antebrazo 25° por debajo de la horizontal, muñeca recta
+POSICION_STANDBY_BRAZO = [0.0, -1.5708, 2.0, 0.0, 1.5708, 0.0]
 
-    # Reposo: brazo vertical, antebrazo 25° por debajo de la horizontal, muñeca recta
-    POSICION_STANDBY_BRAZO = [0.0, -1.5708, 2.0, 0.0, 1.5708, 0.0]
+# Ángulos humanos → joints. Calculado con la cinemática del FR5 para que las
+# direcciones sean LAS MISMAS que con el ARCTOS (delante del robot = -Y, T-pose = -X):
+#   joint1 = π/2 - azimut     (T-pose → 0, brazo al frente → π/2)
+#   joint2 = π/2 - elevación  (horizontal → 0, arriba → -π/2, colgando → +π/2)
+#   joint3 = -codo            (codo recto → 0; T-pose + codo 90° → antebrazo hacia arriba)
+# Si al probar un joint se mueve al revés, cambia SOLO su signo (+1 ↔ -1).
+ARM_IMITACION = {
+    "joint1": ("azimut",    -1.0, math.pi / 2, 1.0),
+    "joint2": ("elevacion", -1.0, math.pi / 2, 1.0),
+    "joint3": ("codo",      -1.0, 0.0,         1.0),
+}
+IMITAR_LIMITES = {
+    "joint1": (-3.0543, 3.0543),
+    "joint2": (-2.10, 1.4835),   # -2.10 = 0.5 rad más allá de la vertical, hacia atrás
+    "joint3": (-2.8274, 2.8274),
+}
 
-    # Ángulos humanos → joints. Calculado con la cinemática del FR5 para que las
-    # direcciones sean LAS MISMAS que con el ARCTOS (delante del robot = -Y, T-pose = -X):
-    #   joint1 = π/2 - azimut     (T-pose → 0, brazo al frente → π/2)
-    #   joint2 = π/2 - elevación  (horizontal → 0, arriba → -π/2, colgando → +π/2)
-    #   joint3 = -codo            (codo recto → 0; T-pose + codo 90° → antebrazo hacia arriba)
-    # Si al probar un joint se mueve al revés, cambia SOLO su signo (+1 ↔ -1).
-    ARM_IMITACION = {
-        "joint1": ("azimut",    -1.0, math.pi / 2, 1.0),
-        "joint2": ("elevacion", -1.0, math.pi / 2, 1.0),
-        "joint3": ("codo",      -1.0, 0.0,         1.0),
-    }
-    IMITAR_LIMITES = {
-        "joint1": (-3.0543, 3.0543),
-        "joint2": (-2.10, 1.4835),   # -2.10 = 0.5 rad más allá de la vertical, hacia atrás
-        "joint3": (-2.8274, 2.8274),
-    }
+# Pose al pulsar [A]: None = T-pose del robot (joint1..3 = 0, brazo horizontal).
+# La del ARCTOS salía de una foto del brazo real; para el FR5 se puede sacar igual.
+POSE_BRAZO_ACTIVAR = None
 
-    # Pose al pulsar [A]: None = T-pose del robot (joint1..3 = 0, brazo horizontal).
-    # La del ARCTOS salía de una foto del brazo real; para el FR5 se puede sacar igual.
-    POSE_BRAZO_ACTIVAR = None
-
-    # Espacio de trabajo. El hombro del FR5 está a 0.152 m sobre su base (d1 oficial; el modelo
-    # antiguo decía 0.155) (el del ARCTOS a
-    # 0.29) y el brazo es mucho más largo (0.425 + 0.395 m). Con CODO_Z_MIN = 0 el codo puede
-    # bajar hasta la altura de la peana (~21° por debajo de la horizontal).
-    CODO_Z_MIN    = 0.0
-    ARM_RADIO_MAX = 0.90
+# Espacio de trabajo. El hombro del FR5 está a 0.152 m sobre su base (d1 oficial) y el brazo
+# mide 0.425 + 0.395 m. (CODO_Z_MIN = 0 va arriba: el codo puede bajar a la altura de la peana.)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1052,7 +846,6 @@ def _leer_soporte(ruta):
 
 
 SOPORTE_HOMBROS, SOPORTE_SUELO_Z = _leer_soporte(RUTA_XML)
-SOPORTE_HOMBROS = SOPORTE_HOMBROS and ROBOT_BRAZO == "FR5"
 
 if SOPORTE_HOMBROS:
     if SOPORTE_SUELO_Z is None:
@@ -1148,7 +941,7 @@ TELEOP_FR5_ENTRADA_FIN_RAD   = 0.05     # rad (≈ 3°) por joint: aquí acaba l
 #   "evdev":   pedal USB físico (TELEOP_FR5_PEDAL_EVDEV)
 #   "tecla":   cada pulsación alterna (OpenCV no ve cuándo se suelta): solo como reserva
 TELEOP_FR5_PEDAL             = "teclado"  # "teclado" | "evdev" | "tecla" | None
-TELEOP_FR5_PEDAL_TECLAS      = (ord("p"), ord("P"), 112)   # modo "tecla": códigos de cv2.waitKeyEx
+TELEOP_FR5_PEDAL_TECLAS      = (ord("p"), ord("P"))   # modo "tecla": códigos de cv2.waitKeyEx
 TELEOP_FR5_PEDAL_EVDEV       = None     # modo "evdev": "/dev/input/by-id/...", parte del nombre,
                                         # o None = buscarlo solo (nombre con "pedal", "foot"...)
 TELEOP_FR5_PEDAL_EVDEV_CODIGO = None    # código de la tecla del pedal (None = cualquiera)
@@ -1165,8 +958,12 @@ TELEOP_FR5_PEDAL_TECLADO_CODIGO = 25    # modo "teclado": código evdev de la te
 # (naranja = objeto, rojo = zona prohibida) con TELEOP_FR5_OBSTACULOS_VER.
 # ⚠ MEDIRLAS EN EL LABORATORIO: lo que tenga posición None NO se protege (se avisa al arrancar).
 TELEOP_FR5_OBSTACULOS_VER = False
-_MESA = globals().get("TALLER_POS_MESA", (-0.45, -0.45, -0.40))      # (x, y, z del tablero)
-_PEANA = globals().get("TALADRO_POS_SOPORTE", (-0.66, -0.29, 0.25))  # (x, y, z de la cara de arriba)
+# Mesa REAL de trabajo (la usan la IK, la calibración automática y el planificador del modo autónomo).
+# Antes salía de TALLER_POS_MESA, la mesa de la escena [3] del SIMULADOR: si movíais esa escena, se
+# movía el obstáculo «real». Mismos valores de momento: ⚠ MEDIDLA en el laboratorio.
+MESA_REAL_XYZ = (-0.45, -0.45, -0.40)      # (x, y del centro, z del tablero) en el mundo del MJCF
+_MESA = MESA_REAL_XYZ
+_PEANA = TALADRO_POS_SOPORTE               # peana del taladro de la escena [4] (desactivada abajo)
 TELEOP_FR5_OBSTACULOS = [
     # desde_suelo=True: del suelo hasta z_sup. Por defecto, donde están en el simulador ([3] y [4]).
     dict(nombre="mesa",  xy=_MESA[:2],  semi_xy=(0.18, 0.28),     z_sup=_MESA[2],  desde_suelo=True),
@@ -1389,7 +1186,7 @@ IA_PESO_EXP         = 0.15    # ensamblado temporal: más alto = más peso a la 
 # Paso 2 de la hoja de ruta: cámara de cabeza + gemelo en MuJoCo + web, SIN mover el robot
 # (fr5_servo va siempre en simulacro en este modo, diga lo que diga FR5_SIMULACRO).
 AUTONOMO_CON_FR5      = True             # arrancar fr5_servo (solo lectura) para el gemelo
-AUTONOMO_CAM_MXID     = "1944301081B5FA4800"   # cámara de CABEZA = la antigua cámara B
+AUTONOMO_CAM_MXID     = CAM_B_MXID       # cámara de CABEZA = la antigua cámara B
 AUTONOMO_CAM_VENTANA  = False            # True = además de la web, ventana de OpenCV con la imagen
 AUTONOMO_CAM_IR_MA    = 800              # proyector IR de puntos (mejor profundidad en la mesa lisa)
 AUTONOMO_JPEG_CALIDAD = 80               # calidad del vídeo de la web (más alto = más ancho de banda)
@@ -1402,9 +1199,20 @@ AUTONOMO_CON_MANO     = True             # vigilar la OrcaHand (SOLO LECTURA: no
 AUTONOMO_MANO_POSTURA_PERIODO_S = 0.1   # leer la postura de la mano (muñeca + dedos) para el gemelo y
                                          # el mapa cada estos s (solo lectura); None = no leerla
 AUTONOMO_CON_TACTIL   = True             # lanzar el puente de los táctiles (si ORCA_TACTIL_ACTIVO)
-# Web (FastAPI): mandos protegidos con contraseña. CAMBIADLA. None = sin contraseña (cualquiera
-# de la red podría pisar el pedal o reiniciar el robot desde la web).
-AUTONOMO_WEB_CLAVE    = "elecnor"
+# Web (FastAPI): mandos protegidos con contraseña. NO se escribe aquí (el repo es público): se
+# lee de la variable de entorno SKILL_SHIELD_WEB_CLAVE o, si no existe, de clave_web.txt (una
+# línea, en la raíz del proyecto; está en .gitignore). Si no hay ninguna, la web genera una al
+# arrancar y la imprime en la terminal (nunca queda abierta sin contraseña a la red).
+def _clave_web():
+    clave = os.environ.get("SKILL_SHIELD_WEB_CLAVE", "").strip()
+    ruta = os.path.join(_BASE_DIR, "clave_web.txt")
+    if not clave and os.path.exists(ruta):
+        with open(ruta, encoding="utf-8") as _f:
+            clave = _f.read().strip()
+    return clave or None
+
+
+AUTONOMO_WEB_CLAVE    = _clave_web()
 # Pedal de la web: mantener pulsado el botón grande (o la barra espaciadora). La página manda un
 # latido cada 100 ms; sin latido durante AUTONOMO_PEDAL_LATIDO_S = pedal SUELTO.
 AUTONOMO_PEDAL_OBLIGATORIO = True        # cómo arranca la opción «Pedal obligatorio» de la web
@@ -1450,6 +1258,8 @@ AUTONOMO_MAPA_MIN_GRUPO  = 4         # cubos ocupados juntos como mínimo (los s
 AUTONOMO_MAPA_OLVIDO_S = 30.0            # lo que no se ve en este tiempo vuelve a «desconocido»
 AUTONOMO_MAPA_MARGEN_ROBOT = 0.03        # m extra alrededor de las cápsulas del robot (se quita del mapa)
 AUTONOMO_MAPA_DESCONOCIDO_OCUPADO = True # para esquivar: lo tapado (debajo/detrás de algo) cuenta como obstáculo
+                                         # ⚠ AÚN SIN EFECTO: tarea.py no lo lee (hoja de ruta, límite «lo de
+                                         #   detrás se trata como ocupado»): hay que cablearlo en el planificador
 AUTONOMO_MAPA_VER_VISOR = True           # dibujar los obstáculos también en la ventana de MuJoCo
 AUTONOMO_MAPA_MAX_DIBUJO = 6000          # máx. de vóxeles que se dibujan (el mapa completo no tiene límite)
 
@@ -1595,9 +1405,9 @@ AUTONOMO_TAREA_MANO_PINZA_ABIERTA = {0: 0.0, 2: 1.4, 3: 1.3, 5: 1.4, 6: 1.3, 7: 
                                      11: 0.0, 12: 0.0, 13: 0.094, 14: 0.282, 15: -0.25, 16: -0.20}
 AUTONOMO_TAREA_MANO_PINZA_CERRADA = {0: 0.0, 2: 1.4, 3: 1.3, 5: 1.4, 6: 1.3, 7: 0.0, 8: 0.98, 9: 0.733, 10: 0.0,
                                      11: 0.98, 12: 0.733, 13: 0.094, 14: 0.282, 15: 0.393, 16: 0.323}
-AUTONOMO_TAREA_PINZA_APRIETE = (0.15, 0.30)
-AUTONOMO_TAREA_PELOTA_TACTIL_N = 0.3        # N para que un dedo cuente como «la noto»
-AUTONOMO_TAREA_PELOTA_TACTIL_DEDOS = 2      # dedos que la tienen que notar (si no, se para)
+AUTONOMO_TAREA_PINZA_APRIETE = (0.30, 0.60)
+AUTONOMO_TAREA_PELOTA_TACTIL_N = 0.2        # N para que un dedo cuente como «la noto»
+AUTONOMO_TAREA_PELOTA_TACTIL_DEDOS = 1      # dedos que la tienen que notar (si no, se para)
 # Posturas (ctrl 0..16: 0 muñeca · 1-3 meñique abd/mcp/pip · 4-6 anular · 7-9 corazón · 10-12 índice
 # · 13-16 pulgar cmc/abd/mcp/dip). Ajustadlas a vuestras pelotas: son un punto de partida.
 AUTONOMO_TAREA_MANO_PELOTA_ABIERTA = {0: 0.0, 1: -0.20, 4: -0.10, 7: 0.0, 10: 0.15, 13: 0.0, 14: 0.9,

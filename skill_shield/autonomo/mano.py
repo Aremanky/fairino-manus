@@ -47,7 +47,8 @@ def _config_mano():
     import yaml
     with open(_CONFIG_PATH, encoding="utf-8") as f:
         c = yaml.safe_load(f)
-    return str(c["port"]), int(c.get("baudrate", 1000000)), [int(m) for m in c["motor_ids"]]
+    puerto = getattr(_cfg, "PUERTO_HARDWARE", None) or c["port"]   # el mismo que la teleoperación
+    return str(puerto), int(c.get("baudrate", 1000000)), [int(m) for m in c["motor_ids"]]
 
 
 class _BusDynamixel:

@@ -116,7 +116,7 @@ def main():
     espacio = vars(cfg)
     poses = leer_poses(a.poses)
     comprobar_limites(poses, limites_sliders(espacio))
-    vel = min(float(a.vel or getattr(cfg, "EPISODIO_FR5_VEL_MAX_DEG_S", 20.0)),
+    vel = min(float(a.vel or cfg.EPISODIO_FR5_VEL_MAX_DEG_S),
               float(getattr(cfg, "FR5_VEL_MAX_DEG_S", 60.0)))
     signo = np.asarray(getattr(cfg, "FR5_SIGNO", (1,) * 6), float)
     offset = np.asarray(getattr(cfg, "FR5_OFFSET_DEG", (0,) * 6), float)

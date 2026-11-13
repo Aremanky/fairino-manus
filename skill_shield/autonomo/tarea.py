@@ -198,7 +198,7 @@ class Planificador:
         self.hi = np.minimum(lim[:, 1], cadena.limites[:, 1]) - m
         self.paso = math.radians(float(_g(g, "AUTONOMO_TAREA_PASO_DEG", 2.0)))
         self.d_agarre = float(_g(g, "AUTONOMO_TAREA_DIST_AGARRE", 0.10))
-        self.d_previa = float(_g(g, "AUTONOMO_TAREA_DIST_PREVIA", 0.20))
+        self.d_previa = float(_g(g, "AUTONOMO_TAREA_DIST_PREVIA", 0.14))   # = config.py
         self.punta = np.asarray(_g(g, "AUTONOMO_TAREA_PUNTA", PUNTA), float)
         self.eje = _unit(_g(g, "AUTONOMO_TAREA_EJE", EJE))       # hacia dónde apunta el destornillador
         self.uso_previa = float(_g(g, "AUTONOMO_TAREA_USO_PREVIA", 0.12))

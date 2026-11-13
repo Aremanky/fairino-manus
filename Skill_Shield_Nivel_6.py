@@ -14,10 +14,9 @@ Controles de teclado:
        La 1ª vez pide el nombre de la TAREA; [Shift+G] cambia de tarea.
   [E]  Entrenar la tarea actual (modelos/<tarea>.pth) en OTRO proceso: la app sigue
   [Shift+E]  Reentrenar TODAS las tareas grabadas (también en otro proceso)
-  [P]  Spawnear / ocultar pelota de gomaespuma en MuJoCo
+  [P]  Pedal (tecla mantenida, TELEOP_FR5_PEDAL = "teclado"): arma el brazo mientras se pulsa
   [I]  Modo IA — elige una TAREA y la reproduce (brazo + mano; con el FR5 conectado,
        arranca y para con el PEDAL)
-  [M]  Demo de maniobra autónoma con pinzas fijas + ruido (no usa la red)
   [3]  Mostrar / ocultar el ENTORNO DE TRABAJO (mesa con alicates, destornillador,
        bombilla y fusible — definido en mesa_trabajo.xml)
   [F]  Modo FINO del brazo: el robot se mueve FINO_ESCALA veces lo que te mueves tú
@@ -27,12 +26,10 @@ Controles de teclado:
        ruido de hombro/codo/muñeca, huesos, ángulos y A contra B (diagnosticos/*.npz)
   [Q]  Salir
 
-Dependencias:
-  pip install mujoco depthai mediapipe opencv-python numpy torch
+Dependencias: requirements.txt
 
 Uso:
-  Actualiza RUTA_XML con la ruta a tu scene_right.xml de orcahand_description.
-  python teleop_orca_mujoco.py
+  ./venv_nivel6/bin/python Skill_Shield_Nivel_6.py     (o ./arrancar_nivel6.sh)
 """
 # ══════════════════════════════════════════════════════════════════════════════
 # ESTRUCTURA DEL PROYECTO (refactor en módulos — el comportamiento NO cambia)
@@ -57,7 +54,6 @@ Uso:
 # ══════════════════════════════════════════════════════════════════════════════
 import os
 import sys
-import multiprocessing
 os.environ["QT_QPA_PLATFORM"] = "xcb"
 import cv2
 import depthai as dai
@@ -67,7 +63,6 @@ import mujoco.viewer
 import math
 import time
 from contextlib import nullcontext
-import torch
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
@@ -75,7 +70,6 @@ from concurrent.futures import ThreadPoolExecutor
 # IMPORTACIÓN DEL PANEL DE CONFIGURACIÓN GLOBAL (NIVEL 6)
 # ══════════════════════════════════════════════════════════════════════════════
 from config import *
-from config import _UMBRAL_COMBO_ON, _UMBRAL_COMBO_OFF, _UMBRAL_COMBO2_ON, _UMBRAL_COMBO2_OFF, _UMBRAL_COMBO3_ON, _UMBRAL_COMBO3_OFF
 from orca_hardware import OrcaHardwareWrapper
 
 # ── Módulos del proyecto (paquete skill_shield) ──────────────────────────────
@@ -84,30 +78,24 @@ from skill_shield.vision.detectores import (
 )
 # — Dos cámaras OAK-D (MULTICAMARA_ACTIVA en config.py) —
 from skill_shield.vision.multicamara import (
-    abrir_dispositivo, CamaraSecundaria, cargar_extrinsecas, CAM_A_MXID, CAM_B_MXID,
+    abrir_dispositivo, activar_ir, CamaraSecundaria, cargar_extrinsecas, comprobar_usb,
+    CAM_A_MXID, CAM_B_MXID,
 )
 from skill_shield.vision.fusion_brazo import FusorBrazo, calcular_angulos_brazo_multicamara
 from skill_shield.ia.act import (
     _listar_modelos_entrenados, _listar_tareas_grabadas, _nombre_seguro, cargar_ia,
-    entrenar_ia, entrenar_todas_las_tareas, EPISODIOS_DIR, guardar_episodio, MODELOS_DIR,
+    EPISODIOS_DIR, MODELOS_DIR,
 )
 from skill_shield.comun.suavizador import SuavizadorND
 from skill_shield.interfaz.hud_logo import (
     _cargar_logo, _dibujar_logo_mujoco, _preparar_logo_mujoco, _superponer_logo,
 )
 from skill_shield.hardware.sincronizacion import construir_hardware_target, limitar_salto_hardware
-from skill_shield.simulacion.objetos import (
-    _ocultar_destornillador, _ocultar_pelota, _ocultar_soporte, _spawn_destornillador,
-    _spawn_pelota, _spawn_soporte,
-)
 from skill_shield.simulacion.entorno_taller import (
     EntornoTaller, TALLER_CAMARA, TALLER_ENCUADRAR_CAMARA,
 )
 from skill_shield.simulacion.entorno_taladro import EntornoTaladro
 from skill_shield.simulacion.demo_taladro import DemoTaladro
-from skill_shield.vision.profundidad_3d import (
-    mapear_muneca_a_objetivo_brazo, pixel_a_3d, profundidad_en_pixel,
-)
 from skill_shield.brazo.ik import landmarks_a_3d, OFFSET_LOCAL_MUNON, resolver_ik_brazo
 from skill_shield.brazo.hibrido import preparar_hibrido
 from skill_shield.brazo.ik_codo_muneca import (
@@ -127,7 +115,7 @@ from skill_shield.brazo.control_suave import (
     limitar_alcance_palma, ZonaMuerta,
 )
 from skill_shield.brazo.angulos_humano import (
-    _fmt_ang, _unitario, _wrap, angulos_humano_a_q_brazo, angulos_humano_a_q_brazo_rel,
+    _fmt_ang, _lm_hand, _unitario, _wrap, angulos_humano_a_q_brazo, angulos_humano_a_q_brazo_rel,
     calcular_angulos_brazo_estereo, calcular_angulos_brazo_humano, calcular_pronosupinacion,
     corregir_con_tpose, EstimadorLongitudesBrazo, limitar_velocidad_articular,
 )
@@ -140,34 +128,6 @@ from skill_shield.mano.manus_guante import GuanteManus      # guantes MANUS (FUE
 from skill_shield.hardware.fr5_servo import FR5Servo, sincronizar_mujoco   # FR5 real: ServoJ cada 8 ms
 from skill_shield.interfaz.perfil import PerfilBucle
 
-# ── Compatibilidad: nombres que main() no usa pero que antes se podían importar
-#    con "from Skill_Shield_Nivel_6 import ..." (p. ej. desde test_ia_mano.py) ──
-from skill_shield.ia.act import (
-    _listar_episodios, _siguiente_numero_episodio, ACTModel, BETA_KL, CHUNK_IA, DIM_LATENTE,
-    DIM_MODELO, N_CABEZAS, N_CAPAS_CTX, N_CAPAS_DEC, N_CAPAS_ENC, VENTANA_IA,
-)
-from skill_shield.hardware.sincronizacion import MAX_DELTA_HARDWARE_POR_PASO
-from skill_shield.simulacion.objetos import (
-    _mover_mano, _ocultar_objeto, _spawn_objeto_dinamico, euler_a_quat, OBJ_OCULTO,
-)
-from skill_shield.simulacion.entorno_taller import (
-    TALLER_FISICA_AGARRE, TALLER_IMPRATIO, TALLER_MESA, TALLER_NOSLIP_ITER, TALLER_OBJETOS,
-    TALLER_POS_MESA,
-)
-from skill_shield.simulacion.demo_taladro import (
-    _eq_activa, _eq_esta_activa, _minjerk, _unit, _vector_giro,
-)
-from skill_shield.brazo.ik import OFFSET_LOCAL_PALMA, OFFSET_LOCAL_PALMA_CENTRO
-from skill_shield.brazo.hibrido import _punta_brazo_fk
-from skill_shield.brazo.ik_codo_muneca import _suavizado_01, codo_compatible
-from skill_shield.brazo.angulos_humano import (
-    _angulos_desde_puntos, _lm_hand, corregir_muneca_por_longitud,
-    flexion_muneca_rel_antebrazo, profundidad_robusta,
-)
-from skill_shield.vision.recorte_mano import _PS_MANO
-from skill_shield.mano.biomecanica import calcular_abertura, calcular_distancia, calcular_flexion
-from skill_shield.mano.retargeting import _BODY_PULGAR_YEMA, _BODY_YEMA, hay_contacto_yema
-from skill_shield.interfaz.menu import mostrar_menu_grafico
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -289,19 +249,9 @@ def main():
     # — Cargar modelo MuJoCo (UNA SOLA VEZ) —
     modelo = mujoco.MjModel.from_xml_path(RUTA_XML)
     datos  = mujoco.MjData(modelo)
-    # ── Reflejo del suelo: apagado al arrancar, tecla B para activarlo ──
-    _refl_orig = {i: float(modelo.mat_reflectance[i])
-                  for i in range(modelo.nmat) if modelo.mat_reflectance[i] > 0}
-    for _i in _refl_orig:
+    # ── Reflejo del suelo: apagado ──
+    for _i in range(modelo.nmat):
         modelo.mat_reflectance[_i] = 0.0
-    _reflejo_on = [False]
-
-
-    def _tecla_visor(keycode):
-        if chr(keycode).lower() == 'b':        # B = alternar reflejo del suelo
-            _reflejo_on[0] = not _reflejo_on[0]
-            for _i, _v in _refl_orig.items():
-                modelo.mat_reflectance[_i] = _v if _reflejo_on[0] else 0.0
     visor  = mujoco.viewer.launch_passive(modelo, datos)
 
     # ── INICIALIZACIÓN DEL HARDWARE REAL ──
@@ -313,17 +263,11 @@ def main():
 
     # ── Configurar perspectiva inicial de la cámara ──
     with visor.lock():
-        # Punto objetivo al que mira la cámara (X, Y, Z) — recentrado a medio
-        # camino entre la base del brazo y la zona de trabajo de la mano
-        # (antes 0.05/0.0/0.15, ajustado solo para ver la mano de cerca).
-        visor.cam.lookat[0] = 0.15
-        visor.cam.lookat[1] = 0.0
-        visor.cam.lookat[2] = 0.25
-
-        # ── PERSPECTIVA para ver el brazo entero, no solo la mano ──
-        visor.cam.distance = 1.1     # Alejado (antes 0.55, quedaba pegado a la mano)
-        visor.cam.azimuth = 90      # Misma vista diagonal de siempre
-        visor.cam.elevation = -20    # Un poco menos picado que antes (-30), para abarcar el brazo
+        # VISOR_VISTA_INICIAL (config.py): la misma que usa el gemelo de la web
+        visor.cam.lookat[:] = VISOR_VISTA_INICIAL["mirar"]
+        visor.cam.distance  = VISOR_VISTA_INICIAL["distancia"]
+        visor.cam.azimuth   = VISOR_VISTA_INICIAL["azimut"]
+        visor.cam.elevation = VISOR_VISTA_INICIAL["elevacion"]
     # ─────────────────────────────────────────────────────────────────────────
 
     print(f"✅ Modelo MuJoCo cargado: {modelo.nu} actuadores, {modelo.nsensor} sensores.")
@@ -342,7 +286,6 @@ def main():
         print(f"✅ Logo IDI para MuJoCo HUD preparado ({_logo_mj_w}×{_logo_mj_h} px).")
     # ─────────────────────────────────────────────────────────────────────────
 
-    print(f"✅ Modelo MuJoCo cargado: {modelo.nu} actuadores, {modelo.nsensor} sensores.")
     if modelo.nu != OFFSET_MANO + N_ACT:
         print(f"⚠  ADVERTENCIA: El modelo tiene {modelo.nu} actuadores "
               f"pero el código espera {OFFSET_MANO + N_ACT} "
@@ -373,11 +316,6 @@ def main():
                 modelo.body_gravcomp[_b] = 1.0
                 _n_comp += 1
         print(f"⚖️  Gravedad compensada en {_n_comp} cuerpos de la mano (HAND_GRAVCOMP).")
-    # Postura "de descanso" hacia la que la IK sesga los grados de libertad
-    # redundantes (6 joints para solo 3 restricciones de posición) cuando no
-    # hay una preferencia más fuerte marcada por el objetivo de la cámara.
-    postura_referencia_brazo = np.array(POSICION_STANDBY_BRAZO, dtype=float)
-
     # — Entorno de trabajo [3]: se carga escondido —
     taller = EntornoTaller(modelo, datos)
     taladro = EntornoTaladro(modelo, datos)
@@ -437,9 +375,6 @@ def main():
         "ultima_pos_palma": 0.0,
         "vec_neutro":       None,   # Vector muñeca→MCP calibrado
         "eje_lateral":      None,   # Eje de bisagra de la muñeca
-        "neutro_camara_brazo": None,   # (x,y,z) de la muñeca al calibrar con [A]
-        "punto_neutro_brazo":  None,   # posición REAL del efector al calibrar con [A]
-        "objetivo_brazo":      None,   # punto 3D objetivo actual para el efector del brazo
         "calc_muneca":      0.0,
         "dedo_activo":      "indice",
         "modo_pinza":       False,
@@ -447,15 +382,8 @@ def main():
         "ratio_pinza":      0.0,      # factor continuo 0.0 (abierta) → 1.0 (cerrada)
         "pinza_tocando":    False,
         "pinza_habilitada": True,
-        # ── Pelota de gomaespuma ────────────────────────────────────────────
-        "pelota_visible":   False,
-        # ── Soporte / pedestal ──────────────────────────────────────────────
-        "soporte_visible":  False,    # True cuando el soporte está activo en MuJoCo
-        "spawn_actual":     PUNTOS_SPAWN["arriba"], # ← Guarda la configuración de la pose
     }
     # — Variables de dataset e IA —
-    grabando        = False
-    buffer_episodio = []   # (formato 1, ya no se usa: la grabadora guarda sus propias filas)
     tarea_actual    = None # nombre de la tarea/maniobra que se está grabando ahora
     # 5-nov: grabadora BRAZO + MANO a ritmo fijo desde el hilo de la física (formato 2)
     from skill_shield.ia.grabador import GrabadorEpisodio
@@ -515,11 +443,9 @@ def main():
         if _ruta:
             print(f"💾 Episodio guardado{(' (' + motivo + ')') if motivo else ''}: {_ruta} "
                   f"({_n} fotogramas, {_n / grabador.fps:.1f} s)")
-    modo_autonomo = False
     modo_ia_real  = False
     modo_demo_taladro = False   # [5] demo automática: coger taladro y agujerear el techo
     red_neuronal  = None
-    reloj_ia      = 0.0
 
     pipeline = crear_pipeline_oak()
     salir    = False
@@ -533,12 +459,8 @@ def main():
             guante = None
 
     print("\n  Controles: [A] Activar | [S] Standby | [G] Grabar | "
-          "[E] Entrenar tarea actual | [Shift+E] Entrenar todas | [P] Pelota ON/OFF | [I] Modo IA (red neuronal) | "
-          "[M] Demo Maniobra Autónoma | [4] Taladro | [5] Demo taladro | [R] Diagnóstico T-pose (v2) | [X] Reset errores FR5 | [Q] Salir\n")
-
-    # Asegurar que el destornillador empieza oculto (fuera de escena)
-    _ocultar_destornillador(modelo, datos)
-    estado["destornillador_visible"] = False
+          "[E] Entrenar tarea actual | [Shift+E] Entrenar todas | [P] Pedal | [I] Modo IA (red neuronal) | "
+          "[3] Taller | [4] Taladro | [5] Demo taladro | [R] Diagnóstico T-pose (v2) | [X] Reset errores FR5 | [Q] Salir\n")
 
     NOMBRE_VENTANA = "OrcaHand Teleop OAK-D + MuJoCo"  # sin em dash —
     cv2.namedWindow(NOMBRE_VENTANA, cv2.WINDOW_NORMAL)
@@ -551,183 +473,6 @@ def main():
     while not salir:
 
         # ══════════════════════════════════════════════════
-        # ESTADO A — MODO AUTÓNOMO (Exploración con Ruido/Variación)
-        # ══════════════════════════════════════════════════
-        if modo_autonomo:
-            cv2.destroyAllWindows()
-            cv2.namedWindow("Control Autonomo", cv2.WINDOW_AUTOSIZE)
-
-            PINZA_CTRL_CONTACTO = {
-                "indice": {10: 0.000, 11: 0.491, 12: 1.250, 13: 0.000, 14: 0.469, 15: 0.469, 16: 0.888},
-                "corazon": {8: 0.916, 9: 1.540, 13: 0.426, 14: 0.113, 15: 0.174, 16: 1.720},
-                "anular": {4: -0.0565, 5: 1.230, 6: 0.675, 13: 0.000, 14: -0.282, 15: 0.905, 16: 0.526},
-                "menique": {1: 0.0995, 2: 1.130, 3: 0.366, 13: 0.576, 14: -0.301, 15: 0.207, 16: 0.888},
-                "corazon_anular": {4: 0.066, 5: 1.040, 6: 0.867, 7: 0.000, 8: 1.130, 9: 0.888, 13: 0.406, 14: 0.0171, 15: 0.229, 16: 0.217},
-                "indice_corazon": {7: 0.0565, 8: 0.916, 9: 0.835, 10: -0.0571, 11: 0.840, 12: 0.643, 13: 0.419, 14: 0.291, 15: 0.000, 16: 0.526},
-                "anular_menique": {1: 0.194, 2: 0.982, 3: 0.739, 4: -0.0377, 5: 0.916, 6: 0.984, 13: 0.236, 14: -0.212, 15: 0.982, 16: 0.292},
-            }
-
-            lista_pinzas = list(PINZA_CTRL_CONTACTO.keys())
-            intento_actual = 0
-
-            ESTADO_INICIO   = 0
-            ESTADO_BAJAR    = 1
-            ESTADO_CERRAR   = 2
-            ESTADO_SUBIR    = 3
-            ESTADO_EVALUAR  = 4
-            ESTADO_RESETEAR = 5
-            ESTADO_EXITO    = 6
-
-            estado_maniobra = ESTADO_INICIO
-            tiempo_estado   = 0.0
-
-            # Variables para almacenar la variación única de cada intento
-            ruido_muneca = 0.0
-            ruido_dedos = {}
-
-            print(f"🤖 Iniciando exploración estocástica. Intentos base: {len(lista_pinzas)}")
-
-            while modo_autonomo and not salir:
-                dt = modelo.opt.timestep * 4
-                target_ctrl = np.array(datos.ctrl)
-
-                nombre_pinza = lista_pinzas[intento_actual]
-                controles_pinza = PINZA_CTRL_CONTACTO[nombre_pinza]
-
-                if estado_maniobra == ESTADO_INICIO:
-                    for i, v in enumerate(POSICION_STANDBY):
-                        target_ctrl[i] = float(v)
-                    target_ctrl[0] = -0.40
-
-                    if tiempo_estado > 1.0:
-                        # Generar ruido aleatorio para este intento específico
-                        # La muñeca variará entre +/- 0.15 radianes de su posición ideal (0.55)
-                        ruido_muneca = np.random.uniform(-0.15, 0.15)
-
-                        # Cada dedo de la pinza tendrá una variación de +/- 10% en su fuerza
-                        ruido_dedos = {idx: np.random.uniform(-0.10, 0.10) for idx in controles_pinza.keys()}
-
-                        estado_maniobra = ESTADO_BAJAR
-                        tiempo_estado = 0.0
-
-                elif estado_maniobra == ESTADO_BAJAR:
-                    # Aplicamos el ruido a la bajada
-                    target_ctrl[0] = 0.55 + ruido_muneca
-                    if tiempo_estado > 1.5:
-                        estado_maniobra = ESTADO_CERRAR
-                        tiempo_estado = 0.0
-
-                elif estado_maniobra == ESTADO_CERRAR:
-                    target_ctrl[0] = 0.55 + ruido_muneca
-                    for idx, val in controles_pinza.items():
-                        # Aplicamos el ruido al cierre y aseguramos que no rompa los límites anatómicos
-                        val_con_ruido = val + ruido_dedos[idx]
-                        lo, hi = LIMITES_CTRL[idx]
-                        target_ctrl[idx] = float(np.clip(val_con_ruido, lo, hi))
-
-                    if tiempo_estado > 1.5:
-                        estado_maniobra = ESTADO_SUBIR
-                        tiempo_estado = 0.0
-
-                elif estado_maniobra == ESTADO_SUBIR:
-                    target_ctrl[0] = -0.60
-                    for idx, val in controles_pinza.items():
-                        val_con_ruido = val + ruido_dedos[idx]
-                        lo, hi = LIMITES_CTRL[idx]
-                        target_ctrl[idx] = float(np.clip(val_con_ruido, lo, hi))
-
-                    if tiempo_estado > 2.0:
-                        estado_maniobra = ESTADO_EVALUAR
-                        tiempo_estado = 0.0
-
-                elif estado_maniobra == ESTADO_EVALUAR:
-                    jnt_id = mujoco.mj_name2id(modelo, mujoco.mjtObj.mjOBJ_JOINT, "phillips_screwdriver_joint")
-                    qa = modelo.jnt_qposadr[jnt_id]
-                    z_objeto = datos.qpos[qa + 2]
-
-                    if z_objeto > 0.26:
-                        print(f"✅ ¡ÉXITO! Pinza '{nombre_pinza}' (Ruido muñeca: {ruido_muneca:+.2f}). Z={z_objeto:.2f}m")
-                        estado_maniobra = ESTADO_EXITO
-                    else:
-                        print(f"❌ Falló con '{nombre_pinza}' (Ruido: {ruido_muneca:+.2f}). Z={z_objeto:.2f}m")
-                        estado_maniobra = ESTADO_RESETEAR
-                    tiempo_estado = 0.0
-
-                elif estado_maniobra == ESTADO_RESETEAR:
-                    for i, v in enumerate(POSICION_STANDBY):
-                        target_ctrl[i] = float(v)
-                    target_ctrl[0] = -0.60
-
-                    if tiempo_estado > 1.5:
-                        # Variación al respawn del destornillador
-                        _spawn_destornillador(modelo, datos)
-                        jnt_id = mujoco.mj_name2id(modelo, mujoco.mjtObj.mjOBJ_JOINT, "phillips_screwdriver_joint")
-                        qa = modelo.jnt_qposadr[jnt_id]
-                        datos.qpos[qa] += np.random.uniform(-0.01, 0.01)   # Variar X +/- 1cm
-                        datos.qpos[qa+1] += np.random.uniform(-0.01, 0.01) # Variar Y +/- 1cm
-                        mujoco.mj_forward(modelo, datos)
-
-                        intento_actual += 1
-                        if intento_actual >= len(lista_pinzas):
-                            print("🔄 Reiniciando ciclo de pinzas con nuevos valores aleatorios.")
-                            intento_actual = 0
-
-                        estado_maniobra = ESTADO_INICIO
-                        tiempo_estado = 0.0
-
-                elif estado_maniobra == ESTADO_EXITO:
-                    target_ctrl[0] = -0.60
-                    for idx, val in controles_pinza.items():
-                        val_con_ruido = val + ruido_dedos[idx]
-                        lo, hi = LIMITES_CTRL[idx]
-                        target_ctrl[idx] = float(np.clip(val_con_ruido, lo, hi))
-
-                    if tiempo_estado > 2.0:
-                        estado_maniobra = ESTADO_RESETEAR
-                        tiempo_estado = 0.0
-
-                tiempo_estado += dt
-
-                FACTOR_SUAVIZADO = 0.08
-                for i, (lo, hi) in enumerate(LIMITES_CTRL):
-                    ctrl_mano[i] = float(np.clip(
-                        ctrl_mano[i] * (1.0 - FACTOR_SUAVIZADO) + target_ctrl[i] * FACTOR_SUAVIZADO, lo, hi))
-
-                if visor.is_running():
-                    for _ in range(4):
-                        mujoco.mj_step(modelo, datos)
-                    visor.sync()
-                    # ── Logo IDI — HUD inferior centrado del visor MuJoCo ────
-                    _dibujar_logo_mujoco(visor, _logo_mj_px,
-                                         _logo_mj_w, _logo_mj_h)
-                else:
-                    salir = True
-
-                # --- HUD ---
-                panel = np.zeros((180, 450, 3), dtype=np.uint8)
-                nombres_estado = ["INICIO", "BAJANDO", "CERRANDO", "SUBIENDO", "EVALUANDO", "RESETEANDO", "¡EXITO!"]
-
-                cv2.putText(panel, f"MODO AUTONOMO - VARIACION ACTIVA", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-                cv2.putText(panel, f"Prueba: '{nombre_pinza}'", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 150, 0), 2)
-                cv2.putText(panel, f"Variacion Muneca: {ruido_muneca:+.2f} rad", (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-                cv2.putText(panel, f"Fase: {nombres_estado[estado_maniobra]}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-                color_hud = (0, 255, 0) if estado_maniobra == ESTADO_EXITO else (200, 200, 200)
-                cv2.putText(panel, f"T. de fase:  {tiempo_estado:.2f} s", (10, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_hud, 1)
-                cv2.putText(panel, "[S] Salir al teleop  |  [Q] Cerrar app", (10, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                # ── Logo IDI en esquina inferior derecha del panel ─────────────
-                _superponer_logo(panel, _logo_bgr_sm, _logo_alpha_sm,
-                                 margen=5, posicion="bottom-right")
-                cv2.imshow("Control Autonomo", panel)
-
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord("s"):
-                    modo_autonomo = False
-                    cv2.destroyWindow("Control Autonomo")
-                elif key == ord("q"):
-                    salir = True
-
-        # ══════════════════════════════════════════════════
         # ESTADO A2 — MODO IA REAL (Aprendizaje por demostración)
         # Usa el modelo ACT entrenado con [E] a partir de tus episodios
         # grabaciones [G]. En cada paso: mantiene un historial de los últimos
@@ -735,7 +480,7 @@ def main():
         # (ctrl) y la aplica — así distingue "voy abriendo" de "voy cerrando"
         # aunque la postura instantánea coincida.
         # ══════════════════════════════════════════════════
-        elif modo_ia_real:
+        if modo_ia_real:
             # 5-nov: BRAZO + MANO (modelos de formato 2) o solo mano (formato 1, como antes).
             #  · La física avanza a TIEMPO REAL (antes 4 mj_step = 8 ms por fotograma de ~33 ms:
             #    la mano iba 4 veces más lenta que al grabar y la red veía posturas retrasadas).
@@ -791,13 +536,7 @@ def main():
             if fr5_ia is not None:
                 print("🦾 FR5 REAL conectado: la reproducción empieza PARADA. Pisa el PEDAL para "
                       "arrancar (el robot sale de su postura real) y otra vez para parar.")
-            pedal_ia = Pedal(modo=globals().get("TELEOP_FR5_PEDAL", "tecla"),
-                             teclas=globals().get("TELEOP_FR5_PEDAL_TECLAS", (ord("p"), ord("P"))),
-                             dispositivo=globals().get("TELEOP_FR5_PEDAL_EVDEV"),
-                             codigo=globals().get("TELEOP_FR5_PEDAL_EVDEV_CODIGO"),
-                             hombre_muerto=globals().get("TELEOP_FR5_PEDAL_HOMBRE_MUERTO", True),
-                             exclusivo=globals().get("TELEOP_FR5_PEDAL_EXCLUSIVO", True),
-                             codigo_teclado=globals().get("TELEOP_FR5_PEDAL_TECLADO_CODIGO", 25))
+            pedal_ia = Pedal.desde_config(globals())
             en_marcha = fr5_ia is None                   # sin FR5 arranca solo
             fr5_ia_enviando = False
             n_bloqueos = 0
@@ -1011,29 +750,14 @@ def main():
                 # ── FLUIDEZ: ¿USB3? Con color + recorte HD + profundidad a 30 FPS se
                 # mandan ~108 MB/s (~860 Mbit/s); por USB2 (máx. 480 Mbit/s) no caben
                 # y los fotogramas llegan tarde o se pierden. ──
-                try:
-                    _usb = device.getUsbSpeed()
-                    print(f"🔌 [OAK] Conectada por USB: {_usb.name}")
-                    if _usb not in (dai.UsbSpeed.SUPER, dai.UsbSpeed.SUPER_PLUS):
-                        print("⚠️  [OAK] NO va por USB3: cambia a un puerto azul/USB3 y a un cable "
-                              "USB3 corto (sin hub). Mientras tanto, pon MANO_RECORTE_HD = False.")
-                except Exception as _e_usb:
-                    print(f"⚠️  [OAK] No se pudo leer la velocidad USB: {_e_usb}")
+                _usb = comprobar_usb(device, "A")
+                if _usb is not None and _usb not in (dai.UsbSpeed.SUPER, dai.UsbSpeed.SUPER_PLUS):
+                    print("   Mientras tanto, pon MANO_RECORTE_HD = False.")
                 # ── PROYECTOR IR DE PUNTOS (OAK-D Pro) ────────────────────────
                 # Añade textura donde la piel/manga no tiene ninguna: es la causa
                 # nº1 de que el estéreo del BRAZO (fino, poca textura, 1.5-2 m)
-                # dé profundidades disparatadas (ver el codo a 86-106° del 28-sep
-                # con el brazo casi recto). Sin efecto en el color/RGB.
-                try:
-                    device.setIrLaserDotProjectorBrightness(800)   # mA, máx. ~1200 en la Pro
-                    # device.setIrFloodLightBrightness(200)        # solo si la sala está oscura
-                    print("💡 [OAK] Proyector IR de puntos activado (800 mA)")
-                except Exception as e_ir:
-                    try:
-                        device.setIrLaserDotProjectorIntensity(0.65)   # API alternativa (0.0-1.0)
-                        print("💡 [OAK] Proyector IR de puntos activado (intensidad 0.65)")
-                    except Exception as e_ir2:
-                        print(f"⚠️  [OAK] No se pudo activar el proyector IR: {e_ir} / {e_ir2}")
+                # dé profundidades disparatadas. Sin efecto en el color/RGB.
+                activar_ir(device, "A", CAM_A_IR_MA)
 
                 q_color = device.getOutputQueue("color", maxSize=1, blocking=False)
                 usar_hd = MANO_RECORTE and MANO_RECORTE_HD and CAM_FOV_COMPLETO
@@ -1138,7 +862,7 @@ def main():
                                          vigilar_extrinseca=bool(globals().get("TELEOP_FR5_VIGILAR_EXTRINSECA", True)),
                                          vertical_auto=bool(globals().get("TELEOP_FR5_VERTICAL_AUTO", True)),
                                          # 5-nov: calibrar no mueve el robot; se arma con el pedal
-                                         requiere_armado=globals().get("TELEOP_FR5_PEDAL", "tecla") is not None,
+                                         requiere_armado=TELEOP_FR5_PEDAL is not None,
                                          v_entrada=globals().get("TELEOP_FR5_V_ENTRADA", 0.15),
                                          entrada_fin_rad=float(globals().get("TELEOP_FR5_ENTRADA_FIN_RAD", 0.05))),
                         al_calibrar_extrinseca=_guardar_ext_v2,
@@ -1160,7 +884,7 @@ def main():
                                                   hombro_az_libre_elev=HOMBRO_AZ_LIBRE_ELEV,
                                                   codo_flex_max=CODO_FLEX_MAX, humero_rot_ext=HUMERO_ROT_EXT,
                                                   humero_rot_int=HUMERO_ROT_INT, activos=LIMITES_HUMANOS),
-                        par_ik=_ParIKV2(limites_extra=dict(globals().get("TELEOP_FR5_LIMITES", {})),
+                        par_ik=_ParIKV2(limites_extra=dict(TELEOP_FR5_LIMITES),
                                         v_seguimiento=float(globals().get("TELEOP_FR5_V_MAX", 3.0)),
                                         postura_humana=bool(globals().get("TELEOP_FR5_POSTURA_HUMANA", True)),
                                         codo_signo=globals().get("TELEOP_FR5_CODO_SIGNO"),
@@ -1176,13 +900,7 @@ def main():
                 pedal_v2 = None
                 if teleop_v2 is not None:
                     from skill_shield.teleop_fr5.pedal import Pedal
-                    pedal_v2 = Pedal(modo=globals().get("TELEOP_FR5_PEDAL", "tecla"),
-                                     teclas=globals().get("TELEOP_FR5_PEDAL_TECLAS", (ord("p"), ord("P"))),
-                                     dispositivo=globals().get("TELEOP_FR5_PEDAL_EVDEV"),
-                                     codigo=globals().get("TELEOP_FR5_PEDAL_EVDEV_CODIGO"),
-                                     hombre_muerto=globals().get("TELEOP_FR5_PEDAL_HOMBRE_MUERTO", True),
-                                     exclusivo=globals().get("TELEOP_FR5_PEDAL_EXCLUSIVO", True),
-                                     codigo_teclado=globals().get("TELEOP_FR5_PEDAL_TECLADO_CODIGO", 25))
+                    pedal_v2 = Pedal.desde_config(globals())
                     print(f"🦶 Armado del brazo: {pedal_v2.descripcion}; entrada a "
                           f"{globals().get('TELEOP_FR5_V_ENTRADA', 0.15)} rad/s")
                 # 28-oct (fluidez): la v2 en un hilo aparte, solapada con la cámara y MediaPipe
@@ -1358,8 +1076,7 @@ def main():
                 if pool_mano is not None:
                     print("🧵 MediaPipe Hands en paralelo con Pose (MANO_EN_PARALELO)")
 
-                while not modo_autonomo and not modo_ia_real and not modo_demo_taladro \
-                        and not salir:
+                while not modo_ia_real and not modo_demo_taladro and not salir:
                     if perfil is not None:
                         perfil.inicio()
                     # — Captura de frames (COLOR y PROFUNDIDAD SINCRONIZADOS) —
@@ -1410,9 +1127,6 @@ def main():
                         _ahora  = time.perf_counter()
                         _fps_val = _fps_n / max(1e-6, _ahora - _fps_t0)
                         _fps_n, _fps_t0 = 0, _ahora
-                        #if POSE_MEDIR_FPS:
-                        #   print(f"\r⏱️  Bucle teleop: {_fps_val:5.1f} FPS   ",
-                        #        end="", flush=True)
 
                     frame_rgb   = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                     frame_rgb.flags.writeable = False   # evita una copia en MediaPipe
@@ -1903,7 +1617,6 @@ def main():
                             origen_mano = "imagen completa"
                     if perfil is not None:
                         perfil.marca("mano")
-                    mano_ok      = False
                     calc_m_hud   = 0.0
 
                     if resultado.multi_hand_landmarks:
@@ -2004,24 +1717,8 @@ def main():
                             mp_styles.get_default_hand_landmarks_style(),
                             mp_styles.get_default_hand_connections_style())
 
-                        # Profundidad de la muñeca (solo para HUD)
-                        lm0 = hand_lm.landmark[LM_MUNECA]
-                        px  = int(lm0.x * ANCHO_CAM)
-                        py  = int(lm0.y * ALTO_CAM)
-                        # La profundidad se muestrea con coordenadas normalizadas, así
-                        # da igual si su tamaño difiere un poco del del color.
-                        z   = profundidad_en_pixel(
-                            frame_depth,
-                            int(lm0.x * frame_depth.shape[1]),
-                            int(lm0.y * frame_depth.shape[0])) or 0.40
-                        x_m, y_m, _ = pixel_a_3d(px, py, z, f_px=f_px_cam)
-
                         # Convertir a frame de mano 3D
                         lm3d = landmarks_a_3d(hand_wlm, es_mano_izq=False)
-
-                        # ── Pelota en MuJoCo: la cámara solo informa, no spawnea ──
-                        # El spawn/ocultado se controla exclusivamente con [P].
-                        # La detección por cámara sirve de feedback visual en el HUD.
 
                         # — Retargeting y control de MuJoCo —
                         if estado["camara_activa"]:
@@ -2043,36 +1740,7 @@ def main():
                                       f"dedo={estado.get('dedo_bloqueado')}  "
                                       f"habilitada={estado.get('pinza_habilitada', True)}  "
                                       f"mano de: {origen_mano}")
-                            if MODO_BRAZO == "ik" and estado["neutro_camara_brazo"] is not None \
-                                    and sliders is None:
-                                estado["objetivo_brazo"] = mapear_muneca_a_objetivo_brazo(
-                                    x_m, y_m, z, estado["neutro_camara_brazo"],
-                                    punto_neutro_brazo=estado["punto_neutro_brazo"])
-
-                                # ── IK: lleva el efector (el muñón, origen de
-                                # mano_mount, SIN offset — el mismo punto que se
-                                # calibró con [A]) al objetivo calculado arriba.
-                                # Si no hay objetivo (cámara aún sin calibrar) el
-                                # brazo simplemente se queda donde esté — no se
-                                # toca datos.ctrl[0:6] en ese caso.
-                                q_brazo = resolver_ik_brazo(
-                                    modelo, datos, estado["objetivo_brazo"],
-                                    dof_idx_brazo, qpos_idx_brazo,
-                                    nombre_body_efector="mano_mount",
-                                    offset_local_efector=OFFSET_LOCAL_MUNON,
-                                    postura_referencia=postura_referencia_brazo,
-                                    ganancia_null=0.05)
-                                for i in range(len(ARM_JOINTS)):
-                                    datos.ctrl[i] = float(q_brazo[i])
-
-                                # Debug temporal — lo quitaremos cuando ya tengamos el brazo moviéndose
-                                if int(datos.time * 2) % 1 == 0 and \
-                                   abs(datos.time * 2 - int(datos.time * 2)) < 0.03:
-                                    print(f"[BRAZO] objetivo → "
-                                          f"X={estado['objetivo_brazo'][0]:.3f}  "
-                                          f"Y={estado['objetivo_brazo'][1]:.3f}  "
-                                          f"Z={estado['objetivo_brazo'][2]:.3f}")
-                             # ── Resaltado de yemas en pinza ──────────────────────
+                        # ── Resaltado de yemas en pinza ──────────────────────
                         if estado.get("modo_pinza"):
                             punta_por_dedo = {
                                 "indice":  8,
@@ -2124,15 +1792,12 @@ def main():
                                         f"PINZA -> {estado['dedo_activo'].upper()}",
                                         (10, 120),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 100, 0), 2)
-                        mano_ok = True
 
                         if not estado.get("pinza_habilitada", True):
                             cv2.putText(frame_bgr,
                                         "PINZAS DESACTIVADAS [Espacio]",
                                         (10, 80),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
-
-                        mano_ok = True
 
                     else:
                         msg = ("⚠ Mano perdida — posición mantenida"
@@ -2425,13 +2090,6 @@ def main():
                             v, e = calcular_flexion_muneca(resultado.multi_hand_world_landmarks[0])
                             estado["vec_neutro"]  = v
                             estado["eje_lateral"] = e
-                            estado["neutro_camara_brazo"] = (x_m, y_m, z)
-                            # El brazo parte de donde YA está en la simulación
-                            # en este instante: el muñón (origen de
-                            # mano_mount), el mismo punto que persigue la IK
-                            # — así no queda ningún desfase que corregir de
-                            # golpe nada más calibrar.
-                            estado["punto_neutro_brazo"] = tuple(datos.xpos[mano_mount_id])
                         print("✅ Cámara ACTIVA — muñeca calibrada en posición neutra "
                               "(el brazo parte de su posición actual).")
 
@@ -2460,7 +2118,6 @@ def main():
                             if pedal_v2 is not None:
                                 pedal_v2.desarmar()
                         _parar_grabacion("antes de standby")
-                        grabando = False
                         suav_dedos.reset()
                         # PASO 7.1: el brazo vuelve al reposo de forma continua (sin tirón)
                         sujetar_pose_A = False
@@ -2552,12 +2209,10 @@ def main():
                                           f"(tarea '{tarea_actual}'). [G] para terminar el episodio.")
                         else:
                             _parar_grabacion()
-                        grabando = grabador.activo
 
                     elif key == ord("G"):
                         # 5-nov: [Shift+G] cambiar de tarea (las siguientes [G] graban en la nueva)
                         _parar_grabacion("cambio de tarea")
-                        grabando = False
                         with _soltar():
                             tarea_actual = _pedir_tarea(tarea_actual)
                         print(f"📝 Tarea para las próximas grabaciones: '{tarea_actual}'")
@@ -2578,48 +2233,6 @@ def main():
                         # útil tras cambiar algo estructural del modelo)
                         _parar_grabacion("antes de entrenar")
                         _entrenar_en_segundo_plano(["--todas"])
-
-                    elif key == ord("1"):
-                        # [1] — Toggle pelota + soporte universal
-                        if not estado["pelota_visible"]:
-                            _spawn_pelota(modelo, datos, estado["spawn_actual"]["pelota"])
-
-                            # Solo spawneamos el soporte si la mano está en la posición "arriba"
-                            if estado["spawn_actual"] == PUNTOS_SPAWN["arriba"]:
-                                _spawn_soporte(modelo, datos, estado["spawn_actual"]["soporte"])
-
-                            estado["pelota_visible"] = True
-                            print("🟡 Pelota SPAWNEADA.")
-                        else:
-                            _ocultar_pelota(modelo, datos)
-
-                            # Ocultamos la mesa solo si el destornillador no la está usando en "arriba"
-                            if not (estado.get("destornillador_visible", False) and estado["spawn_actual"] == PUNTOS_SPAWN["arriba"]):
-                                _ocultar_soporte(modelo, datos)
-
-                            estado["pelota_visible"] = False
-                            print("⬛ Pelota OCULTADA.")
-
-                    elif key == ord("2"):
-                        # [2] — Toggle destornillador
-                        if not estado.get("destornillador_visible", False):
-                            _spawn_destornillador(modelo, datos, estado["spawn_actual"]["destornillador"])
-
-                            # Si estamos en "arriba", traemos la mesa universal
-                            if estado["spawn_actual"] == PUNTOS_SPAWN["arriba"]:
-                                _spawn_soporte(modelo, datos, estado["spawn_actual"]["soporte"])
-
-                            estado["destornillador_visible"] = True
-                            print("🔧 Destornillador SPAWNEADO.")
-                        else:
-                            _ocultar_destornillador(modelo, datos)
-
-                            # Ocultamos la mesa solo si la pelota tampoco la necesita
-                            if not estado["pelota_visible"]:
-                                _ocultar_soporte(modelo, datos)
-
-                            estado["destornillador_visible"] = False
-                            print("⬛ Destornillador OCULTADO.")
 
                     elif key == ord("3"):
                         # [3] — Toggle entorno de trabajo (mesa + herramientas)
@@ -2668,40 +2281,9 @@ def main():
                                   "del arranque).")
                         else:
                             _parar_grabacion("antes de la demo")
-                            grabando = False
                             estado["camara_activa"] = False
                             modo_demo_taladro = True
                             break
-
-                    # ── FLECHAS DE DIRECCIÓN ──────────────────────────────────
-                    # PENDIENTE DE REDISEÑO: antes teletransportaban el body
-                    # mocap "right_mount" (mano suelta); ese body ya no existe
-                    # porque la mano cuelga del brazo (ver _mover_mano arriba).
-                    # Por ahora solo eligen qué juego de PUNTOS_SPAWN usar para
-                    # el destornillador — NO reorientan la mano. Para recuperar
-                    # el control manual de orientación, habría que rehacerlas
-                    # como 3 posturas fijas de joint4/5/6 (y decidir cómo
-                    # conviven con la IK de posición, que ya usa esos 3 DOF de
-                    # forma redundante para alcanzar el objetivo).
-                    elif key in (65362, 2490368):
-                        estado["spawn_actual"] = PUNTOS_SPAWN["arriba"]
-
-                    elif key in (65361, 2424832):
-                        estado["spawn_actual"] = PUNTOS_SPAWN["izquierda"]
-
-                    elif key in (65364, 2621440):
-                        estado["spawn_actual"] = PUNTOS_SPAWN["abajo"]
-
-                    elif key in (65363, 2555904):
-                        estado["spawn_actual"] = PUNTOS_SPAWN["derecha"]
-
-                    elif key == ord("m"):
-                        # Demo programado: prueba pinzas fijas con ruido aleatorio
-                        _parar_grabacion("antes del modo autónomo")
-                        modo_autonomo = True
-                        grabando = False
-                        estado["camara_activa"] = False
-                        break
 
                     elif key == ord("i"):
                         # Modo IA real: elige qué tarea/maniobra quieres que reproduzca
@@ -2719,7 +2301,6 @@ def main():
                                     print(f"🎯 Tarea seleccionada: '{tarea_elegida}'")
                                     _parar_grabacion("antes del modo IA")
                                     modo_ia_real = True
-                                    grabando = False
                                     estado["camara_activa"] = False
                                     break
                             else:
@@ -2840,12 +2421,6 @@ def main():
               f"{e_fr5['periodo_medio_ms']:.2f} ms (máx {e_fr5['periodo_max_ms']:.2f}), "
               f"ServoJ {e_fr5['servoj_medio_ms']:.2f} ms, retrasos {e_fr5['retrasos']}, "
               f"errores {e_fr5['errores_servoj']}")
-
-    # Destruimos la ventana de Tkinter de forma segura al cerrar la app
-    try:
-        ventana.destroy()
-    except:
-        pass
 
     print("👋 Fin del programa.")
 

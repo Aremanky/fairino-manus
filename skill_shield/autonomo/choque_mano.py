@@ -578,10 +578,6 @@ class ChoqueManoBrazo:
         return (f"{'la mano' if objeto == 'mano' else 'el tablero'} queda a {max(d, 0.0) * 100:.1f} cm "
                 f"{NOMBRES.get(cosa, f'de «{cosa}»')} (mínimo {exigido * 100:.1f} cm)")
 
-    def camino_ok(self, qs):
-        return all(self.ok(q) for q in qs)
-
-
 def desde_config(cadena, cfg, T_brida_tablero=None, entorno=None):
     """Con los valores de config (RUTA_XML, CALIB_ROBOT_TABLERO y los CALIB_MANO_*, CALIB_TABLERO_*
     y CALIB_ENTORNO_HOLGURA). entorno: ik_teleop.Entorno (el de mapa.modelo_colision) para comprobar

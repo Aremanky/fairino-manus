@@ -121,23 +121,6 @@ def _wrap(x):
 #  ANULABA a la nueva —la de "eje_ref", al principio del archivo— porque Python se
 #  queda con la última definición. Eliminada.)
 
-def flexion_muneca_rel_antebrazo(hand_world_lm, antebrazo):
-    """Flexión (rad) de la mano respecto al ANTEBRAZO, no a la cámara."""
-    a = _unitario(antebrazo)
-    if a is None:
-        return None
-    mcp = (_lm_hand(hand_world_lm, LM_INDICE_MCP) + _lm_hand(hand_world_lm, LM_CORAZON_MCP) +
-           _lm_hand(hand_world_lm, LM_ANULAR_MCP) + _lm_hand(hand_world_lm, LM_MENIQUE_MCP)) / 4.0
-    d   = mcp - _lm_hand(hand_world_lm, LM_MUNECA)
-    lat = _lm_hand(hand_world_lm, LM_MENIQUE_MCP) - _lm_hand(hand_world_lm, LM_INDICE_MCP)
-    eje = _unitario(lat - (lat @ a) * a)               # bisagra ⟂ antebrazo
-    if eje is None:
-        return None
-    d_p = _unitario(d - (d @ eje) * eje)
-    if d_p is None:
-        return None
-    return -math.atan2(float(np.cross(a, d_p) @ eje), float(a @ d_p))
-
 def calcular_angulos_brazo_humano(pose_world_lm, brazo: str = "derecho",
                                   vis_min: float = POSE_VISIBILIDAD_MIN):
     """Ángulos del brazo usando los puntos 3D 'world' de MediaPipe Pose

@@ -295,11 +295,6 @@ def completar_hib(modelo, datos, hib, verbose=True):
     return hib
 
 
-def limites_q(hib):
-    """(lo, hi) para recortar q1..q3 en el bucle (en vez de IMITAR_LIMITES)."""
-    return hib["lo"], hib["hi"]
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # 3) OBJETIVOS FIELES: TU FLEXIÓN DE CODO → LA DEL ROBOT
 # ══════════════════════════════════════════════════════════════════════════════

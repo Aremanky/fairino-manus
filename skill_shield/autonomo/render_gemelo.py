@@ -26,7 +26,12 @@ import os
 import sys
 import time
 
-VISTA_DEFECTO = dict(azimut=90.0, elevacion=-20.0, distancia=1.1, mirar=[0.15, 0.0, 0.25])
+try:                                   # la misma vista que el visor de MuJoCo (config.py)
+    import config as _cfg_vista
+    VISTA_DEFECTO = dict(_cfg_vista.VISOR_VISTA_INICIAL)
+except (ImportError, AttributeError):
+    VISTA_DEFECTO = dict(azimut=90.0, elevacion=-20.0, distancia=1.1, mirar=(0.15, 0.0, 0.25))
+VISTA_DEFECTO["mirar"] = list(VISTA_DEFECTO["mirar"])
 
 
 def _parsear():

@@ -69,7 +69,7 @@ def recortar_quietos(acciones, fps, umbral=0.01, margen_s=0.5):
 
 
 def _siguiente_numero(carpeta):
-    """Igual que act._siguiente_numero_episodio (sin importar torch)."""
+    """Siguiente número de episodio libre en la carpeta (episodio_0001.csv, …)."""
     nums = []
     for f in os.listdir(carpeta) if os.path.isdir(carpeta) else []:
         if f.startswith("episodio_") and f.endswith(".csv"):

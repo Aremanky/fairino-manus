@@ -1,7 +1,0 @@
-build/
-bin/
-obj/
-# Matches SDKClient_Windows/.gitignore and SDKClient_Linux's entry in the root
-# .gitignore: SDK binary drops are provisioned by the SDK build's post-build
-# step, not committed.
-ManusSDK/

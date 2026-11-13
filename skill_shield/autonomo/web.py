@@ -48,8 +48,13 @@ from skill_shield.autonomo.canal import Canal
 AQUI = os.path.dirname(os.path.abspath(__file__))
 ESTATICO = os.path.join(AQUI, "estatico")
 COOKIE = "ss_sesion"
-# Vista inicial del gemelo = la del visor de MuJoCo. Delante del robot = -Y del mundo.
-VISTA_INICIAL = dict(azimut=90.0, elevacion=-20.0, distancia=1.1, mirar=[0.15, 0.0, 0.25])
+# Vista inicial del gemelo = la del visor de MuJoCo (config.VISOR_VISTA_INICIAL). Delante del robot = -Y.
+try:
+    import config as _cfg_vista
+    VISTA_INICIAL = dict(_cfg_vista.VISOR_VISTA_INICIAL)
+except (ImportError, AttributeError):
+    VISTA_INICIAL = dict(azimut=90.0, elevacion=-20.0, distancia=1.1, mirar=(0.15, 0.0, 0.25))
+VISTA_INICIAL["mirar"] = list(VISTA_INICIAL["mirar"])
 VISTAS = {"inicial": "inicial", "frente": dict(azimut=90.0, elevacion=-8.0),
           "lado": dict(azimut=0.0, elevacion=-8.0), "arriba": dict(azimut=90.0, elevacion=-88.0)}
 SESION_S = 12 * 3600
@@ -472,8 +477,13 @@ def main():
               f"   ./venv_nivel6/bin/pip install fastapi uvicorn")
         return 1
 
+    clave = cfg.AUTONOMO_WEB_CLAVE
+    clave_generada = False
+    if not clave and args.host not in ("127.0.0.1", "localhost"):
+        # Abierta a la red y sin contraseña configurada: una de un solo uso (no se guarda)
+        clave, clave_generada = secrets.token_urlsafe(6), True
     servicio = ServicioWeb(args.canal_img, args.canal_info, args.canal_estado, args.canal_mando,
-                           clave=getattr(cfg, "AUTONOMO_WEB_CLAVE", None),
+                           clave=clave,
                            permitir_sin_pedal=getattr(cfg, "AUTONOMO_PERMITIR_SIN_PEDAL", True),
                            pedal_obligatorio=getattr(cfg, "AUTONOMO_PEDAL_OBLIGATORIO", True),
                            latido_s=getattr(cfg, "AUTONOMO_PEDAL_LATIDO_S", 0.35),
@@ -497,8 +507,10 @@ def main():
     if args.host in ("0.0.0.0", ""):
         for ip in _ips_locales():
             print(f"   desde otro equipo de la red: http://{ip}:{args.puerto}/")
-    if servicio.requiere_clave:
-        print("   Mandos (pedal, reinicio) protegidos con AUTONOMO_WEB_CLAVE de config.py")
+    if clave_generada:
+        print(f"   🔑 Sin SKILL_SHIELD_WEB_CLAVE ni clave_web.txt: contraseña de esta sesión = {clave}")
+    elif servicio.requiere_clave:
+        print("   Mandos (pedal, reinicio) protegidos con contraseña (SKILL_SHIELD_WEB_CLAVE / clave_web.txt)")
     try:
         servidor.run()
     except KeyboardInterrupt:

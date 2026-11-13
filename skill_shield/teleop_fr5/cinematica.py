@@ -79,24 +79,6 @@ def wrap(a):
     return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 
-def mat_desde_z_y_roll(z, roll, ref=None):
-    """Matriz de rotación cuyo eje Z es 'z' (unitario); el giro alrededor de Z (roll) se mide
-    desde una referencia: la proyección de 'ref' (por defecto el eje vertical del mundo)
-    perpendicular a z. Sirve para construir la orientación objetivo de la mano a partir de la
-    dirección del antebrazo (z) y la pronosupinación (roll)."""
-    z = np.asarray(z, dtype=float)
-    z = z / max(np.linalg.norm(z), 1e-12)
-    ref = np.array([0.0, 0.0, 1.0]) if ref is None else np.asarray(ref, dtype=float)
-    x = ref - float(ref @ z) * z
-    if np.linalg.norm(x) < 0.2:                       # z casi vertical: otra referencia
-        ref = np.array([1.0, 0.0, 0.0])
-        x = ref - float(ref @ z) * z
-    x /= np.linalg.norm(x)
-    x = rot_eje(z, roll) @ x
-    y = np.cross(z, x)
-    return np.column_stack([x, y, z])
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # cadena cinemática
 # ══════════════════════════════════════════════════════════════════════════════
@@ -273,19 +255,6 @@ class CadenaFR5:
         W = np.einsum("nij,nj->ni", np.array([mi[:3, :3] for mi in m[:6]]), self._ejes)
         O = np.array([mi[:3, 3] for mi in m[:6]])
         return np.cross(W, p - O).T, W.T
-
-    def jacobiana_punto_marco(self, q, k, marcos=None):
-        """Jacobiana lineal del ORIGEN del marco k (0..6) — p. ej. k=2 → codo, k=4 → muñeca FR5.
-        Solo dependen de los joints anteriores."""
-        m = self.fk_marcos(q) if marcos is None else marcos
-        p = m[k][:3, 3]
-        J = np.zeros((3, 6))
-        n = min(k, 6)
-        if n:
-            W = np.einsum("nij,nj->ni", np.array([mi[:3, :3] for mi in m[:n]]), self._ejes[:n])
-            O = np.array([mi[:3, 3] for mi in m[:n]])
-            J[:, :n] = np.cross(W, p - O).T
-        return J
 
     # ── parámetros DH equivalentes ────────────────────────────────────────────
     def dh_equivalente(self):

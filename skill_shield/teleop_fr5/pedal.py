@@ -24,6 +24,20 @@ Para saber qué dispositivo y qué código manda tu pedal:
 
 
 class Pedal:
+    @classmethod
+    def desde_config(cls, cfg):
+        """Pedal con los TELEOP_FR5_PEDAL* de config (dict o módulo). El modo se lee SIN valor por
+        defecto: si falta en config.py es un error (antes cada sitio ponía el suyo, "tecla" o None,
+        y ninguno es de hombre muerto)."""
+        g = cfg if isinstance(cfg, dict) else vars(cfg)
+        return cls(modo=g["TELEOP_FR5_PEDAL"],
+                   teclas=g.get("TELEOP_FR5_PEDAL_TECLAS", (ord("p"), ord("P"))),
+                   dispositivo=g.get("TELEOP_FR5_PEDAL_EVDEV"),
+                   codigo=g.get("TELEOP_FR5_PEDAL_EVDEV_CODIGO"),
+                   hombre_muerto=g.get("TELEOP_FR5_PEDAL_HOMBRE_MUERTO", True),
+                   exclusivo=g.get("TELEOP_FR5_PEDAL_EXCLUSIVO", True),
+                   codigo_teclado=g.get("TELEOP_FR5_PEDAL_TECLADO_CODIGO", 25))
+
     def __init__(self, modo="tecla", teclas=(ord("p"), ord("P")), dispositivo=None, codigo=None,
                  hombre_muerto=True, exclusivo=True, codigo_teclado=25):
         self.modo = modo

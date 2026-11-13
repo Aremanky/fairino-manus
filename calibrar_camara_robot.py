@@ -69,8 +69,7 @@ import config as cfg
 from skill_shield.autonomo import calibracion as C
 
 RAIZ = os.path.dirname(os.path.abspath(__file__))
-TABLERO = dict(getattr(cfg, "CALIB_ROBOT_TABLERO",
-                       dict(cuadros=(5, 4), lado=0.03, marcador=0.022, diccionario="DICT_5X5_100")))
+TABLERO = dict(cfg.CALIB_ROBOT_TABLERO)
 
 
 def _ruta(nombre_cfg, defecto):
@@ -83,14 +82,16 @@ POSTURAS = _ruta("CALIB_ROBOT_POSTURAS", "calib_posturas.json")
 MUESTRAS = _ruta("CALIB_ROBOT_MUESTRAS", "calib_muestras.json")
 MIN_MUESTRAS = int(getattr(cfg, "CALIB_ROBOT_MIN_MUESTRAS", 15))
 ERROR_MAX = float(getattr(cfg, "CALIB_ROBOT_ERROR_MAX_MM", 5.0))
-VEL_MAX = float(getattr(cfg, "CALIB_ROBOT_VEL_MAX_DEG_S", 15.0))
+VEL_MAX = float(cfg.CALIB_ROBOT_VEL_MAX_DEG_S)
 ESPERA_S = float(getattr(cfg, "CALIB_ROBOT_ESPERA_S", 1.0))
 N_VERIFICAR = int(getattr(cfg, "CALIB_ROBOT_VERIFICAR_N", 4))
 N_AUTO = int(getattr(cfg, "CALIB_AUTO_POSTURAS", 20))
-RADIO_MANO = float(getattr(cfg, "CALIB_AUTO_RADIO_MANO", 0.11))
-AMPLITUD = tuple(getattr(cfg, "CALIB_AUTO_AMPLITUD_DEG", (30, 20, 25, 45, 45, 70)))
+RADIO_MANO = float(cfg.CALIB_AUTO_RADIO_MANO)
+AMPLITUD = tuple(cfg.CALIB_AUTO_AMPLITUD_DEG)
 AUTO_RESET = bool(getattr(cfg, "CALIB_AUTO_RESET", True))   # colisión → Clear, disable, enable solo
 SIN_AVANCE_S = float(getattr(cfg, "CALIB_SIN_AVANCE_S", 5.0))   # armado y parado sin llegar → se deja esa postura
+# (Los parámetros de seguridad de arriba se leen SIN valor por defecto: si faltan en config.py,
+#  error al arrancar en vez de calibrar con otros más permisivos.)
 # Lo PLANIFICADO se comprueba sin manga. Al robot de verdad, que nunca queda exactamente donde se
 # le pide, se le dan unos mm: al comprobar el trayecto desde donde está y, algo más, al vigilarlo.
 MARGEN_TRAYECTO = 0.006         # m de manga al comprobar un trayecto desde la postura REAL, antes de moverse
@@ -296,14 +297,8 @@ def arrancar_fr5(mover):
 
 def crear_pedal():
     from skill_shield.teleop_fr5.pedal import Pedal
-    modo = getattr(cfg, "TELEOP_FR5_PEDAL", None)
-    p = Pedal(modo=modo, teclas=getattr(cfg, "TELEOP_FR5_PEDAL_TECLAS", (ord("p"), ord("P"))),
-              dispositivo=getattr(cfg, "TELEOP_FR5_PEDAL_EVDEV", None),
-              codigo=getattr(cfg, "TELEOP_FR5_PEDAL_EVDEV_CODIGO", None),
-              hombre_muerto=getattr(cfg, "TELEOP_FR5_PEDAL_HOMBRE_MUERTO", True),
-              exclusivo=getattr(cfg, "TELEOP_FR5_PEDAL_EXCLUSIVO", True),
-              codigo_teclado=getattr(cfg, "TELEOP_FR5_PEDAL_TECLADO_CODIGO", 25))
-    if modo is None or not p.hombre_muerto:
+    p = Pedal.desde_config(cfg)
+    if p.modo is None or not p.hombre_muerto:
         sys.exit("✗ Para que el robot se mueva solo hace falta un pedal de HOMBRE MUERTO: "
                  "TELEOP_FR5_PEDAL = \"teclado\" (tecla P mantenida) o \"evdev\" con "
                  "TELEOP_FR5_PEDAL_HOMBRE_MUERTO = True.")
@@ -341,7 +336,7 @@ def choque_mano(cadena, T_brida_tablero=None, entorno=None):
     (como va montada en la calibración)."""
     from skill_shield.autonomo.choque_mano import desde_config
     return girar_mano(desde_config(cadena, cfg, T_brida_tablero, entorno),
-                      float(getattr(cfg, "CALIB_MANO_GIRO_DEG", 0.0)))
+                      float(cfg.CALIB_MANO_GIRO_DEG))
 
 
 def limites_articulares(cadena):
@@ -424,7 +419,10 @@ def abrir_mano_recta(fabrica=None, esperar_s=None):
     if not m.conectar():
         print(f"⚠️  Mano: {m.error}. Sigo SIN par: sujeta bien el tablero (no debe moverse respecto a la mano).")
         return None
-    postura = {int(k): float(v) for k, v in (getattr(cfg, "CALIB_MANO_POSTURA", None) or MANO_ABIERTA).items()}
+    # None = la mano abierta de la TAREA tal como esté en config.py (antes: la copia fija de tarea.py)
+    postura = {int(k): float(v) for k, v in (getattr(cfg, "CALIB_MANO_POSTURA", None)
+                                             or getattr(cfg, "AUTONOMO_TAREA_MANO_ABIERTA", None)
+                                             or MANO_ABIERTA).items()}
     m.enviar(postura)
     espera = float(getattr(cfg, "CALIB_MANO_ESPERA_S", 3.0) if esperar_s is None else esperar_s)
     if espera > 0:

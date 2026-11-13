@@ -63,13 +63,6 @@ def _eq_activa(modelo, datos, eq, activa: bool):
     arr[eq] = 1 if activa else 0
 
 
-def _eq_esta_activa(modelo, datos, eq) -> bool:
-    arr = getattr(datos, "eq_active", None)
-    if arr is None:
-        arr = modelo.eq_active
-    return bool(arr[eq])
-
-
 class DemoTaladro:
     NOMBRES_DEDOS = ("i", "m", "r", "p")
 

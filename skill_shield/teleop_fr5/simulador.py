@@ -172,7 +172,10 @@ class CamaraSintetica:
 def cargar_extrinsecas_repo():
     """R_ab, t_ab de camaras_extrinsecas.json del repo (p_A = R·p_B + t); si no existe, unas
     cámaras separadas 90° a 2 m."""
-    ruta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "camaras_extrinsecas.json")
+    import config as _cfg                          # (sin multicamara: no hace falta depthai)
+    ruta = _cfg.EXTRINSECAS_ARCHIVO
+    if not os.path.isabs(ruta):
+        ruta = os.path.join(os.path.dirname(os.path.abspath(_cfg.__file__)), ruta)
     if os.path.exists(ruta):
         with open(ruta, encoding="utf-8") as f:
             d = json.load(f)
@@ -315,8 +318,7 @@ def simular_teleop(ruta_mjcf=None, duracion=21.0, fps=25.0, semilla=0, verbose=T
     from skill_shield.teleop_fr5.teleop_brazo import TeleopBrazoFR5
 
     if ruta_mjcf is None:
-        ruta_mjcf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
-                                 "fairino_description", "mjcf", "fairino_mjcf.xml")
+        from config import RUTA_XML as ruta_mjcf
     cadena = cargar_cadena(ruta_mjcf, verbose=verbose)
     rng = np.random.default_rng(semilla)
     brazo = BrazoHumanoSintetico()

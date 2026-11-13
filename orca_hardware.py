@@ -318,6 +318,17 @@ class OrcaHardwareWrapper:
                 from orca_core import OrcaHand
                 clase = OrcaHand
             self._hand = clase(config_path=self._config_path)
+            # El puerto lo manda config.PUERTO_HARDWARE, no el "port:" del config.yaml de orca_core
+            # (antes self.puerto solo se imprimía). Si falla, orca_core sigue con su autodetección.
+            cfg_mano = getattr(self._hand, "config", None)
+            if self.puerto and str(self.puerto).lower() != "auto" and cfg_mano is not None \
+                    and getattr(cfg_mano, "port", self.puerto) != self.puerto:
+                try:
+                    import dataclasses
+                    self._hand.config = dataclasses.replace(cfg_mano, port=self.puerto)
+                except Exception as e_p:
+                    print(f"⚠️  [ORCA HARDWARE] No pude fijar el puerto {self.puerto} ({e_p}): "
+                          f"uso el del config.yaml ({getattr(cfg_mano, 'port', '?')}).")
             ok, msg = self._hand.connect()
             if not ok:
                 print(f"❌ [ORCA HARDWARE] Fallo al conectar: {msg}")

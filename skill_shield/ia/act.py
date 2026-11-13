@@ -183,20 +183,6 @@ def _listar_episodios(episodios_dir: str = EPISODIOS_DIR):
     )
 
 
-def _siguiente_numero_episodio(episodios_dir: str = EPISODIOS_DIR) -> int:
-    existentes = _listar_episodios(episodios_dir)
-    if not existentes:
-        return 1
-    numeros = []
-    for ruta in existentes:
-        nombre = os.path.basename(ruta)
-        try:
-            numeros.append(int(nombre.replace("episodio_", "").replace(".csv", "")))
-        except ValueError:
-            continue
-    return (max(numeros) + 1) if numeros else 1
-
-
 def leer_episodio(ruta):
     """Lee un episodio de cualquier formato. Devuelve dict(estado (T, De), accion (T, Da),
     tiempos (T,) o None, col_estado, col_accion, formato, fps) o None si no se puede leer.
@@ -237,20 +223,6 @@ def leer_episodio(ruta):
     return dict(estado=np.array(qpos), accion=np.array(ctrl),
                 tiempos=np.array(tiempos) if len(tiempos) == len(qpos) else None,
                 col_estado=None, col_accion=None, formato=1, fps=None)
-
-
-def guardar_episodio(buffer_filas, episodios_dir: str = EPISODIOS_DIR) -> str | None:
-    """Guarda un episodio grabado (lista de filas qpos+ctrl) como un CSV independiente.
-    Devuelve la ruta guardada, o None si el buffer estaba vacío."""
-    if not buffer_filas:
-        return None
-    os.makedirs(episodios_dir, exist_ok=True)
-    numero = _siguiente_numero_episodio(episodios_dir)
-    ruta = os.path.join(episodios_dir, f"episodio_{numero:04d}.csv")
-    with open(ruta, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerows(buffer_filas)
-    return ruta
 
 
 def preparar_datos(rutas):

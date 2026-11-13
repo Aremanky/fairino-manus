@@ -56,13 +56,6 @@ def q_z(grados):
     return np.array([math.cos(t), 0.0, 0.0, math.sin(t)])
 
 
-def leer_quat_base(ruta):
-    m = re.search(r'<body name="base_link" pos="[^"]*" quat="([^"]*)"', open(ruta, encoding="utf-8").read())
-    if not m:
-        sys.exit(f"✗ No encuentro <body name=\"base_link\" ... quat=\"...\"> en {ruta}")
-    return np.array([float(v) for v in m.group(1).split()])
-
-
 def guardar_quat_base(ruta, q):
     txt = open(ruta, encoding="utf-8").read()
     q = q / np.linalg.norm(q)
@@ -214,7 +207,7 @@ def main():
     ap.add_argument("--sin-robot", nargs=6, type=float, metavar="Q", help="ángulos fijos (°), sin conectar")
     a = ap.parse_args()
 
-    ruta = os.path.join(RAIZ, "fairino_description", "mjcf", "fairino_mjcf.xml")
+    ruta = cfg.RUTA_XML
     gem = Gemelo(ruta)
     lector = None
     if a.sin_robot:

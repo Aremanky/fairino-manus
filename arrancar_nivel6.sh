@@ -1,13 +1,18 @@
 #!/bin/bash
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$DIR"
+
+# Submódulo de los sensores táctiles (lo necesita puente_tactil.py)
+if [ -z "$(ls -A orca_core_touch 2>/dev/null)" ]; then
+echo "📦 Descargando el submódulo orca_core_touch..."
+git submodule update --init orca_core_touch
+fi
 
 if [ ! -d "venv_nivel6" ]; then
 echo "El entorno virtual no existe"
 echo "⚙️ Configurando el entorno virtual y descargando dependencias..."
 python3.12 -m venv venv_nivel6
-source venv_nivel6/bin/activate
-pip install -r requirements.txt
-pip install opencv-python depthai==2.32.0.0 mediapipe==0.10.14 evdev mujoco torch lib fastapi uvicorn
+./venv_nivel6/bin/pip install -r requirements.txt
 echo "✅ Entorno listo."
 fi
 
