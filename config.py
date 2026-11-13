@@ -1157,6 +1157,8 @@ EPISODIO_FR5_SIMULACRO     = False  # True = conecta y lee, pero NO mueve el FR5
 # mueve el brazo; STOP / Esc / Espacio / cerrar la ventana → desarmado (FR5 quieto).
 # El FR5 se arranca en este modo aunque FR5_REAL_ACTIVO sea False (si SLIDERS_CON_FR5).
 SLIDERS_CON_FR5           = True    # arrancar fr5_servo en este modo
+SLIDERS_SIN_CAMARAS       = True    # 13-nov: NO abrir las OAK-D en este modo (no hacen falta: dedos con
+                                    # el guante MANUS, brazo con los sliders). False = abrirlas como antes
 SLIDERS_FR5_SIMULACRO     = False   # True = conecta y lee, pero NO manda ServoJ (prueba en seco)
 SLIDERS_FR5_VEL_MAX_DEG_S = 30.0    # tope de fr5_servo en este modo (°/s, por joint)
 SLIDERS_SUAVE_VEL         = 0.6     # GeneradorSuave: rad/s por joint (~34 °/s) × % de la ventana
@@ -1186,6 +1188,9 @@ IA_PESO_EXP         = 0.15    # ensamblado temporal: más alto = más peso a la 
 # Paso 2 de la hoja de ruta: cámara de cabeza + gemelo en MuJoCo + web, SIN mover el robot
 # (fr5_servo va siempre en simulacro en este modo, diga lo que diga FR5_SIMULACRO).
 AUTONOMO_CON_FR5      = True             # arrancar fr5_servo (solo lectura) para el gemelo
+AUTONOMO_FR5_RECONECTAR = True           # 13-nov: si el FR5 se apaga y se vuelve a encender (o no estaba
+                                         # encendido al arrancar), se reconecta solo, sin reiniciar el
+                                         # programa (como la OrcaHand y los táctiles). Hay que volver a armar.
 AUTONOMO_CAM_MXID     = CAM_B_MXID       # cámara de CABEZA = la antigua cámara B
 AUTONOMO_CAM_VENTANA  = False            # True = además de la web, ventana de OpenCV con la imagen
 AUTONOMO_CAM_IR_MA    = 800              # proyector IR de puntos (mejor profundidad en la mesa lisa)

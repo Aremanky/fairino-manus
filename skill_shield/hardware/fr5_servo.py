@@ -41,10 +41,11 @@ import time
 import numpy as np
 
 # Estados del proceso (FR5Servo.estado()["estado"])
-INICIANDO, ESPERA, ACERCANDO, ENVIANDO, ERROR, TERMINADO = range(6)
+INICIANDO, ESPERA, ACERCANDO, ENVIANDO, ERROR, TERMINADO, RECONECTANDO = range(7)
 NOMBRE_ESTADO = {INICIANDO: "iniciando", ESPERA: "conectado (en espera)",
                  ACERCANDO: "acercándose a la pose del simulador", ENVIANDO: "enviando ServoJ",
-                 ERROR: "ERROR", TERMINADO: "terminado"}
+                 ERROR: "ERROR", TERMINADO: "terminado",
+                 RECONECTANDO: "sin conexión (reintentando solo)"}
 
 # Rangos reales del FR5 en grados (los mismos que LIMITES_CTRL_BRAZO de config.py)
 LIMITES_FR5_DEG = [(-175.0, 175.0), (-265.0, 85.0), (-160.0, 160.0),
@@ -81,6 +82,12 @@ PARAMETROS_POR_DEFECTO = dict(
     FR5_TCP_MM=None,                  # (x, y, z, rx, ry, rz) mm/° del TCP respecto a la brida
     FR5_HERRAMIENTA_ID=1,             # nº de sistema de herramienta en la controladora (1-14)
     FR5_RESET_REHABILITAR=True,       # 10-nov: el reset también hace disable → enable
+    # 13-nov: reconexión automática (apagar y encender el FR5 sin reiniciar el programa).
+    # False = como antes: si no conecta al arrancar o se pierde, hay que reiniciar el programa.
+    FR5_RECONECTAR=False,
+    FR5_RECONEXION_S=2.0,             # cada cuánto se vuelve a mirar si la controladora contesta
+    FR5_PERDIDA_S=2.0,                # sin respuesta de la controladora durante esto → conexión perdida
+    FR5_RPC_TIMEOUT_S=2.0,            # tiempo máximo de cada llamada XML-RPC (antes: infinito)
 )
 
 # Índices de la memoria compartida de estado
@@ -384,11 +391,69 @@ def _directo(proxy, metodo, *args):
         return f"{type(e).__name__}: {e}"
 
 
-def _renovar_xmlrpc(robot, ip):
+class FR5SinRespuesta(RuntimeError):
+    """La controladora no contesta (apagada, cable, reinicio…). NO hereda de OSError a propósito:
+    varias funciones del SDK (ServoJ por XML-RPC, GetControllerIP…) reintentan PARA SIEMPRE con
+    `except socket.error`; con esta excepción el fallo sale y fr5_servo no se queda colgado."""
+
+
+class _ProxySeguro:
+    """Sustituto de la conexión XML-RPC interna del SDK (robot.robot) con tiempo máximo por
+    llamada y los fallos de red convertidos en FR5SinRespuesta (13-nov, reconexión)."""
+
+    def __init__(self, ip, timeout):
+        self._px = _proxy_directo(ip, timeout)
+
+    def __getattr__(self, nombre):
+        import http.client
+        metodo = getattr(self._px, nombre)
+
+        def _llamar(*args):
+            try:
+                return metodo(*args)
+            except (OSError, http.client.HTTPException) as e:
+                raise FR5SinRespuesta(f"{nombre}: {type(e).__name__}: {e}") from None
+        return _llamar
+
+
+def _renovar_xmlrpc(robot, ip, p=None):
     """Cambia la conexión XML-RPC interna del SDK por una nueva (la vieja puede tener una
-    petición colgada). La conexión de estado del SDK (CNDE) no se toca."""
+    petición colgada). La conexión de estado del SDK (CNDE) no se toca.
+    13-nov: con FR5_RECONECTAR, la nueva es un _ProxySeguro (con tiempo máximo)."""
     import xmlrpc.client
-    robot.robot = xmlrpc.client.ServerProxy(f"http://{ip}:20003")
+    if p is not None and p.get("FR5_RECONECTAR"):
+        robot.robot = _ProxySeguro(ip, float(p.get("FR5_RPC_TIMEOUT_S", 2.0)))
+    else:
+        robot.robot = xmlrpc.client.ServerProxy(f"http://{ip}:20003")
+
+
+def _controladora_contesta(px):
+    """True si la controladora responde a una llamada XML-RPC barata (cualquier código vale:
+    lo que importa es que hay alguien al otro lado)."""
+    return not isinstance(_directo(px, "GetControllerIP"), str)
+
+
+def _hilo_latido(ip, vivo, parar, periodo=0.5, timeout=1.0):
+    """13-nov: hilo que pregunta a la controladora cada `periodo` s por una conexión XML-RPC
+    propia (con tiempo máximo) y apunta en vivo[0] cuándo contestó por última vez. Así se nota
+    que el FR5 se ha apagado aunque el SDK siga devolviendo la última pose (su conexión de estado
+    CNDE no avisa cuando el robot se apaga de golpe: solo deja de recibir)."""
+    def _bucle():
+        px = _proxy_directo(ip, timeout)
+        while not parar.wait(periodo):
+            if _controladora_contesta(px):
+                vivo[0] = time.monotonic()
+    h = threading.Thread(target=_bucle, name="fr5_latido", daemon=True)
+    h.start()
+    return h
+
+
+def _cnde_caido(robot):
+    """True si el hilo de estado del SDK (CNDE, puerto 20005) marcó un fallo de comunicación."""
+    try:
+        return int(getattr(robot, "_com_err_flag", [0])[0]) != 0
+    except Exception:
+        return False
 
 
 def _rpc(f, *args, timeout=2.0):
@@ -530,20 +595,74 @@ def paso_limitado(q, v, objetivo, v_max, a_max, dt):
 
 
 def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
+    """Proceso fr5_servo. Sin FR5_RECONECTAR: una sola sesión (como siempre). Con FR5_RECONECTAR
+    (13-nov): si no conecta o se pierde la conexión (FR5 apagado, cable…), se queda en
+    RECONECTANDO, mira cada FR5_RECONEXION_S si la controladora contesta y, cuando vuelve, abre
+    una sesión NUEVA del SDK. Nunca se arma solo: tras reconectar hay que volver a armar."""
     est[_E_ESTADO] = INICIANDO
     ppid = os.getppid()
+    try:
+        Robot = _importar_sdk(p["FR5_SDK_RUTA"])
+    except ImportError as e:
+        print(f"✗ fr5_servo: no encuentro el SDK de FAIRINO ({e}). Copia la carpeta "
+              f"fairino/ del fairino-python-sdk o pon su ruta en FR5_SDK_RUTA.")
+        est[_E_ESTADO] = ERROR
+        listo.set()
+        return
+    if not p.get("FR5_RECONECTAR"):
+        _sesion_fr5(Robot, p, obj, est, habilitado, salir, listo, reset, ppid)
+        if est[_E_ESTADO] != ERROR:
+            est[_E_ESTADO] = TERMINADO
+        return
+
+    periodo = max(0.5, float(p.get("FR5_RECONEXION_S", 2.0)))
+    try:
+        while not salir.is_set() and os.getppid() == ppid:
+            motivo = _sesion_fr5(Robot, p, obj, est, habilitado, salir, listo, reset, ppid)
+            if motivo in ("salir", "padre") or salir.is_set():
+                break
+            # sin conexión: nada de comandos ni de pose vieja hasta que el FR5 vuelva
+            habilitado.value = 0
+            est[_E_TREAL] = 0.0
+            est[_E_ESTADO] = RECONECTANDO
+            listo.set()
+            print(f"🔌 fr5_servo: sin conexión con el FR5 ({p['FR5_IP']}) → reintento cada "
+                  f"{periodo:g} s; cuando vuelva, se reconecta solo (y hay que volver a armar)")
+            px = _proxy_directo(p["FR5_IP"], 1.0)
+            while not salir.wait(periodo) and os.getppid() == ppid:
+                if _controladora_contesta(px):
+                    print("🔌 fr5_servo: la controladora vuelve a contestar → reconectando…")
+                    break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        listo.set()
+        est[_E_ESTADO] = TERMINADO
+
+
+def _sesion_fr5(Robot, p, obj, est, habilitado, salir, listo, reset, ppid):
+    """Una conexión con el FR5, de principio a fin. Devuelve por qué terminó:
+    "salir" (lo pidió el programa), "padre" (el programa murió), "sin_conexion" (no conectó)
+    o "perdida" (13-nov: la controladora dejó de contestar)."""
+    reconectar = bool(p.get("FR5_RECONECTAR"))
     robot = None
+    motivo = "salir"
+    parar_latido = threading.Event()
     try:
         # ── Conexión ──────────────────────────────────────────────────────────
-        try:
-            Robot = _importar_sdk(p["FR5_SDK_RUTA"])
-        except ImportError as e:
-            print(f"✗ fr5_servo: no encuentro el SDK de FAIRINO ({e}). Copia la carpeta "
-                  f"fairino/ del fairino-python-sdk o pon su ruta en FR5_SDK_RUTA.")
-            est[_E_ESTADO] = ERROR
-            return
+        if reconectar:
+            # El SDK trae su propia reconexión (30 intentos de 1 s, y mientras dura TODAS sus
+            # llamadas se quedan esperando): se apaga, la reconexión la lleva fr5_servo.
+            try:
+                Robot.RPC._reconnect_enable = False
+            except Exception:
+                pass
         try:
             robot = Robot.RPC(p["FR5_IP"])
+            if reconectar:
+                if hasattr(robot, "SetReConnectParam"):
+                    robot.SetReConnectParam(False, 1, 1000)
+                _renovar_xmlrpc(robot, p["FR5_IP"], p)   # llamadas XML-RPC con tiempo máximo
             r = robot.GetActualJointPosDegree(0)
             err, q_real = (r[0], list(r[1])) if isinstance(r, (tuple, list)) else (r, None)
         except Exception as e:
@@ -552,8 +671,12 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
             print(f"✗ fr5_servo: sin conexión con el FR5 en {p['FR5_IP']} "
                   f"(GetActualJointPosDegree → {err}). ¿Cable, IP del PC en 192.168.58.x, "
                   f"robot encendido?")
-            est[_E_ESTADO] = ERROR
-            return
+            est[_E_ESTADO] = RECONECTANDO if reconectar else ERROR
+            return "sin_conexion"
+        vivo = [time.monotonic()]            # última respuesta de la controladora (latido)
+        if reconectar:
+            habilitado.value = 0             # tras (re)conectar, NUNCA se arranca enviando
+            _hilo_latido(p["FR5_IP"], vivo, parar_latido)
         est[_E_QCMD:_E_QCMD + 6] = q_real[:6]
         est[_E_QREAL:_E_QREAL + 6] = q_real[:6]
         est[_E_TREAL] = time.monotonic()
@@ -563,7 +686,9 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
         lim_blandos = _limites_blandos(robot, p, q_real)
         _configurar_colisiones(robot, p)
         listo.set()
-        _prioridad_tiempo_real(p)
+        if not p.get("_prioridad_hecha"):           # (una vez por proceso, no por reconexión)
+            _prioridad_tiempo_real(p)
+            p["_prioridad_hecha"] = True
 
         # ── Constantes ────────────────────────────────────────────────────────
         dt = float(p["FR5_PERIODO_S"])
@@ -596,7 +721,22 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
         while not salir.is_set():
             if os.getppid() != ppid:                     # el programa principal murió
                 print("⚠ fr5_servo: el proceso principal ha desaparecido → paro")
+                motivo = "padre"
                 break
+            # 13-nov: ¿sigue ahí la controladora? (latido) / ¿se cayó la conexión de estado?
+            if reconectar:
+                _sin_resp = time.monotonic() - vivo[0]
+                if _sin_resp > float(p.get("FR5_PERDIDA_S", 2.0)) or _cnde_caido(robot):
+                    print("✗ fr5_servo: conexión con el FR5 PERDIDA ("
+                          + (f"{_sin_resp:.1f} s sin respuesta" if _sin_resp > float(p.get("FR5_PERDIDA_S", 2.0))
+                             else "se cayó la conexión de estado del SDK")
+                          + ")" + (" → dejo de enviar" if enviando else "") + "; reconectaré solo")
+                    enviando = False
+                    habilitado.value = 0
+                    est[_E_TREAL] = 0.0              # la última pose ya no es la real
+                    est[_E_ESTADO] = RECONECTANDO
+                    motivo = "perdida"
+                    break
             ahora = time.perf_counter()
 
             # 9-nov: códigos de fallo / colisión (paquete de estado, sin RPC) cada 0,1 s
@@ -644,7 +784,7 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
                         time.sleep(0.5)
                 r_end = _directo(px, "ServoMoveEnd")     # cerrar el modo servo que dejó la colisión
                 pasos.append(f"ServoMoveEnd → {'✓' if r_end == 0 else r_end}")
-                _renovar_xmlrpc(robot, p["FR5_IP"])      # por si la conexión del SDK quedó colgada
+                _renovar_xmlrpc(robot, p["FR5_IP"], p)    # por si la conexión del SDK quedó colgada
                 servoj = _LlamadaServoJ(robot, p)
                 sucio = False
                 print("🔄 fr5_servo: ResetAllError → " + ("✓" if rc == 0 else str(rc)) + " · " + " · ".join(pasos))
@@ -683,7 +823,7 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
             if not enviando:                              # ── arranque del streaming ──
                 if sucio:                                # p. ej. el error se borró en la WebApp
                     _directo(_proxy_directo(p["FR5_IP"], 2.0), "ServoMoveEnd")
-                    _renovar_xmlrpc(robot, p["FR5_IP"])
+                    _renovar_xmlrpc(robot, p["FR5_IP"], p)
                     servoj, sucio = _LlamadaServoJ(robot, p), False
                     print("🔌 fr5_servo: conexión XML-RPC renovada")
                 r = _rpc(robot.GetActualJointPosDegree, 0, timeout=2.0)
@@ -791,21 +931,22 @@ def _proceso_fr5_servo(p, obj, est, habilitado, salir, listo, reset=None):
             _rpc(robot.ServoMoveEnd, timeout=1.0)
             print("⏹  fr5_servo: ServoMoveEnd")
     except KeyboardInterrupt:
-        pass
+        motivo = "salir"
     finally:
+        parar_latido.set()
         listo.set()
         if robot is not None:
+            if motivo != "perdida":                  # (perdida: no hay nadie que conteste)
+                try:
+                    if est[_E_ESTADO] in (ACERCANDO, ENVIANDO) and not p["FR5_SIMULACRO"]:
+                        _rpc(robot.ServoMoveEnd, timeout=1.0)
+                except Exception:
+                    pass
             try:
-                if est[_E_ESTADO] in (ACERCANDO, ENVIANDO) and not p["FR5_SIMULACRO"]:
-                    _rpc(robot.ServoMoveEnd, timeout=1.0)
+                _rpc(robot.CloseRPC, timeout=1.0)   # (si se cuelga, el hilo se abandona)
             except Exception:
                 pass
-            try:
-                _rpc(robot.CloseRPC, timeout=1.0)
-            except Exception:
-                pass
-        if est[_E_ESTADO] != ERROR:
-            est[_E_ESTADO] = TERMINADO
+    return motivo
 
 
 # ══════════════════════════════════════════════════════════════════════════════

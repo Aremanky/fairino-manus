@@ -64,6 +64,7 @@ import math
 import time
 from contextlib import nullcontext
 from collections import deque
+from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -210,6 +211,9 @@ def main():
         return
     modo_sliders = MODO_EJECUCION == "GEMELO_SLIDERS"
     mano_fisica  = MODO_EJECUCION in ("HARDWARE_REAL", "GEMELO_SLIDERS")   # OrcaHand por USB
+    # 13-nov: en GEMELO_SLIDERS el brazo va con los sliders y los dedos con el guante MANUS: las
+    # cámaras OAK-D no hacen falta y NO se abren (SLIDERS_SIN_CAMARAS = False → como antes).
+    sin_camaras  = modo_sliders and bool(globals().get("SLIDERS_SIN_CAMARAS", True))
 
     # ── FR5 REAL (proceso fr5_servo, ServoJ cada 8 ms) ──
     # Se arranca AQUÍ, antes del visor, las cámaras y los hilos: el proceso se crea con fork.
@@ -447,15 +451,19 @@ def main():
     modo_demo_taladro = False   # [5] demo automática: coger taladro y agujerear el techo
     red_neuronal  = None
 
-    pipeline = crear_pipeline_oak()
+    pipeline = None if sin_camaras else crear_pipeline_oak()
     salir    = False
+    # Resultados "vacíos" de MediaPipe para el modo sin cámaras (nadie detectado)
+    _SIN_POSE = SimpleNamespace(pose_landmarks=None, pose_world_landmarks=None)
+    _SIN_MANO = SimpleNamespace(multi_hand_landmarks=None, multi_hand_world_landmarks=None)
 
     # — Guante MANUS: dedos de la OrcaHand desde el guante (la muñeca sigue con la cámara) —
     guante = None
     if globals().get("FUENTE_DEDOS", "camara") == "manus":
         guante = GuanteManus()
         if not guante.iniciar():
-            print("⚠️  [MANUS] Sigo con los dedos de la CÁMARA.")
+            print("⚠️  [MANUS] Sin guante y SIN cámaras (gemelo con sliders): los dedos NO se moverán."
+                  if sin_camaras else "⚠️  [MANUS] Sigo con los dedos de la CÁMARA.")
             guante = None
 
     print("\n  Controles: [A] Activar | [S] Standby | [G] Grabar | "
@@ -742,47 +750,59 @@ def main():
         # ESTADO B — TELEOPERACIÓN HUMANA (cámara activa)
         # ══════════════════════════════════════════════════
         else:
-            print("⚡ Conectando OAK-D (puede tardar ~2 s)...")
+            if sin_camaras:
+                print("🎚️  Gemelo con sliders SIN cámaras: dedos con el guante MANUS, brazo con los "
+                      "sliders ([A] activa la mano). Para abrirlas: SLIDERS_SIN_CAMARAS = False")
+            else:
+                print("⚡ Conectando OAK-D (puede tardar ~2 s)...")
 
-            with abrir_dispositivo(pipeline, CAM_A_MXID, excluir=(CAM_B_MXID,)) as device, \
-                    (CamaraSecundaria(excluir=(device.getMxId(),)) if MULTICAMARA_ACTIVA
-                     else nullcontext()) as cam_b:
-                # ── FLUIDEZ: ¿USB3? Con color + recorte HD + profundidad a 30 FPS se
-                # mandan ~108 MB/s (~860 Mbit/s); por USB2 (máx. 480 Mbit/s) no caben
-                # y los fotogramas llegan tarde o se pierden. ──
-                _usb = comprobar_usb(device, "A")
-                if _usb is not None and _usb not in (dai.UsbSpeed.SUPER, dai.UsbSpeed.SUPER_PLUS):
-                    print("   Mientras tanto, pon MANO_RECORTE_HD = False.")
-                # ── PROYECTOR IR DE PUNTOS (OAK-D Pro) ────────────────────────
-                # Añade textura donde la piel/manga no tiene ninguna: es la causa
-                # nº1 de que el estéreo del BRAZO (fino, poca textura, 1.5-2 m)
-                # dé profundidades disparatadas. Sin efecto en el color/RGB.
-                activar_ir(device, "A", CAM_A_IR_MA)
-
-                q_color = device.getOutputQueue("color", maxSize=1, blocking=False)
-                usar_hd = MANO_RECORTE and MANO_RECORTE_HD and CAM_FOV_COMPLETO
-                q_hd    = device.getOutputQueue("color_hd", maxSize=4, blocking=False) \
-                          if usar_hd else None
+            with (nullcontext() if sin_camaras else
+                  abrir_dispositivo(pipeline, CAM_A_MXID, excluir=(CAM_B_MXID,))) as device, \
+                    (CamaraSecundaria(excluir=(device.getMxId(),))
+                     if MULTICAMARA_ACTIVA and device is not None else nullcontext()) as cam_b:
+                # (estas no dependen de la cámara)
                 buf_hd  = deque(maxlen=6)
                 t_ult_print_pinza = 0.0
                 origen_mano = "-"
-                # maxSize=4: guardamos varios mapas de profundidad para poder elegir
-                # el que corresponde EN EL TIEMPO al fotograma de color (ver bucle).
-                q_depth = device.getOutputQueue("depth", maxSize=4, blocking=False)
                 buf_depth = deque(maxlen=6)   # paquetes de profundidad recientes
                 _fps_n, _fps_t0, _fps_val = 0, time.perf_counter(), 0.0
-
-                # Focal REAL de la cámara para este tamaño de fotograma (viene de la
-                # calibración de fábrica). Si falla, se usa F_PX de config.py.
-                try:
-                    _K = device.readCalibration().getCameraIntrinsics(
-                        dai.CameraBoardSocket.CAM_A, ANCHO_CAM, ALTO_CAM)
-                    f_px_cam = float(_K[0][0])
-                    print(f"📷 Focal calibrada OAK-D: {f_px_cam:.1f} px "
-                          f"(fotograma {ANCHO_CAM}x{ALTO_CAM})")
-                except Exception as e_cal:
+                if device is None:              # 13-nov: GEMELO_SLIDERS sin cámaras
+                    q_color = q_hd = q_depth = None
+                    usar_hd  = False
                     f_px_cam = F_PX
-                    print(f"⚠️  No se pudo leer la calibración ({e_cal}); uso F_PX={F_PX}")
+                    _t_frame_sc = time.perf_counter()   # ritmo del bucle sin cámara
+                else:
+                    # ── FLUIDEZ: ¿USB3? Con color + recorte HD + profundidad a 30 FPS se
+                    # mandan ~108 MB/s (~860 Mbit/s); por USB2 (máx. 480 Mbit/s) no caben
+                    # y los fotogramas llegan tarde o se pierden. ──
+                    _usb = comprobar_usb(device, "A")
+                    if _usb is not None and _usb not in (dai.UsbSpeed.SUPER, dai.UsbSpeed.SUPER_PLUS):
+                        print("   Mientras tanto, pon MANO_RECORTE_HD = False.")
+                    # ── PROYECTOR IR DE PUNTOS (OAK-D Pro) ────────────────────────
+                    # Añade textura donde la piel/manga no tiene ninguna: es la causa
+                    # nº1 de que el estéreo del BRAZO (fino, poca textura, 1.5-2 m)
+                    # dé profundidades disparatadas. Sin efecto en el color/RGB.
+                    activar_ir(device, "A", CAM_A_IR_MA)
+
+                    q_color = device.getOutputQueue("color", maxSize=1, blocking=False)
+                    usar_hd = MANO_RECORTE and MANO_RECORTE_HD and CAM_FOV_COMPLETO
+                    q_hd    = device.getOutputQueue("color_hd", maxSize=4, blocking=False) \
+                              if usar_hd else None
+                    # maxSize=4: guardamos varios mapas de profundidad para poder elegir
+                    # el que corresponde EN EL TIEMPO al fotograma de color (ver bucle).
+                    q_depth = device.getOutputQueue("depth", maxSize=4, blocking=False)
+
+                    # Focal REAL de la cámara para este tamaño de fotograma (viene de la
+                    # calibración de fábrica). Si falla, se usa F_PX de config.py.
+                    try:
+                        _K = device.readCalibration().getCameraIntrinsics(
+                            dai.CameraBoardSocket.CAM_A, ANCHO_CAM, ALTO_CAM)
+                        f_px_cam = float(_K[0][0])
+                        print(f"📷 Focal calibrada OAK-D: {f_px_cam:.1f} px "
+                              f"(fotograma {ANCHO_CAM}x{ALTO_CAM})")
+                    except Exception as e_cal:
+                        f_px_cam = F_PX
+                        print(f"⚠️  No se pudo leer la calibración ({e_cal}); uso F_PX={F_PX}")
 
                 # ── DOS CÁMARAS: extrínsecos A↔B y fusor del brazo ──
                 fusor_b = None
@@ -1085,38 +1105,47 @@ def main():
                     # fotogramas desfasado respecto al color. Con el brazo en
                     # movimiento eso significa leer la profundidad DEL FONDO en el
                     # píxel de la muñeca → z descartada → "brazo perdido".
-                    with _soltar():                   # esperar a la cámara: la física sigue
-                        _pkt_color = q_color.get()
-                    frame_bgr  = _pkt_color.getCvFrame()
-                    _t_color   = _pkt_color.getTimestamp()
+                    if device is None:
+                        # 13-nov: SIN CÁMARAS (GEMELO_SLIDERS): fotograma negro solo para el HUD y el
+                        # teclado, a ~30 vueltas/s. La espera suelta la física (sigue en su hilo).
+                        with _soltar():
+                            time.sleep(max(0.0, _t_frame_sc + 1.0 / 30.0 - time.perf_counter()))
+                        _t_frame_sc = time.perf_counter()
+                        frame_bgr   = np.zeros((ALTO_CAM, ANCHO_CAM, 3), np.uint8)
+                        frame_depth = frame_hd = _t_color = None
+                    else:
+                        with _soltar():                   # esperar a la cámara: la física sigue
+                            _pkt_color = q_color.get()
+                        frame_bgr  = _pkt_color.getCvFrame()
+                        _t_color   = _pkt_color.getTimestamp()
 
-                    while True:                       # vaciar lo que haya llegado
-                        _p = q_depth.tryGet()
-                        if _p is None:
-                            break
-                        buf_depth.append(_p)
-                    if not buf_depth:                 # primer fotograma: esperar
-                        buf_depth.append(q_depth.get())
-
-                    _pkt_depth  = min(
-                        buf_depth,
-                        key=lambda p: abs((p.getTimestamp() - _t_color).total_seconds()))
-                    frame_depth = _pkt_depth.getFrame()
-
-                    # Imagen HD para el recorte de la mano (la más cercana en el tiempo)
-                    frame_hd = None
-                    if q_hd is not None:
-                        while True:
-                            _p = q_hd.tryGet()
+                        while True:                       # vaciar lo que haya llegado
+                            _p = q_depth.tryGet()
                             if _p is None:
                                 break
-                            buf_hd.append(_p)
-                        if buf_hd:
-                            _pkt_hd = min(
-                                buf_hd,
-                                key=lambda p: abs((p.getTimestamp() - _t_color).total_seconds()))
-                            if abs((_pkt_hd.getTimestamp() - _t_color).total_seconds()) < 0.05:
-                                frame_hd = _pkt_hd.getCvFrame()
+                            buf_depth.append(_p)
+                        if not buf_depth:                 # primer fotograma: esperar
+                            buf_depth.append(q_depth.get())
+
+                        _pkt_depth  = min(
+                            buf_depth,
+                            key=lambda p: abs((p.getTimestamp() - _t_color).total_seconds()))
+                        frame_depth = _pkt_depth.getFrame()
+
+                        # Imagen HD para el recorte de la mano (la más cercana en el tiempo)
+                        frame_hd = None
+                        if q_hd is not None:
+                            while True:
+                                _p = q_hd.tryGet()
+                                if _p is None:
+                                    break
+                                buf_hd.append(_p)
+                            if buf_hd:
+                                _pkt_hd = min(
+                                    buf_hd,
+                                    key=lambda p: abs((p.getTimestamp() - _t_color).total_seconds()))
+                                if abs((_pkt_hd.getTimestamp() - _t_color).total_seconds()) < 0.05:
+                                    frame_hd = _pkt_hd.getCvFrame()
 
                     if perfil is not None:
                         perfil.marca("cámara")
@@ -1155,8 +1184,11 @@ def main():
 
                     # — Detección de CUERPO (solo visual por ahora) —
                     # Se dibuja ANTES que la mano para que los dedos queden encima.
-                    with _soltar():                   # MediaPipe Pose: la física sigue
-                        resultado_pose = detector_pose.process(frame_rgb)
+                    if device is None:                # sin cámaras: nadie a la vista
+                        resultado_pose = _SIN_POSE
+                    else:
+                        with _soltar():               # MediaPipe Pose: la física sigue
+                            resultado_pose = detector_pose.process(frame_rgb)
                     pose_lm_prev = resultado_pose.pose_landmarks   # FLUIDEZ: recorte del siguiente fotograma
                     ent_b = cam_b.recoger(fut_cam_b) if fut_cam_b is not None else None
                     if perfil is not None:
@@ -1610,6 +1642,8 @@ def main():
                                           (int((_cj[0] + _cj[2]) * _sx),
                                            int((_cj[1] + _cj[2]) * _sy)),
                                           (255, 200, 0) if _ok else (0, 0, 255), 1)
+                    if resultado is None and device is None:   # sin cámaras: no hay mano que ver
+                        resultado = _SIN_MANO
                     if resultado is None:
                         with _soltar():               # MediaPipe Hands: la física sigue
                             resultado = detector_mano.process(frame_rgb)
@@ -1799,6 +1833,14 @@ def main():
                                         (10, 80),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
 
+                    elif device is None:              # sin cámaras: la mano va con el guante
+                        cv2.putText(frame_bgr, "SIN CAMARAS (gemelo con sliders)", (10, 85),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                        cv2.putText(frame_bgr,
+                                    "Mano: guante MANUS -> OrcaHand" if estado["camara_activa"]
+                                    else "Pulsa [A] para activar la mano (guante MANUS)",
+                                    (10, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                    (0, 255, 0) if estado["camara_activa"] else (0, 165, 255), 1)
                     else:
                         msg = ("⚠ Mano perdida — posición mantenida"
                                if estado["camara_activa"] else "Buscando mano...")
@@ -2090,8 +2132,9 @@ def main():
                             v, e = calcular_flexion_muneca(resultado.multi_hand_world_landmarks[0])
                             estado["vec_neutro"]  = v
                             estado["eje_lateral"] = e
-                        print("✅ Cámara ACTIVA — muñeca calibrada en posición neutra "
-                              "(el brazo parte de su posición actual).")
+                        if device is not None:
+                            print("✅ Cámara ACTIVA — muñeca calibrada en posición neutra "
+                                  "(el brazo parte de su posición actual).")
 
                     elif key in (ord("x"), ord("X")):
                         # 9-nov: recuperación rápida tras una colisión (falsa o no) o un fallo

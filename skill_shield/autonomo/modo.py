@@ -184,9 +184,13 @@ def ejecutar(cfg):
         c["FR5_SIMULACRO"] = simulacro
         c["FR5_VEL_MAX_DEG_S"] = min(float(cfg.get("FR5_VEL_MAX_DEG_S", 60.0)),
                                      float(cfg.get("AUTONOMO_FR5_VEL_MAX_DEG_S", 20.0)))
+        # 13-nov: si el FR5 se apaga (o no está encendido al arrancar), fr5_servo se reconecta
+        # solo cuando vuelve, como la OrcaHand y los táctiles. Nunca se arma solo.
+        c["FR5_RECONECTAR"] = bool(cfg.get("AUTONOMO_FR5_RECONECTAR", True))
         fr5 = FR5Servo.desde_config(c)
         if not fr5.iniciar():
-            print("   Sin conexión con el FR5: el gemelo enseñará el brazo en reposo.")
+            print("   Sin conexión con el FR5: el gemelo enseñará el brazo en reposo"
+                  + (" y se conectará solo cuando el FR5 esté encendido." if c["FR5_RECONECTAR"] else "."))
 
     # ── 2. Canales de memoria compartida (este proceso es el dueño: los borra al salir) ──
     canal_img = Canal(CANAL_IMG, capacidad=2 << 20, crear=True)
