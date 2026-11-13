@@ -1,12 +1,29 @@
 .
 ├── arrancar_nivel6.sh
+├── calib_muestras.json
+├── calib_posturas.json
+├── calib_posturas.json.antes_giro
 ├── calibrador_hsv.py
+├── calibrar_camara_robot.py
 ├── calibrar_extrinseca.py
 ├── calibrar_manus.py
+├── camara_robot.correccion.json
+├── camara_robot.json
+├── camara_robot.json.antes_giro
+├── camara_robot_verificacion.json
 ├── camaras_extrinsecas.json
 ├── comprobar_profundidad.py
 ├── config.py
 ├── config.py.bak_antes_mover
+├── diagnosticos
+│   ├── ajustar_gemelo.py
+│   ├── plan_fallido_20261113_091208.npz
+│   ├── plan_fallido_20261113_091616.npz
+│   ├── plan_fallido_20261113_094853.npz
+│   ├── plan_fallido_20261113_094921.npz
+│   └── plan_fallido_20261113_094936.npz
+├── episodio_poses.py
+├── episodio_poses.txt
 ├── episodios
 │   ├── abrir_fusible
 │   │   ├── episodio_0001.csv
@@ -46,6 +63,14 @@
 │   │   └── episodio_0010.csv
 │   └── tornillo
 │       └── episodio_0001.csv
+├── fairino
+│   ├── __init__.py
+│   ├── __pycache__
+│   │   ├── __init__.cpython-312.pyc
+│   │   ├── __init__.cpython-313.pyc
+│   │   ├── Robot.cpython-312.pyc
+│   │   └── Robot.cpython-313.pyc
+│   └── Robot.py
 ├── fairino_description
 │   ├── meshes
 │   │   ├── base_link.STL
@@ -109,6 +134,7 @@
 │       │       └── rotulo_taller.png
 │       ├── escena_taladro.xml
 │       ├── fairino_mjcf.xml
+│       ├── fairino_mjcf.xml.bak_gemelo
 │       └── mesa_trabajo.xml
 ├── fr5_mujoco
 │   ├── escena_fr5.xml
@@ -223,10 +249,6 @@
 │   │   ├── Fr5_env.py
 │   │   ├── Fr5_train.py
 │   │   ├── __init__.py
-│   │   ├── __pycache__
-│   │   │   ├── Callback.cpython-310.pyc
-│   │   │   ├── Fr5_env.cpython-310.pyc
-│   │   │   └── reward.cpython-310.pyc
 │   │   ├── reward.py
 │   │   └── test
 │   │       ├── Fr5_test.py
@@ -247,12 +269,10 @@
 │   ├── requirments.txt
 │   ├── utils
 │   │   ├── arguments.py
-│   │   ├── __init__.py
-│   │   └── __pycache__
-│   │       ├── arguments.cpython-310.pyc
-│   │       └── arguments.cpython-39.pyc
+│   │   └── __init__.py
 │   └── visualShapeBench.json_0.json
 ├── hand_landmark_lite_sh4.blob
+├── Manual_Skill_Shield_Nivel_6.pdf
 ├── manus_calibracion.json
 ├── MANUS_Core_3.2.1_SDK_Linux
 │   ├── C++
@@ -981,9 +1001,7 @@
 │   │   │   │   ├── __init__.py
 │   │   │   │   └── __pycache__
 │   │   │   │       ├── _enums.cpython-312.pyc
-│   │   │   │       ├── _enums.cpython-313.pyc
-│   │   │   │       ├── __init__.cpython-312.pyc
-│   │   │   │       └── __init__.cpython-313.pyc
+│   │   │   │       └── __init__.cpython-312.pyc
 │   │   │   ├── __init__.py
 │   │   │   ├── linux
 │   │   │   │   ├── aarch64
@@ -1006,9 +1024,7 @@
 │   │   │   ├── manus_wrapper.py
 │   │   │   └── __pycache__
 │   │   │       ├── __init__.cpython-312.pyc
-│   │   │       ├── __init__.cpython-313.pyc
-│   │   │       ├── manus_wrapper.cpython-312.pyc
-│   │   │       └── manus_wrapper.cpython-313.pyc
+│   │   │       └── manus_wrapper.cpython-312.pyc
 │   │   ├── manus_sdk.egg-info
 │   │   │   ├── dependency_links.txt
 │   │   │   ├── PKG-INFO
@@ -1070,6 +1086,10 @@
 │       ├── TinyProcessLibrary.txt
 │       ├── upb.txt
 │       └── zlib.txt
+├── marcadores
+│   ├── marcador_20_destornillador.png
+│   ├── marcador_21_punto_de_uso.png
+│   └── marcador_22_punto_de_dejada.png
 ├── modelos
 │   ├── abrir_fusible.pth
 │   ├── cerrar_puño.pth
@@ -1132,11 +1152,8 @@
 │   │   │   ├── motor_client.py
 │   │   │   └── __pycache__
 │   │   │       ├── dynamixel_client.cpython-312.pyc
-│   │   │       ├── dynamixel_client.cpython-313.pyc
 │   │   │       ├── __init__.cpython-312.pyc
-│   │   │       ├── __init__.cpython-313.pyc
-│   │   │       ├── motor_client.cpython-312.pyc
-│   │   │       └── motor_client.cpython-313.pyc
+│   │   │       └── motor_client.cpython-312.pyc
 │   │   ├── hardware_hand.py
 │   │   ├── __init__.py
 │   │   ├── joint_position.py
@@ -1162,28 +1179,18 @@
 │   │   │           └── config.yaml
 │   │   ├── __pycache__
 │   │   │   ├── base_hand.cpython-312.pyc
-│   │   │   ├── base_hand.cpython-313.pyc
 │   │   │   ├── calibration.cpython-312.pyc
-│   │   │   ├── calibration.cpython-313.pyc
 │   │   │   ├── constants.cpython-312.pyc
-│   │   │   ├── constants.cpython-313.pyc
 │   │   │   ├── hand_config.cpython-312.pyc
-│   │   │   ├── hand_config.cpython-313.pyc
 │   │   │   ├── hardware_hand.cpython-312.pyc
-│   │   │   ├── hardware_hand.cpython-313.pyc
 │   │   │   ├── __init__.cpython-312.pyc
-│   │   │   ├── __init__.cpython-313.pyc
 │   │   │   ├── joint_position.cpython-312.pyc
-│   │   │   ├── joint_position.cpython-313.pyc
-│   │   │   ├── version.cpython-312.pyc
-│   │   │   └── version.cpython-313.pyc
+│   │   │   └── version.cpython-312.pyc
 │   │   ├── utils
 │   │   │   ├── __init__.py
 │   │   │   ├── __pycache__
 │   │   │   │   ├── __init__.cpython-312.pyc
-│   │   │   │   ├── __init__.cpython-313.pyc
-│   │   │   │   ├── utils.cpython-312.pyc
-│   │   │   │   └── utils.cpython-313.pyc
+│   │   │   │   └── utils.cpython-312.pyc
 │   │   │   └── utils.py
 │   │   └── version.py
 │   ├── pyproject.toml
@@ -1199,9 +1206,6 @@
 │   │   ├── main_demo.py
 │   │   ├── neutral.py
 │   │   ├── overload_demo.py
-│   │   ├── __pycache__
-│   │   │   ├── common.cpython-312.pyc
-│   │   │   └── common.cpython-313.pyc
 │   │   ├── record_angles.py
 │   │   ├── record_continuous.py
 │   │   ├── replay_angles.py
@@ -1214,21 +1218,20 @@
 │   │   ├── test_motor_latency.py
 │   │   ├── test_overload.py
 │   │   └── zero.py
-│   ├── tests
-│   │   ├── conftest.py
-│   │   ├── __init__.py
-│   │   ├── reference
-│   │   │   └── calibration_expected.yaml
-│   │   ├── test_base_hand_contract.py
-│   │   ├── test_calibration.py
-│   │   ├── test_calibration_reference.py
-│   │   ├── test_core.py
-│   │   ├── test_hardware_hand.py
-│   │   ├── test_jitter.py
-│   │   ├── test_model_dispatch.py
-│   │   ├── test_tension.py
-│   │   └── test_yaml.py
-│   └── uv.lock
+│   └── tests
+│       ├── conftest.py
+│       ├── __init__.py
+│       ├── reference
+│       │   └── calibration_expected.yaml
+│       ├── test_base_hand_contract.py
+│       ├── test_calibration.py
+│       ├── test_calibration_reference.py
+│       ├── test_core.py
+│       ├── test_hardware_hand.py
+│       ├── test_jitter.py
+│       ├── test_model_dispatch.py
+│       ├── test_tension.py
+│       └── test_yaml.py
 ├── orca_core_touch
 │   ├── CLAUDE.md
 │   ├── docs
@@ -1316,6 +1319,7 @@
 │   │   │   │   ├── hand_serial_link.cpython-312.pyc
 │   │   │   │   ├── __init__.cpython-312.pyc
 │   │   │   │   ├── joint_encoder_client.cpython-312.pyc
+│   │   │   │   ├── mock_hand_serial_link.cpython-312.pyc
 │   │   │   │   ├── motor_client.cpython-312.pyc
 │   │   │   │   ├── motor_factory.cpython-312.pyc
 │   │   │   │   ├── motor_resolution.cpython-312.pyc
@@ -1341,6 +1345,7 @@
 │   │   │   │   │   ├── framing.cpython-312.pyc
 │   │   │   │   │   ├── __init__.cpython-312.pyc
 │   │   │   │   │   ├── serial_discovery.cpython-312.pyc
+│   │   │   │   │   ├── tactile_mock.cpython-312.pyc
 │   │   │   │   │   ├── tactile_protocol.cpython-312.pyc
 │   │   │   │   │   ├── taxel_geometry.cpython-312.pyc
 │   │   │   │   │   └── types.cpython-312.pyc
@@ -2601,6 +2606,41 @@
 ├── README.md
 ├── requirements.txt
 ├── skill_shield
+│   ├── autonomo
+│   │   ├── autocalib.py
+│   │   ├── calibracion.py
+│   │   ├── camara.py
+│   │   ├── canal.py
+│   │   ├── choque_mano.py
+│   │   ├── estatico
+│   │   │   ├── index.html
+│   │   │   └── logo_idi.png
+│   │   ├── herramientas.py
+│   │   ├── __init__.py
+│   │   ├── mano.py
+│   │   ├── mapa.py
+│   │   ├── modo.py
+│   │   ├── pelotas.py
+│   │   ├── __pycache__
+│   │   │   ├── agarre.cpython-312.pyc
+│   │   │   ├── autocalib.cpython-312.pyc
+│   │   │   ├── calibracion.cpython-312.pyc
+│   │   │   ├── camara.cpython-312.pyc
+│   │   │   ├── canal.cpython-312.pyc
+│   │   │   ├── choque_mano.cpython-312.pyc
+│   │   │   ├── forma_mano.cpython-312.pyc
+│   │   │   ├── herramientas.cpython-312.pyc
+│   │   │   ├── __init__.cpython-312.pyc
+│   │   │   ├── mano.cpython-312.pyc
+│   │   │   ├── mapa.cpython-312.pyc
+│   │   │   ├── modo.cpython-312.pyc
+│   │   │   ├── pelotas.cpython-312.pyc
+│   │   │   ├── render_gemelo.cpython-312.pyc
+│   │   │   ├── tarea.cpython-312.pyc
+│   │   │   └── web.cpython-312.pyc
+│   │   ├── render_gemelo.py
+│   │   ├── tarea.py
+│   │   └── web.py
 │   ├── brazo
 │   │   ├── angulos_humano.py
 │   │   ├── base_brazo.py
@@ -2625,48 +2665,52 @@
 │   │   ├── __init__.py
 │   │   ├── __pycache__
 │   │   │   ├── __init__.cpython-312.pyc
-│   │   │   ├── __init__.cpython-313.pyc
-│   │   │   ├── suavizador.cpython-312.pyc
-│   │   │   └── suavizador.cpython-313.pyc
+│   │   │   └── suavizador.cpython-312.pyc
 │   │   └── suavizador.py
 │   ├── hardware
+│   │   ├── fr5_servo.py
 │   │   ├── __init__.py
 │   │   ├── __pycache__
+│   │   │   ├── fr5_servo.cpython-312.pyc
+│   │   │   ├── fr5_servo.cpython-313.pyc
 │   │   │   ├── __init__.cpython-312.pyc
+│   │   │   ├── __init__.cpython-313.pyc
 │   │   │   ├── sincronizacion.cpython-312.pyc
 │   │   │   └── tactil_real.cpython-312.pyc
 │   │   ├── sincronizacion.py
 │   │   └── tactil_real.py
 │   ├── ia
 │   │   ├── act.py
+│   │   ├── grabador.py
 │   │   ├── __init__.py
 │   │   └── __pycache__
 │   │       ├── act.cpython-312.pyc
+│   │       ├── grabador.cpython-312.pyc
 │   │       └── __init__.cpython-312.pyc
 │   ├── __init__.py
 │   ├── interfaz
+│   │   ├── fantasma.py
 │   │   ├── hud_logo.py
 │   │   ├── __init__.py
 │   │   ├── menu.py
 │   │   ├── perfil.py
-│   │   └── __pycache__
-│   │       ├── hud_logo.cpython-312.pyc
-│   │       ├── __init__.cpython-312.pyc
-│   │       ├── menu.cpython-312.pyc
-│   │       └── perfil.cpython-312.pyc
+│   │   ├── __pycache__
+│   │   │   ├── fantasma.cpython-312.pyc
+│   │   │   ├── hud_logo.cpython-312.pyc
+│   │   │   ├── __init__.cpython-312.pyc
+│   │   │   ├── menu.cpython-312.pyc
+│   │   │   ├── perfil.cpython-312.pyc
+│   │   │   └── sliders_brazo.cpython-312.pyc
+│   │   └── sliders_brazo.py
 │   ├── mano
 │   │   ├── biomecanica.py
 │   │   ├── __init__.py
 │   │   ├── manus_guante.py
 │   │   ├── __pycache__
 │   │   │   ├── biomecanica.cpython-312.pyc
-│   │   │   ├── biomecanica.cpython-313.pyc
 │   │   │   ├── __init__.cpython-312.pyc
-│   │   │   ├── __init__.cpython-313.pyc
 │   │   │   ├── manus_guante.cpython-312.pyc
-│   │   │   ├── manus_guante.cpython-313.pyc
-│   │   │   ├── retargeting.cpython-312.pyc
-│   │   │   └── retargeting.cpython-313.pyc
+│   │   │   └── retargeting.cpython-312.pyc
 │   │   └── retargeting.py
 │   ├── __pycache__
 │   │   ├── __init__.cpython-312.pyc
@@ -2688,18 +2732,36 @@
 │   │       ├── __init__.cpython-312.pyc
 │   │       └── objetos.cpython-312.pyc
 │   ├── teleop_fr5
+│   │   ├── autocalib.py
 │   │   ├── cinematica.py
+│   │   ├── diagnostico.py
 │   │   ├── fusion_muneca_codo.py
+│   │   ├── ik_diferencial.py
 │   │   ├── ik_teleop.py
 │   │   ├── __init__.py
+│   │   ├── obstaculos.py
+│   │   ├── pedal.py
 │   │   ├── __pycache__
+│   │   │   ├── autocalib.cpython-312.pyc
+│   │   │   ├── autocalib.cpython-313.pyc
 │   │   │   ├── cinematica.cpython-312.pyc
+│   │   │   ├── cinematica.cpython-313.pyc
+│   │   │   ├── diagnostico.cpython-313.pyc
 │   │   │   ├── fusion_muneca_codo.cpython-312.pyc
+│   │   │   ├── fusion_muneca_codo.cpython-313.pyc
+│   │   │   ├── ik_diferencial.cpython-312.pyc
+│   │   │   ├── ik_diferencial.cpython-313.pyc
 │   │   │   ├── ik_teleop.cpython-312.pyc
+│   │   │   ├── ik_teleop.cpython-313.pyc
 │   │   │   ├── __init__.cpython-312.pyc
+│   │   │   ├── __init__.cpython-313.pyc
+│   │   │   ├── obstaculos.cpython-312.pyc
+│   │   │   ├── pedal.cpython-312.pyc
+│   │   │   ├── pedal.cpython-313.pyc
 │   │   │   ├── retargeting.cpython-312.pyc
-│   │   │   ├── simulador.cpython-312.pyc
-│   │   │   └── teleop_brazo.cpython-312.pyc
+│   │   │   ├── retargeting.cpython-313.pyc
+│   │   │   ├── teleop_brazo.cpython-312.pyc
+│   │   │   └── teleop_brazo.cpython-313.pyc
 │   │   ├── retargeting.py
 │   │   ├── simulador.py
 │   │   └── teleop_brazo.py
@@ -2732,7 +2794,16 @@
 │   ├── preparando_taladro.py
 │   └── textures_detailed.zip
 ├── test_ia_mano.py
+├── tests_afinar.py
+├── tests_armado_fr5.py
+├── tests_calibracion_robot.py
+├── tests_fr5_servo.py
+├── tests_mano_gemelo.py
+├── tests_mapa_ruido.py
+├── tests_pelotas.py
+├── tests_tarea.py
 ├── tests_teleop_fr5.py
+├── tree
 └── tree.txt
 
-293 directories, 2443 files
+297 directories, 2510 files

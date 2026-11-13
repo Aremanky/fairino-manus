@@ -238,7 +238,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.tomlMANUS_Core_3.2.1_SDK_Linux/MANUS Core Dashboard (Linux build)/
 # Calibración cámara→robot (datos de cada robot; calib_posturas.json SÍ se versiona)
-calib_muestras.json*
 tablero_calib_robot.png
 
 # autocorrección de la calibración con el brazo (la genera el modo autónomo)
