@@ -1620,7 +1620,14 @@ CALIB_AUTO_POSTURAS   = 20                      # posturas de medida (además de
 # (alrededor del eje de la brida) gira su modelo en las comprobaciones de choque de la calibración.
 # Con la mano ya bien montada (como el gemelo), 0. Las posturas guardadas cuando la mano estaba al
 # revés se adaptan una vez con:  python calibrar_camara_robot.py --girar-posturas 180
-CALIB_MANO_GIRO_DEG = 0.0
+CALIB_MANO_GIRO_DEG = 90.0
+# (13-nov) Durante la calibración la OrcaHand se conecta con par y se queda RECTA (muñeca a 0 y dedos
+# estirados), para que el tablero pegado a ella no se mueva. Usa el puerto PUERTO_HARDWARE: cierra
+# antes el modo autónomo y la teleoperación. Postura: {índice de ctrl 0..16: rad}; None = la mano
+# abierta de la tarea (la misma que las comprobaciones de choque).
+CALIB_MANO_RECTA = True
+CALIB_MANO_POSTURA = None
+CALIB_MANO_ESPERA_S = 3.0
 CALIB_AUTO_RADIO_MANO = 0.13                    # m: la mano + el tablero (14x10 cm), para las colisiones
 # Cuánto puede alejarse cada joint (J1…J6) de la postura de inicio. Los tres de la muñeca (J4, J5,
 # J6) van contenidos (10-nov): son los que estrujan lo que sale de la mano y retuercen sus cables.

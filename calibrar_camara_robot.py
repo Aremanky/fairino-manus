@@ -409,6 +409,31 @@ class Robot:
 
 # ═════════════ sesión: ventana + cámara + robot ═════════════
 
+def abrir_mano_recta(fabrica=None, esperar_s=None):
+    """(12-nov) Sin par, la OrcaHand se queda floja y el tablero pegado a ella se mueve (y se ve de
+    lado). Con CALIB_MANO_RECTA, se conecta con par (como en la tarea), se pone recta (muñeca a 0 y
+    dedos estirados: CALIB_MANO_POSTURA, por defecto la mano abierta de la tarea, que es como la
+    tienen las comprobaciones de choque) y se queda así hasta el final de la calibración. Si no se
+    puede (otro programa usa el puerto, mano apagada…), se avisa y se sigue sin ella.
+    Devuelve la ManoActiva (o None)."""
+    if not getattr(cfg, "CALIB_MANO_RECTA", True):
+        return None
+    from skill_shield.autonomo.tarea import MANO_ABIERTA, ManoActiva
+    m = ManoActiva(getattr(cfg, "PUERTO_HARDWARE", "/dev/ttyUSB0"), fabrica=fabrica)
+    print("✋ Mano: conectando con par para dejarla recta (cierra antes el modo autónomo y la teleoperación)…")
+    if not m.conectar():
+        print(f"⚠️  Mano: {m.error}. Sigo SIN par: sujeta bien el tablero (no debe moverse respecto a la mano).")
+        return None
+    postura = {int(k): float(v) for k, v in (getattr(cfg, "CALIB_MANO_POSTURA", None) or MANO_ABIERTA).items()}
+    m.enviar(postura)
+    espera = float(getattr(cfg, "CALIB_MANO_ESPERA_S", 3.0) if esperar_s is None else esperar_s)
+    if espera > 0:
+        print(f"✋ Mano: poniéndose recta ({espera:.0f} s)…")
+        time.sleep(espera)
+    print("✋ Mano recta y con par mientras dure la calibración.")
+    return m
+
+
 class Sesion:
     def __init__(self, mover):
         from calibrar_extrinseca import crear_tablero, pose_tablero
@@ -428,6 +453,7 @@ class Sesion:
         self.ventana = "Calibracion camara-robot"
         cv2.namedWindow(self.ventana, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(self.ventana, int(self.info["ancho"] * 0.75), int(self.info["alto"] * 0.75))
+        self.mano_recta = abrir_mano_recta()             # (12-nov) la mano con par, recta, sujetando el tablero
 
     def _estado_inicial(self):
         """El estado que no es hardware (el mismo en la sesión real y en la simulada de las pruebas)."""
@@ -443,10 +469,13 @@ class Sesion:
         self.q = None
         self.T_ct, self.txt_tab = None, ""
         self.mensaje, self.t_mensaje = "", 0.0
+        self.mano_recta = None
 
     def cerrar(self):
         self.fr5.habilitar(False)
         cv2.destroyAllWindows()
+        if getattr(self, "mano_recta", None) is not None:
+            self.mano_recta.cerrar()                     # vuelve a su postura neutra y se suelta
         if self.pedal is not None:
             self.pedal.cerrar()
         self.fr5.parar()
@@ -596,12 +625,16 @@ class Sesion:
         objetivo: la postura en la que está (se sigue publicando para que la mantenga)."""
         fotos, q = [], None
         t0 = time.monotonic()
+        self.motivo_captura = ""
         while len(fotos) < FOTOS_POR_MUESTRA:
             _, nueva = self.vuelta(objetivo, hud=list(hud) + ["capturando..."])
             if not nueva:
                 continue
             if not self.listo:
                 if time.monotonic() - t0 > 3.0:
+                    # (12-nov) por qué: para saber qué arreglar (tablero, luz, robot que no se para…)
+                    self.motivo_captura = ("el robot no se queda quieto" if self.q is not None and
+                                           not self.robot.quieto else "tablero: " + (self.txt_tab or "no se ve"))
                     return None
                 continue
             fotos.append(self.T_ct)
@@ -711,7 +744,8 @@ class Sesion:
             if not p["capturar"]:
                 continue
             if m is None:
-                self.avisar(f"postura {k + 1}: no se ve bien el tablero → la salto")
+                self.avisar(f"postura {k + 1}: no se ve bien el tablero ({getattr(self, 'motivo_captura', '')}) "
+                            f"→ la salto")
                 continue
             muestras.append(m)
             if cada is not None:
@@ -785,7 +819,9 @@ def modo_auto(s=None):
         m0 = s.capturar(hud=["AUTO 1/3: explorando"])
         m1 = ([m0] if m0 else []) + s.recorrer(explorar, "AUTO 1/3: explorando")
         if len(m1) < 5:
-            sys.exit(f"✗ Solo {len(m1)} muestras al explorar: ¿se ve bien el tablero? Acércalo o ponlo más de frente.")
+            sys.exit(f"✗ Solo {len(m1)} muestras al explorar (último motivo: {getattr(s, 'motivo_captura', '') or '?'}): "
+                     "¿se ve bien el tablero? Acércalo o ponlo más de frente. Si dice «reproy … px», el tablero no "
+                     "está plano (cartón doblado, plástico encima que brilla).")
         Tb = [s.cadena.fk_marcos(np.array(m["q"]))[5] for m in m1]
         Tc = [np.array(m["T_cam_tablero"]) for m in m1]
         rev = C.revisar_exploracion(Tb, Tc, s.P, float(TABLERO["lado"]))

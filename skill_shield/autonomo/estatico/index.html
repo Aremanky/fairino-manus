@@ -11,6 +11,7 @@
   --fondo:#f2f4f8; --tarjeta:#ffffff; --texto:#14213d; --suave:#5b6b82; --borde:#dce3ec;
   --ok:#1e8a4a; --ok-fondo:#e3f4ea; --aviso:#b26b00; --aviso-fondo:#fff2dd; --mal:#c62828; --mal-fondo:#fde7e7;
   --radio:12px; --sombra:0 1px 2px rgba(0,33,72,.06),0 4px 16px rgba(0,33,72,.06);
+  --ancho:2400px; --margen:clamp(12px,2vw,32px); --hueco:clamp(12px,1.2vw,22px);
 }
 *{box-sizing:border-box}
 html,body{margin:0}
@@ -18,7 +19,7 @@ body{background:var(--fondo);color:var(--texto);font:15px/1.45 "Segoe UI",system
 button{font:inherit;cursor:pointer}
 /* ── cabecera ── */
 .cab{background:#fff;border-bottom:1px solid var(--borde)}
-.cab .dentro{display:flex;align-items:center;gap:18px;max-width:1440px;margin:0 auto;padding:12px 24px}
+.cab .dentro{display:flex;align-items:center;gap:18px;max-width:var(--ancho);margin:0 auto;padding:12px var(--margen)}
 .cab img{height:40px;width:auto;display:block}
 .cab .sep{width:1px;height:34px;background:var(--borde)}
 .cab .nombre{display:flex;flex-direction:column;line-height:1.2}
@@ -32,7 +33,7 @@ button{font:inherit;cursor:pointer}
 /* ── franja de estado ── */
 .franja{background:linear-gradient(90deg,var(--azul-osc),var(--azul));color:#fff;position:relative;overflow:hidden}
 .franja::after{content:"";position:absolute;right:-60px;top:-40px;width:340px;height:140px;background:var(--naranja);transform:rotate(-14deg);opacity:.9;clip-path:polygon(0 70%,100% 0,100% 18%,0 82%)}
-.franja .dentro{display:flex;flex-wrap:wrap;align-items:center;gap:10px;max-width:1440px;margin:0 auto;padding:12px 24px;position:relative;z-index:1}
+.franja .dentro{display:flex;flex-wrap:wrap;align-items:center;gap:10px;max-width:var(--ancho);margin:0 auto;padding:12px var(--margen);position:relative;z-index:1}
 .chip{display:inline-flex;align-items:center;gap:7px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.18);border-radius:999px;padding:5px 11px;font-size:12.5px;white-space:nowrap}
 .chip b{font-weight:600}
 .punto{width:9px;height:9px;border-radius:50%;background:#9fb0c6;flex:none}
@@ -41,8 +42,10 @@ button{font:inherit;cursor:pointer}
 .punto.mal{background:#ff5a5a;box-shadow:0 0 0 3px rgba(255,90,90,.22)}
 .paso{margin-left:auto;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;background:#fff;color:var(--azul);padding:6px 12px;border-radius:999px}
 /* ── rejilla ── */
-main{max-width:1440px;margin:0 auto;padding:20px 24px 8px;display:grid;grid-template-columns:minmax(0,1.75fr) minmax(320px,1fr);gap:20px;align-items:start}
-.col{display:flex;flex-direction:column;gap:20px;min-width:0}
+/* La página ocupa la pantalla (hasta --ancho): la columna de la izquierda (visión, mano, herramientas)
+   se lleva todo lo que sobra; la de la derecha (tarea, control, robot) crece con la pantalla, sin pasarse. */
+main{max-width:var(--ancho);margin:0 auto;padding:var(--hueco) var(--margen) 8px;display:grid;grid-template-columns:minmax(0,1fr) clamp(320px,30vw,580px);gap:var(--hueco);align-items:start}
+.col{display:flex;flex-direction:column;gap:var(--hueco);min-width:0}
 .tarjeta{background:var(--tarjeta);border:1px solid var(--borde);border-radius:var(--radio);box-shadow:var(--sombra);overflow:hidden}
 .tarjeta>header{display:flex;align-items:center;gap:10px;padding:12px 18px;border-bottom:1px solid var(--borde)}
 .tarjeta>header h2{margin:0;font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--azul)}
@@ -160,7 +163,7 @@ main{max-width:1440px;margin:0 auto;padding:20px 24px 8px;display:grid;grid-temp
 .yema span{font-size:11.5px;color:var(--suave)}
 .subt{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--suave);margin:0 0 4px}
 /* pie */
-footer{max-width:1440px;margin:0 auto;padding:12px 24px 28px;display:flex;flex-wrap:wrap;gap:8px 24px;justify-content:space-between;font-size:12.5px;color:var(--suave)}
+footer{max-width:var(--ancho);margin:0 auto;padding:12px var(--margen) 28px;display:flex;flex-wrap:wrap;gap:8px 24px;justify-content:space-between;font-size:12.5px;color:var(--suave)}
 footer b{color:var(--azul)}
 /* modales y avisos */
 .velo{position:fixed;inset:0;background:rgba(10,25,48,.55);display:none;align-items:center;justify-content:center;padding:16px;z-index:50}
@@ -179,8 +182,20 @@ footer b{color:var(--azul)}
 .tostada.ver{opacity:1;transform:translateX(-50%)}
 .desconexion{display:none;background:var(--mal);color:#fff;text-align:center;font-size:13.5px;padding:8px 16px}
 .desconexion.ver{display:block}
-@media (max-width:1000px){main{grid-template-columns:1fr;padding:16px}.paneles[data-modo=dos]{grid-template-columns:1fr}.col{display:contents}.o1{order:1}.o2{order:2}.o3{order:3}.o4{order:4}.o5{order:5}.mano-rejilla{grid-template-columns:1fr}.cab .dentro,.franja .dentro,footer{padding-left:16px;padding-right:16px}}
-@media (max-width:600px){.franja::after{display:none}.tarjeta>header{flex-wrap:wrap}.seg{margin-left:0}.vistas button{padding:5px 8px}.cab .sep,.cab .nombre span{display:none}.cab img{height:32px}.paso{margin-left:0}.btn-sesion .t{display:none}.juntas{grid-template-columns:repeat(2,1fr)}}
+/* pantallas grandes: letra y vídeo algo mayores */
+@media (min-width:1800px){body{font-size:16px}.tarjeta>header h2{font-size:14px}.pedal{height:200px}.yemas{height:180px}}
+/* portátil pequeño / tableta horizontal: la mano en una columna */
+@media (max-width:1280px){.mano-rejilla{grid-template-columns:1fr}}
+/* tableta / móvil: una sola columna, en este orden (el mismo que en el ordenador, columna a columna) */
+@media (max-width:1000px){main{grid-template-columns:minmax(0,1fr)}.col{display:contents}.o1{order:1}.o2{order:2}.o3{order:3}.o4{order:4}.o5{order:5}.o6{order:6}
+  .mano-rejilla{grid-template-columns:minmax(0,1fr) minmax(0,1.3fr)}.franja::after{width:220px;right:-80px}}
+@media (max-width:760px){.paneles[data-modo=dos]{grid-template-columns:1fr}.mano-rejilla{grid-template-columns:1fr}}
+@media (max-width:600px){body{font-size:14px}.franja::after{display:none}.tarjeta>header{flex-wrap:wrap;row-gap:8px;padding:10px 14px}.cuerpo{padding:14px}.seg{margin-left:0;order:3;width:100%;justify-content:space-between}.seg button{flex:1}
+  .vistas{left:8px;right:8px;bottom:8px}.vistas button{padding:5px 8px}.cab .sep,.cab .nombre span{display:none}.cab img{height:32px}.cab .nombre b{font-size:15px}
+  .chip{font-size:12px;white-space:normal}.paso{margin-left:0}.btn-sesion .t{display:none}.juntas{grid-template-columns:repeat(2,1fr)}
+  .pie-video{padding:10px 14px}.superponer{margin-left:0;width:100%}.superponer input[type=range]{flex:1}
+  .etq-marco i{display:none}.pedal{height:150px}.yemas{gap:6px}.fila{font-size:13.5px}}
+@media (max-width:400px){.tarea-botones{grid-template-columns:1fr}.herr{flex-wrap:wrap}.herr .btn-elegir{width:100%}.cab .nombre b{font-size:14px}}
 </style>
 </head>
 <body>
@@ -243,7 +258,7 @@ footer b{color:var(--azul)}
       </div>
     </section>
 
-        <section class="tarjeta o5">
+    <section class="tarjeta o2">
       <header><h2>OrcaHand</h2><span class="meta" id="manoMeta">—</span></header>
       <div class="cuerpo mano-rejilla">
         <div>
@@ -261,10 +276,8 @@ footer b{color:var(--azul)}
         </div>
       </div>
     </section>
-  </div>
 
-  <div class="col">
-    <section class="tarjeta o2">
+    <section class="tarjeta o3">
       <header><h2>Herramientas</h2><span class="meta" id="herrMeta"></span></header>
       <div class="cuerpo">
         <div class="herr-lista" id="herrLista"></div>
@@ -272,8 +285,10 @@ footer b{color:var(--azul)}
         <p class="herr-nota" id="herrNota"></p>
       </div>
     </section>
+  </div>
 
-    <section class="tarjeta o2">
+  <div class="col">
+    <section class="tarjeta o4">
       <header><h2>Tarea</h2><span class="meta" id="tareaMeta"></span></header>
       <div class="cuerpo">
         <div class="tarea-cab"><span id="tareaEtq" class="etq neutro">—</span><span class="meta" id="tareaPaso"></span></div>
@@ -289,7 +304,7 @@ footer b{color:var(--azul)}
       </div>
     </section>
 
-    <section class="tarjeta o3">
+    <section class="tarjeta o5">
       <header><h2>Control</h2><span class="meta" id="ctrlMeta"></span></header>
       <div class="cuerpo">
         <button class="pedal" id="pedal" type="button" aria-label="Pedal: mantener pulsado">
@@ -312,7 +327,7 @@ footer b{color:var(--azul)}
       </div>
     </section>
 
-    <section class="tarjeta o4">
+    <section class="tarjeta o6">
       <header><h2>Robot FR5</h2><span class="meta" id="fr5Meta"></span></header>
       <div class="cuerpo">
         <div class="fila"><span>Estado</span><span id="fr5Estado">—</span></div>

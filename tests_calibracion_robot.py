@@ -1008,6 +1008,7 @@ def test_la_sesion_real_ve_el_tablero_captura_y_lleva_el_robot(calib, cadena, re
     camara = CamaraSintetica(reloj, fr5, cadena, T_BRIDA_TABLERO_20)
     monkeypatch.setattr(crc, "arrancar_fr5", lambda mover: fr5)
     monkeypatch.setattr(crc, "crear_pedal", lambda: PedalSimulado(reloj))
+    monkeypatch.setattr(crc, "abrir_mano_recta", lambda: None)                         # sin mano física
     monkeypatch.setattr(crc, "abrir_camara", lambda: (camara, camara, dict(mxid="SINTETICA", K=K_CAM, dist=np.zeros(5),
                                                                            ancho=ANCHO, alto=ALTO)))
     for nombre in ("namedWindow", "resizeWindow", "imshow", "destroyAllWindows"):      # sin pantalla
@@ -1066,3 +1067,35 @@ def test_girar_posturas_deja_el_tablero_donde_estaba():
         a = cad.fk_marcos(np.array(p_ant["q"]))[5] @ T_bt
         b = cad.fk_marcos(np.array(p_nueva["q"]))[5] @ T_bt2
         assert np.allclose(a, b, atol=1e-6)
+
+
+def test_la_mano_se_pone_recta_con_par_y_se_suelta_al_cerrar():
+    """(13-nov) Con CALIB_MANO_RECTA la mano se conecta con par, recibe la postura recta y, al
+    cerrar, se desconecta; si no conecta, se sigue sin ella."""
+    import calibrar_camara_robot as CR
+    from skill_shield.autonomo.tarea import MANO_ABIERTA
+
+    class ManoFalsa:
+        JOINT_A_CTRL = {f"j{i}": i for i in range(17)}
+        _joints = [f"j{i}" for i in range(17)]
+
+        def __init__(self, ok=True):
+            self.ok, self.enviado, self.desconectada = ok, None, False
+
+        def conectar(self):
+            return self.ok
+
+        def enviar_posiciones(self, arr):
+            self.enviado = list(arr)
+            return True
+
+        def desconectar(self):
+            self.desconectada = True
+
+    falsa = ManoFalsa()
+    m = CR.abrir_mano_recta(fabrica=lambda: falsa, esperar_s=0)
+    assert m is not None and falsa.enviado is not None
+    assert all(abs(falsa.enviado[i] - MANO_ABIERTA.get(i, 0.0)) < 1e-9 for i in range(17))
+    m.cerrar()
+    assert falsa.desconectada
+    assert CR.abrir_mano_recta(fabrica=lambda: ManoFalsa(ok=False), esperar_s=0) is None
