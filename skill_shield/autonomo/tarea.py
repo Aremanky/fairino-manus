@@ -66,6 +66,14 @@ MANO_PELOTA_CERRADA = {0: 0.0, 1: -0.15, 2: 0.85, 3: 0.75, 4: -0.08, 5: 0.85, 6:
                        10: 0.10, 11: 0.85, 12: 0.75, 13: 0.25, 14: 0.9, 15: 0.55, 16: 0.65}
 MANO_PELOTA_APRETAR = {k: (v + 0.15 if k in (2, 3, 5, 6, 8, 9, 11, 12, 15, 16) else v)
                        for k, v in MANO_PELOTA_CERRADA.items()}
+# Pinza (13-nov): pulgar contra índice y medio; anular y meñique recogidos para que no estorben.
+# ABIERTA: yemas a ~13 cm. CERRADA: la yema del pulgar toca la del índice (buscado con el modelo de
+# la mano). Para una pelota se cierra hasta tocarla (interpolando entre las dos) y un poco más para
+# apretar (AUTONOMO_TAREA_PINZA_APRIETE).
+MANO_PINZA_ABIERTA = {0: 0.0, 2: 1.4, 3: 1.3, 5: 1.4, 6: 1.3, 7: 0.0, 8: 0.0, 9: 0.0, 10: 0.0, 11: 0.0, 12: 0.0,
+                      13: 0.094, 14: 0.282, 15: -0.25, 16: -0.20}
+MANO_PINZA_CERRADA = {0: 0.0, 2: 1.4, 3: 1.3, 5: 1.4, 6: 1.3, 7: 0.0, 8: 0.98, 9: 0.733, 10: 0.0, 11: 0.98, 12: 0.733,
+                      13: 0.094, 14: 0.282, 15: 0.393, 16: 0.323}
 # Destornillador virtual (marco de mano_mount): cogido como lo coge una persona, con el mango en
 # el puño y la varilla saliendo por el lado del índice (+Z), punta a 9 cm de la mano.
 PUNTA = (-0.03, 0.15, 0.14)
@@ -158,6 +166,7 @@ class Plan:
         self.fases = list(fases)
         self.nombre = nombre
         self.pelota = None                  # (pelotas) lo necesario para afinar la bajada al ejecutar
+        self.posturas = {}                  # posturas de la mano propias de este plan (la pinza)
 
     @property
     def q_final(self):
@@ -254,6 +263,12 @@ class Planificador:
         self.quitados_propios = 0
         self.afinar_s = float(_g(g, "AUTONOMO_TAREA_PELOTA_AFINAR_S", 2.0))   # 0 = sin parar a afinar
         self.pref_derecho = float(_g(g, "AUTONOMO_TAREA_PELOTA_PREFERIR_DERECHO", 0.3))  # coste por rad de inclinación
+        # formas de coger la pelota, en orden de preferencia (13-nov: primero en pinza)
+        self.pel_modos = tuple(_g(g, "AUTONOMO_TAREA_PELOTA_MODOS", ("pinza", "rodeándola", "con los dedos")))
+        self.pinza_ab = _postura_cfg(g, "AUTONOMO_TAREA_MANO_PINZA_ABIERTA", MANO_PINZA_ABIERTA)
+        self.pinza_ce = _postura_cfg(g, "AUTONOMO_TAREA_MANO_PINZA_CERRADA", MANO_PINZA_CERRADA)
+        ap = _g(g, "AUTONOMO_TAREA_PINZA_APRIETE", (0.15, 0.30))   # cuánto más se cierra tras tocarla (0..1)
+        self.pinza_apriete = (float(ap[0]), float(ap[1]))
         self.lejos_hombro = float(_g(g, "AUTONOMO_TAREA_LEJOS_HOMBRO", 1.0))
         self.alcance_palma = float(_g(g, "AUTONOMO_TAREA_ALCANCE_PALMA_M", 1.14))   # máx. hombro → centro de la palma
         self.lejos_camara = float(_g(g, "AUTONOMO_TAREA_LEJOS_CAMARA", 1.0))
@@ -580,15 +595,16 @@ class Planificador:
         return np.array(qs)
 
     # ── poses ──
-    def T_palma(self, T_m, ang, d, a=None):
+    def T_palma(self, T_m, ang, d, a=None, punto=None):
         """mano_mount con la palma a d del marcador en la dirección a (por defecto su normal),
-        mirándolo; dedos girados ang alrededor de a."""
+        mirándolo; dedos girados ang alrededor de a. Con 'punto' (en mano_mount), es ese punto
+        (p. ej. el de la pinza) el que queda a d del marcador, con la mano igual de orientada."""
         p_m = T_m[:3, 3]
         a = _unit(T_m[:3, 2] if a is None else a)
         u, w = _base_perp(a)
         f = math.cos(ang) * u + math.sin(ang) * w
         R = np.column_stack([a, f, np.cross(a, f)])      # +X de mano_mount = −normal de la palma
-        return T_de(R, p_m + a * d - R @ OFFSET_PALMA_ORCA)
+        return T_de(R, p_m + a * d - R @ (OFFSET_PALMA_ORCA if punto is None else np.asarray(punto, float)))
 
     def T_punta(self, T_m, ang, d, a=None):
         """mano_mount con la punta del destornillador a d del marcador en la dirección a,
@@ -921,12 +937,13 @@ class Planificador:
                 f"de unos {100 * max(alto, 0.0):.0f} cm de alto) no deja sitio a la mano abierta: "
                 f"separa la pelota de eso o quítalo")
 
-    def _pelota_en_mano(self, r, extra=0.0):
+    def _pelota_en_mano(self, r, extra=0.0, centro=None):
         """Puntos de la pelota cogida, en el marco de wrist3 (centro a r + holgura (+ extra, si se
-        coge con los dedos) delante de la palma)."""
+        coge con los dedos) delante de la palma; o en 'centro', en mano_mount: la pinza)."""
         m = self.c.fk_marcos(np.zeros(6))
         T_w_mm = np.linalg.inv(m[5]) @ m[6]                     # wrist3 → mano_mount (fijo)
-        c = OFFSET_PALMA_ORCA + np.array([-(r + self.pel_holgura + extra), 0.0, 0.0])   # la palma mira a −X
+        c = (OFFSET_PALMA_ORCA + np.array([-(r + self.pel_holgura + extra), 0.0, 0.0]) if centro is None
+             else np.asarray(centro, float))                     # la palma mira a −X
         k = np.arange(120) + 0.5                                # puntos repartidos por la esfera
         phi, th = np.arccos(1 - 2 * k / 120), math.pi * (1 + 5 ** 0.5) * k
         S = c + r * np.column_stack([np.cos(th) * np.sin(phi), np.sin(th) * np.sin(phi), np.cos(phi)])
@@ -943,14 +960,26 @@ class Planificador:
         Cada tramo se comprueba con la mano en la postura que tiene en ese momento (abierta al ir
         y acercarse; cerrada y con la pelota al retirarse, llevarla y dejarla), y alrededor de la
         pelota y del sitio de dejada la mesa se trata aparte (zonas_apoyo)."""
-        modos = [("rodeándola", 0.0)] + ([("con los dedos", self.pel_dedos)] if self.pel_dedos > 0 else [])
+        todos = {"pinza": ("en pinza", 0.0), "rodeándola": ("rodeándola", 0.0),
+                 "con los dedos": ("con los dedos", self.pel_dedos)}
+        modos = []
+        for m in self.pel_modos:
+            if m == "con los dedos" and self.pel_dedos <= 0:
+                continue
+            if m == "pinza" and self.pinza(diametro) is None:
+                continue                                  # no cabe entre los dedos
+            if m in todos:
+                modos.append((m,) + todos[m])
+        if not modos:
+            modos = [("rodeándola", "rodeándola", 0.0)]
         errores = []
         inc_antes = self.inc_max
         self.inc_max = self.pel_inc_max
         try:
-            for nombre, extra in modos:
+            for clave, nombre, extra in modos:
                 try:
-                    plan = self._plan_pelota(q0, T_pelota, diametro, T_dejada, extra)
+                    plan = self._plan_pelota(q0, T_pelota, diametro, T_dejada, extra,
+                                             pinza=self.pinza(diametro) if clave == "pinza" else None)
                     plan.nombre = f"coger ({nombre}), apretar y dejar la pelota"
                     self.modo_pelota = nombre
                     return plan
@@ -963,10 +992,63 @@ class Planificador:
         # el de la primera forma (la normal) y, resumido, que la otra tampoco
         raise ErrorPlan(errores[0][1] + " · tampoco " + " ni ".join(n for n, _ in errores[1:]))
 
-    def _plan_pelota(self, q0, T_pelota, diametro, T_dejada, extra=0.0):
+    def pinza(self, diametro):
+        """(13-nov) La pinza para una pelota de este diámetro, con el modelo de la mano: se cierra
+        de MANO_PINZA_ABIERTA a MANO_PINZA_CERRADA (s de 0 a 1) hasta que las yemas de pulgar e
+        índice quedan a 'diámetro'. Devuelve dict(s, punto (centro de la pelota en mano_mount,
+        entre las dos yemas), contacto/cerrada/apretar (posturas)) o None si no cabe."""
+        if self._ruta_xml is None:
+            return None
+        clave = round(float(diametro), 3)
+        cache = self.__dict__.setdefault("_pinzas", {})
+        if clave in cache:
+            return cache[clave]
+        from skill_shield.autonomo.choque_mano import yemas_mano
+        m = self.c.fk_marcos(np.zeros(6))
+        T_mm_w = np.linalg.inv(m[6]) @ m[5]                     # wrist3 → mano_mount
+
+        def postura(s_):
+            ks = set(self.pinza_ab) | set(self.pinza_ce)
+            return {k: self.pinza_ab.get(k, 0.0) + s_ * (self.pinza_ce.get(k, 0.0) - self.pinza_ab.get(k, 0.0))
+                    for k in ks}
+
+        ss = np.linspace(0.0, 1.0, 21)
+        gaps, mids = [], []
+        for s_ in ss:
+            y = yemas_mano(self._ruta_xml, tuple(sorted((k, round(v, 4)) for k, v in postura(s_).items())), 0.004)
+            if "pulgar" not in y or "indice" not in y:
+                cache[clave] = None
+                return None
+            t, i = (T_mm_w[:3, :3] @ y[d] + T_mm_w[:3, 3] for d in ("pulgar", "indice"))
+            gaps.append(float(np.linalg.norm(t - i)))
+            mids.append((t + i) / 2)
+        gaps = np.array(gaps)
+        objetivo = float(diametro)
+        if objetivo > gaps[0] - 0.015 or objetivo < 0.02:      # más de lo que abre (con holgura) o diminuta
+            cache[clave] = None
+            return None
+        k = int(np.nonzero(gaps <= objetivo)[0][0])              # primera s donde ya la toca
+        u = (gaps[k - 1] - objetivo) / max(gaps[k - 1] - gaps[k], 1e-9)
+        s_c = float(ss[k - 1] + u * (ss[k] - ss[k - 1]))
+        punto = mids[k - 1] + u * (mids[k] - mids[k - 1])
+        res = dict(s=s_c, punto=punto, contacto=postura(s_c),
+                   cerrada=postura(min(1.0, s_c + self.pinza_apriete[0])),
+                   apretar=postura(min(1.0, s_c + self.pinza_apriete[1])))
+        cache[clave] = res
+        return res
+
+    def _plan_pelota(self, q0, T_pelota, diametro, T_dejada, extra=0.0, pinza=None):
         q0 = self._empezar(q0)
         r = float(diametro) / 2.0
         d_palma = r + self.pel_holgura + extra         # centro de la pelota ↔ centro de la palma
+        punto = OFFSET_PALMA_ORCA                      # el punto de la mano que va a la pelota
+        if pinza is not None:                          # pinza: el centro entre las yemas, a la pelota
+            d_palma, punto = 0.0, np.asarray(pinza["punto"], float)
+            self._posturas["pinza_abierta"] = dict(self.pinza_ab)
+            self._posturas["pinza_contacto"] = dict(pinza["contacto"])
+            self._nubes = {k: v for k, v in self._nubes.items() if not str(k).startswith("pinza")}
+        k_ab, k_ce, k_ap = (("pinza_abierta", "pinza_cerrada", "pinza_apretar") if pinza is not None
+                            else ("pelota_abierta", "pelota_cerrada", "pelota_apretar"))
         c = np.asarray(T_pelota, float)[:3, 3]
         # dejar: si el marcador está tumbado, la pelota encima; si está de pie (en una hoja), se
         # suelta delante de él y cae. Siempre llegando desde arriba.
@@ -977,12 +1059,15 @@ class Planificador:
         T_p, T_d = self._marco_arriba(c), self._marco_arriba(c_d)
         # (la pelota se suelta 1 cm por encima del marcador de dejada: su «suelo» es el marcador)
         self.zonas_apoyo([(c, r + self.zona_apoyo, r), (c_d, r + self.zona_apoyo, r + 0.01)])
-        abierta, cerrada = ("pelota_abierta", None), ("pelota_cerrada", self._pelota_en_mano(r, extra))
+        if pinza is not None:
+            abierta, cerrada = ("pinza_abierta", None), ("pinza_contacto", self._pelota_en_mano(r, centro=punto))
+        else:
+            abierta, cerrada = ("pelota_abierta", None), ("pelota_cerrada", self._pelota_en_mano(r, extra))
 
         def coger(q_l, a):
             centro = c + _unit(a) * d_palma
             with self.con_mano(*abierta):
-                qs = self.recta(q_l, OFFSET_PALMA_ORCA, centro, "bajar a la pelota")
+                qs = self.recta(q_l, punto, centro, "bajar a la pelota")
             with self.con_mano(*cerrada):                # al subir ya la lleva
                 for q in qs[::-1]:
                     m = self.motivo(q)
@@ -993,7 +1078,7 @@ class Planificador:
         def dejar(q_l, a):
             centro = c_d + _unit(a) * d_palma
             with self.con_mano(*cerrada):
-                qs = self.recta(q_l, OFFSET_PALMA_ORCA, centro, "bajar a dejarla")
+                qs = self.recta(q_l, punto, centro, "bajar a dejarla")
             with self.con_mano(*abierta):                # ya la ha soltado
                 for q in qs[::-1]:
                     m = self.motivo(q)
@@ -1001,13 +1086,15 @@ class Planificador:
                         raise ErrorPlan(f"subir tras dejarla: {m}")
             return qs
         with self.con_mano(*abierta):
-            ops_p, info = self._opciones(T_p, q0, lambda a, ang: self.T_palma(T_p, ang, d_palma + self.pel_subida, a),
+            ops_p, info = self._opciones(T_p, q0, lambda a, ang: self.T_palma(T_p, ang, d_palma + self.pel_subida, a,
+                                                                          punto),
                                          coger, todas=True)
         if not ops_p:
             raise self._con_aviso(str(self._no_encuentro("llegar a la pelota (ni desde arriba ni de lado)", info))
                                   + self._que_estorba(c, r), c)
         with self.con_mano(*cerrada):
-            ops_d, info = self._opciones(T_d, q0, lambda a, ang: self.T_palma(T_d, ang, d_palma + self.pel_subida, a),
+            ops_d, info = self._opciones(T_d, q0, lambda a, ang: self.T_palma(T_d, ang, d_palma + self.pel_subida, a,
+                                                                          punto),
                                          dejar, todas=True)
         if not ops_d:
             raise self._con_aviso(self._no_encuentro("llevar la pelota al punto de dejada", info), c_d,
@@ -1031,23 +1118,26 @@ class Planificador:
         # mano al lado de la pelota, la cámara corrige la calibración con el brazo y vuelve a medir
         # la pelota; si se ha movido, se rehace la bajada (Tarea._afinar)
         afinar = [Fase("Afinar con la cámara", dur=self.afinar_s, comprobar="afinar")] if self.afinar_s > 0 else []
-        fases = ([Fase("Abrir la mano", mano="pelota_abierta"), f_ir] + afinar +
+        fases = ([Fase("Abrir la mano", mano=k_ab), f_ir] + afinar +
                  [f_bajar,
-                  Fase("Cerrar la mano", mano="pelota_cerrada"),
-                  Fase("Apretar un poco", mano="pelota_apretar"),
-                  Fase("Aflojar", mano="pelota_cerrada"),
+                  Fase("Cerrar la mano", mano=k_ce),
+                  Fase("Apretar un poco", mano=k_ap),
+                  Fase("Aflojar", mano=k_ce),
                   Fase("Comprobar que la tengo", dur=0.3, comprobar="agarre"),
                   f_subir, f_llevar, f_dejar,
-                  Fase("Abrir la mano (dejar)", mano="pelota_abierta"),
+                  Fase("Abrir la mano (dejar)", mano=k_ab),
                   f_alejar, f_volver,
                   Fase("Mano en reposo", mano="abierta")])
         for f, chk in ((f_ir, abierta), (f_bajar, abierta), (f_subir, cerrada), (f_llevar, cerrada),
                        (f_dejar, cerrada), (f_alejar, abierta), (f_volver, abierta)):
             f.mano_chk = chk
         plan = Plan(q0, fases, nombre="coger, apretar y dejar la pelota")
-        plan.pelota = dict(c=c.copy(), r=r, d_palma=d_palma, extra=extra,
+        plan.pelota = dict(c=c.copy(), r=r, d_palma=d_palma, extra=extra, punto=np.asarray(punto, float).copy(),
                            i_bajar=fases.index(f_bajar), i_subir=fases.index(f_subir),
-                           c_dejada=c_d.copy())
+                           c_dejada=c_d.copy(), pinza=pinza is not None)
+        if pinza is not None:                              # posturas que la Tarea manda a la mano
+            plan.posturas = dict(pinza_abierta=dict(self.pinza_ab), pinza_cerrada=dict(pinza["cerrada"]),
+                                 pinza_apretar=dict(pinza["apretar"]))
         return plan
 
     def rehacer_bajada(self, plan, c_nueva):
@@ -1057,14 +1147,14 @@ class Planificador:
         pz = plan.pelota
         fb, fs = plan.fases[pz["i_bajar"]], plan.fases[pz["i_subir"]]
         Tt = self.c.fk_marcos(fb.qs[-1])[6]
-        palma = Tt[:3, :3] @ OFFSET_PALMA_ORCA + Tt[:3, 3]
-        a = _unit(palma - pz["c"])                          # de la pelota hacia la palma
+        a = _unit(Tt[:3, 0])                                # dirección de llegada (+X de mano_mount)
+        punto = np.asarray(pz.get("punto", OFFSET_PALMA_ORCA), float)
         centro = np.asarray(c_nueva, float) + a * pz["d_palma"]
         r = pz["r"]                                        # la zona de agarre, donde está ahora la pelota
         self.zonas_apoyo([(np.asarray(c_nueva, float), r + self.zona_apoyo, r),
                           (pz["c_dejada"], r + self.zona_apoyo, r + 0.01)])
         with self.con_mano(*fb.mano_chk):
-            qs = self.recta(fb.qs[0], OFFSET_PALMA_ORCA, centro, "bajar a la pelota")
+            qs = self.recta(fb.qs[0], punto, centro, "bajar a la pelota")
         with self.con_mano(*fs.mano_chk):
             for q in qs[::-1]:
                 m = self.motivo(q)
@@ -1123,7 +1213,7 @@ class Ejecutor:
 
     def __init__(self, plan, posturas, vel_rad_s, acel_rad_s2, mano_ini=None, t_mano=(1.0, 1.5)):
         self.plan = plan
-        self.posturas = posturas
+        self.posturas = dict(posturas, **(getattr(plan, "posturas", None) or {}))
         self.v, self.a = float(vel_rad_s), float(acel_rad_s2)
         self.t_abrir, self.t_cerrar = t_mano
         self.i, self.t = 0, 0.0

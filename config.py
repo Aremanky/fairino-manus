@@ -1584,6 +1584,18 @@ AUTONOMO_TAREA_AFINAR_MIN_M = 0.005
 AUTONOMO_TAREA_AFINAR_MAX_M = 0.10
 AUTONOMO_TAREA_MARGEN_PROPIO = 0.05          # m: cubos pegados al robot al planificar = el propio robot
 AUTONOMO_TAREA_MARGEN_MAPA_MALLA = 0.02      # m entre las mallas del brazo y el mapa (el brazo va desplazado de sus cápsulas)
+# Formas de coger la pelota, en orden de preferencia (13-nov): "pinza" (pulgar contra índice y medio,
+# con anular y meñique recogidos, como la cogería una persona), "rodeándola" (con toda la mano),
+# "con los dedos" (toda la mano, la palma algo más lejos). Se usa la primera que salga.
+AUTONOMO_TAREA_PELOTA_MODOS = ("pinza", "rodeándola", "con los dedos")
+# Pinza: abierta (yemas a ~13 cm) y cerrada (yema del pulgar contra la del índice); para cada pelota se
+# calcula con el modelo de la mano hasta dónde cerrar para tocarla, y se cierra un poco más para
+# apretarla: (al cerrar, al «apretar un poco»), en fracción del recorrido abierta → cerrada.
+AUTONOMO_TAREA_MANO_PINZA_ABIERTA = {0: 0.0, 2: 1.4, 3: 1.3, 5: 1.4, 6: 1.3, 7: 0.0, 8: 0.0, 9: 0.0, 10: 0.0,
+                                     11: 0.0, 12: 0.0, 13: 0.094, 14: 0.282, 15: -0.25, 16: -0.20}
+AUTONOMO_TAREA_MANO_PINZA_CERRADA = {0: 0.0, 2: 1.4, 3: 1.3, 5: 1.4, 6: 1.3, 7: 0.0, 8: 0.98, 9: 0.733, 10: 0.0,
+                                     11: 0.98, 12: 0.733, 13: 0.094, 14: 0.282, 15: 0.393, 16: 0.323}
+AUTONOMO_TAREA_PINZA_APRIETE = (0.15, 0.30)
 AUTONOMO_TAREA_PELOTA_TACTIL_N = 0.3        # N para que un dedo cuente como «la noto»
 AUTONOMO_TAREA_PELOTA_TACTIL_DEDOS = 2      # dedos que la tienen que notar (si no, se para)
 # Posturas (ctrl 0..16: 0 muñeca · 1-3 meñique abd/mcp/pip · 4-6 anular · 7-9 corazón · 10-12 índice

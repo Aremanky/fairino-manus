@@ -335,6 +335,73 @@ def nube_mano(ruta_xml, postura=(), paso=0.006, semilla=0):
     return reducir(np.vstack(P), paso) if P else np.zeros((0, 3))
 
 
+# Las yemas de los dedos (13-nov, agarre en pinza): el último cuerpo de cada dedo.
+CUERPOS_YEMA = {"pulgar": "right_T-DP", "indice": "right_I-FingerTipAssembly",
+                "medio": "right_M-FingerTipAssembly_34afb748"}
+
+
+@functools.lru_cache(maxsize=64)
+def yemas_mano(ruta_xml, postura=(), paso=0.003):
+    """{dedo: punto (3,)} de la yema (la punta: los puntos de la malla del último cuerpo más alejados
+    de su articulación) de pulgar, índice y medio, en el marco de wrist3_Link y con los dedos en
+    la postura dada (como nube_mano)."""
+    angulos = {JOINTS_MANO[int(k)]: float(v) for k, v in postura}
+    base = os.path.dirname(os.path.abspath(ruta_xml))
+    root = ET.parse(ruta_xml).getroot()
+    _expandir_includes(root, base)
+    comp = root.find("compiler")
+    grados = comp is not None and comp.get("angle", "degree") == "degree"
+    meshdir = os.path.join(base, comp.get("meshdir", "")) if comp is not None else base
+    mallas = {}
+    for m in root.iter("mesh"):
+        if m.get("file"):
+            esc = np.array([float(v) for v in m.get("scale", "1 1 1").split()])
+            mallas[m.get("name") or os.path.splitext(os.path.basename(m.get("file")))[0]] = \
+                (os.path.join(meshdir, m.get("file")), esc)
+    cuerpos = {b.get("name"): b for b in root.iter("body")}
+    if CUERPO_MANO not in cuerpos:
+        return {}
+    rng = np.random.default_rng(0)
+    out = {}
+
+    def giro_joint(b):
+        T = np.eye(4)
+        for j in b.findall("joint"):
+            a = angulos.get(j.get("name"), 0.0)
+            if a == 0.0 or j.get("type", "hinge") != "hinge":
+                continue
+            p = np.array([float(v) for v in j.get("pos", "0 0 0").split()])
+            G = np.eye(4)
+            G[:3, :3] = _rot([float(v) for v in j.get("axis", "0 0 1").split()], a)
+            G[:3, 3] = p - G[:3, :3] @ p
+            T = T @ G
+        return T
+
+    def recorrer(b, T):
+        T = T @ giro_joint(b)
+        nombre = b.get("name") or ""
+        for dedo, pref in CUERPOS_YEMA.items():
+            if nombre.startswith(pref) and dedo not in out:
+                P = []
+                for g in b.findall("geom"):
+                    nm = g.get("mesh")
+                    if nm in mallas and os.path.exists(mallas[nm][0]):
+                        Tg = T @ _T_local(g, grados)
+                        P.append(muestrear(leer_stl(mallas[nm][0]) * mallas[nm][1], paso, rng) @ Tg[:3, :3].T
+                                 + Tg[:3, 3])
+                if P:
+                    P = np.vstack(P)
+                    j = b.find("joint")
+                    o = T[:3, :3] @ np.array([float(v) for v in (j.get("pos", "0 0 0") if j is not None
+                                                                else "0 0 0").split()]) + T[:3, 3]
+                    d = np.linalg.norm(P - o, axis=1)
+                    out[dedo] = P[d >= d.max() - 0.006].mean(axis=0)       # la punta (6 mm finales)
+        for h in b.findall("body"):
+            recorrer(h, T @ _T_local(h, grados))
+    recorrer(cuerpos[CUERPO_MANO], _T_local(cuerpos[CUERPO_MANO], grados))
+    return out
+
+
 # ── distancias de una nube de puntos a las formas del entorno ──
 def _dist_arbol(arbol, grueso, fino, T, cota):
     """Distancia mínima de los puntos 'fino' (llevados con T al marco del árbol) a la nube del

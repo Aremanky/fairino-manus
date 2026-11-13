@@ -391,7 +391,8 @@ def _plano(p):
 BOLA, DEJAR = (0.35, -0.45, -0.15), (0.15, -0.45, -0.15)
 
 
-def test_plan_pelota_desde_arriba(cadena, pl):
+def test_plan_pelota_desde_arriba(cadena, pl, monkeypatch):
+    monkeypatch.setattr(pl, "pel_modos", ("rodeándola", "con los dedos"))   # con toda la mano
     plan = pl.planificar_pelota(Q0, _plano(BOLA), 0.067, _plano(DEJAR))
     nombres = [f.nombre for f in plan.fases]
     for n in ("Bajar a la pelota", "Cerrar la mano", "Apretar un poco", "Comprobar que la tengo", "Bajar a dejarla"):
@@ -593,3 +594,32 @@ def test_avisa_si_la_pelota_esta_lejos(pl):
     lejos = np.array([0.0, -1.15, 0.0])
     assert "alcance" in pl._aviso_lejos(lejos).lower()
     assert pl._aviso_lejos(np.array([0.3, -0.45, -0.2])) == "" or "cámara" in pl._aviso_lejos(np.array([0.3, -0.45, -0.2]))
+
+
+# ── pinza (13-nov) ───────────────────────────────────────────────────────────────────────────
+def test_pinza_segun_el_tamano_de_la_pelota(pl):
+    """Cuanto más pequeña, más cierra; el punto de agarre queda delante de la palma, entre las
+    yemas; una pelota más grande que lo que abre la pinza no se intenta en pinza."""
+    p4, p7 = pl.pinza(0.04), pl.pinza(0.067)
+    assert p4 is not None and p7 is not None and p4["s"] > p7["s"] > 0.0
+    assert p7["punto"][0] < -0.03 and p7["punto"][1] > OFFSET_PALMA_ORCA[1]     # delante de la palma, hacia los dedos
+    assert pl.pinza(0.20) is None
+    for k in (8, 9, 11, 12, 15, 16):                                          # aprieta: cierra más que al tocarla
+        assert p7["apretar"][k] >= p7["cerrada"][k] >= p7["contacto"][k] - 1e-9
+
+
+def test_plan_pelota_en_pinza_la_coge_entre_las_yemas(cadena, pl):
+    from skill_shield.autonomo.choque_mano import yemas_mano
+    plan = pl.planificar_pelota(Q0, _plano(BOLA), 0.067, _plano(DEJAR))
+    assert pl.modo_pelota == "en pinza" and plan.pelota["pinza"]
+    assert {f.mano for f in plan.fases if f.mano} >= {"pinza_abierta", "pinza_cerrada", "pinza_apretar"}
+    fb = plan.fases[plan.pelota["i_bajar"]]
+    Tw = cadena.fk_marcos(fb.qs[-1])[5]
+    y = {k: Tw[:3, :3] @ v + Tw[:3, 3] for k, v in yemas_mano(
+        config.RUTA_XML, tuple(sorted((k, round(v, 4)) for k, v in pl._posturas["pinza_contacto"].items())), 0.004).items()}
+    r = 0.0335
+    for dedo in ("pulgar", "indice"):                                         # las dos yemas tocan la pelota
+        assert abs(np.linalg.norm(y[dedo] - np.array(BOLA)) - r) < 0.004
+    assert np.dot(y["pulgar"] - BOLA, y["indice"] - BOLA) < 0                 # por lados opuestos
+    ej = TA.Ejecutor(plan, {"abierta": {}}, 1.0, 2.0)                         # usa las posturas del plan
+    assert "pinza_cerrada" in ej.posturas

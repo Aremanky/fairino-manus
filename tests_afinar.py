@@ -187,8 +187,10 @@ def test_afinar_rehace_la_bajada_hacia_donde_esta(cadena):
     fb = t.plan.fases[i_b]
     pz = t.plan.pelota
     assert np.allclose(pz["c"], BOLA + mover)
-    d = np.linalg.norm(_palma(cadena, fb.qs[-1]) - (BOLA + mover))
-    assert abs(d - pz["d_palma"]) < 0.004                                   # la palma, donde está la pelota
+    T = cadena.fk_marcos(fb.qs[-1])[6]
+    agarre = T[:3, :3] @ pz["punto"] + T[:3, 3]                            # palma o centro de la pinza
+    d = np.linalg.norm(agarre - (BOLA + mover))
+    assert abs(d - pz["d_palma"]) < 0.004                                   # donde está la pelota
     assert t.afinado_cm == pytest.approx(np.linalg.norm(mover) * 100, abs=0.1)
     fs = t.plan.fases[pz["i_subir"]]
     assert np.allclose(fs.qs, fb.qs[::-1])
