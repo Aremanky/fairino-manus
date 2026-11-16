@@ -1,22 +1,25 @@
 """
-Grabación de episodios BRAZO + MANO desde la simulación (5-nov, formato 2).
+Grabación de episodios BRAZO + MANO (+ el mundo) desde la simulación.
 
-Antes ([G], formato 1): solo los 17 joints de la MANO simulada, y solo en los fotogramas en
-que MediaPipe veía tu mano (la grabación estaba dentro de ese `if`).
-
-Ahora: el hilo de la física (HiloFisica) llama a `muestrear()` antes de CADA mj_step y la
-grabadora guarda una fila cada 1/fps segundos de TIEMPO SIMULADO (30 Hz por defecto, como
+5-nov (formato 2): el hilo de la física (HiloFisica) llama a `muestrear()` antes de CADA mj_step
+y la grabadora guarda una fila cada 1/fps segundos de TIEMPO SIMULADO (30 Hz por defecto, como
 LeRobot/ACT). Así el ritmo es fijo aunque la cámara vaya a tirones, y lo que se guarda es
 exactamente lo que se le está mandando al robot en ese instante:
-  · q:<joint>  posición SIMULADA de cada joint (6 del brazo FR5 + 17 de la OrcaHand)
+  · q:<joint>  posición SIMULADA de cada joint (6 del brazo FR5 + 17 de la OrcaHand). Con el FR5
+               conectado, el brazo del simulador copia la postura REAL (gemelo).
   · a:<joint>  comando (ctrl) de ese joint: el del brazo ya suavizado por el generador
                (lo mismo que recibe fr5_servo) y el de la mano (guante MANUS / cámara)
 
+16-nov (formato 3): con `fuentes` (skill_shield/ia/fuentes.py) cada fila lleva además lo que hay
+en el mundo, con NaN si falta: br: (FR5 real), hr:/hc: (OrcaHand real y su corriente), tac: (las 5
+yemas) y obj: (pose del objeto objetivo en el mundo). Ver la cabecera de episodios.py.
+
 Archivos (uno por episodio, en episodios/<tarea>/):
-  episodio_0007.csv   cabecera + una fila por fotograma (t, t_reloj, q:..., a:...)
-  episodio_0007.json  metadatos: formato, fps, robot, columnas, recorte...
+  episodio_0007.csv   cabecera + una fila por fotograma
+  episodio_0007.json  metadatos: formato, fps, robot, columnas, recorte, exito, objeto, fuentes…
 Al guardar se recortan los ratos QUIETOS del principio y del final (dejando medio segundo):
 si no, la red aprende a "esperar" sin hacer nada.
+[M] (marcar_ultimo) marca el último episodio como FALLIDO: se guarda, pero no se entrena con él.
 """
 import csv
 import json
@@ -26,7 +29,8 @@ import time
 
 import numpy as np
 
-FORMATO = 2
+FORMATO = 2           # sin fuentes (como antes)
+FORMATO_MUNDO = 3     # con fuentes
 
 
 def nombres_y_indices(modelo, joints_brazo, offset_mano, n_mano):
@@ -81,24 +85,32 @@ def _siguiente_numero(carpeta):
 
 
 class GrabadorEpisodio:
-    def __init__(self, nombres, qadr, cidx, fps=30.0, robot="FR5", recortar=True):
+    def __init__(self, nombres, qadr, cidx, fps=30.0, robot="FR5", recortar=True, n_brazo=6, fuentes=None):
         self.nombres, self.qadr, self.cidx = list(nombres), list(qadr), list(cidx)
         self.fps, self.robot, self.recortar = float(fps), robot, recortar
+        self.n_brazo = int(n_brazo)
+        self.fuentes = fuentes                 # FuentesGrabacion o None (formato 2)
         self.activo = False
         self.tarea = None
+        self.ultimo = None                     # ruta del último episodio guardado ([M])
         self._filas = []
+        self._cols = None                      # columnas fijadas al iniciar el episodio
+        self._con_fuentes = False
         self._t_sig = 0.0
         self._t_ini = None
         self._hilos = []
+        self._aviso_fuentes = False
 
     @classmethod
     def desde_modelo(cls, modelo, joints_brazo, offset_mano, n_mano, **kw):
+        kw.setdefault("n_brazo", len(joints_brazo))
         return cls(*nombres_y_indices(modelo, joints_brazo, offset_mano, n_mano), **kw)
 
     @property
     def columnas(self):
-        return (["t", "t_reloj"] + [f"q:{n}" for n in self.nombres]
+        base = (["t", "t_reloj"] + [f"q:{n}" for n in self.nombres]
                 + [f"a:{n}" for n in self.nombres])
+        return base + (self.fuentes.columnas() if self.fuentes is not None else [])
 
     @property
     def n_filas(self):
@@ -112,9 +124,22 @@ class GrabadorEpisodio:
         """Llamar con el candado de la física (el bucle principal lo tiene casi siempre)."""
         self.tarea = tarea
         self._filas = []
+        self._cols = self.columnas
+        self._con_fuentes = self.fuentes is not None
+        if self._con_fuentes:
+            self.fuentes.iniciar_episodio()
         self._t_ini = float(datos.time)
         self._t_sig = float(datos.time)
         self.activo = True
+
+    def resumen_fuentes(self, datos=None):
+        """Qué del mundo se va a grabar (texto para la terminal)."""
+        if self.fuentes is None:
+            return "sin el mundo (formato 2: solo brazo y mano simulados)"
+        q = None
+        if datos is not None and self.n_brazo:
+            q = [float(datos.qpos[i]) for i in self.qadr[:self.n_brazo]]
+        return self.fuentes.resumen(q)
 
     def muestrear(self, datos):
         """Desde el hilo de la física, ANTES de cada mj_step (ctrl ya escrito por el
@@ -125,13 +150,24 @@ class GrabadorEpisodio:
         if t + 1e-9 < self._t_sig:
             return
         q, c = datos.qpos, datos.ctrl
-        self._filas.append([t - self._t_ini, time.time()]
-                           + [float(q[i]) for i in self.qadr] + [float(c[i]) for i in self.cidx])
+        fila = ([t - self._t_ini, time.time()]
+                + [float(q[i]) for i in self.qadr] + [float(c[i]) for i in self.cidx])
+        if self._con_fuentes:
+            n_extra = len(self._cols) - len(fila)
+            try:                                       # el mundo nunca debe parar la física
+                extra = self.fuentes.muestra([float(q[i]) for i in self.qadr[:self.n_brazo]])
+            except Exception as e:
+                extra = None
+                if not self._aviso_fuentes:
+                    self._aviso_fuentes = True
+                    print(f"⚠️  IA: fallo leyendo el mundo al grabar ({e}): esas columnas van vacías.")
+            fila += list(extra) if extra is not None and len(extra) == n_extra else [float("nan")] * n_extra
+        self._filas.append(fila)
         self._t_sig += 1.0 / self.fps
         if t - self._t_sig > 2.0 / self.fps:     # la física se atrasó: no recuperar de golpe
             self._t_sig = t + 1.0 / self.fps
 
-    def parar(self, carpeta, guardar=True):
+    def parar(self, carpeta, guardar=True, exito=True):
         """Termina el episodio y lo guarda en segundo plano. Devuelve (ruta, n_fotogramas) o
         (None, 0) si no había nada que guardar."""
         self.activo = False
@@ -140,32 +176,56 @@ class GrabadorEpisodio:
             return None, 0
         n = len(self.nombres)
         ini, fin = 0, len(filas)
-        if self.recortar:
-            ini, fin = recortar_quietos([f[2 + n:] for f in filas], self.fps)
+        if self.recortar:                              # solo los COMANDOS (a:) deciden el recorte
+            ini, fin = recortar_quietos([f[2 + n:2 + 2 * n] for f in filas], self.fps)
         filas_ok = filas[ini:fin]
         if len(filas_ok) < 2:
             print("⏹ Episodio sin movimiento: no se guarda.")
             return None, 0
         os.makedirs(carpeta, exist_ok=True)
         ruta = os.path.join(carpeta, f"episodio_{_siguiente_numero(carpeta):04d}.csv")
-        meta = dict(formato=FORMATO, fps=self.fps, robot=self.robot, tarea=self.tarea,
-                    fecha=time.strftime("%Y-%m-%d %H:%M:%S"), n_fotogramas=len(filas_ok),
-                    joints=self.nombres, columnas=self.columnas,
-                    recorte=dict(inicio=ini, fin=fin, total=len(filas)))
+        cols = self._cols or self.columnas
+        meta = dict(formato=FORMATO_MUNDO if self._con_fuentes else FORMATO, fps=self.fps, robot=self.robot,
+                    tarea=self.tarea, fecha=time.strftime("%Y-%m-%d %H:%M:%S"), n_fotogramas=len(filas_ok),
+                    joints=self.nombres, n_brazo=self.n_brazo, columnas=cols,
+                    recorte=dict(inicio=ini, fin=fin, total=len(filas)), exito=bool(exito))
+        if self._con_fuentes:
+            try:
+                meta.update(self.fuentes.meta())
+            except Exception:
+                pass
         # se reserva el nombre ya (otro [G] seguido no debe pisarlo) y se escribe aparte
         open(ruta, "w").close()
-        h = threading.Thread(target=self._escribir, args=(ruta, filas_ok, meta), daemon=False)
+        h = threading.Thread(target=self._escribir, args=(ruta, cols, filas_ok, meta), daemon=False)
         h.start()
         self._hilos.append(h)
+        self.ultimo = ruta
         return ruta, len(filas_ok)
 
-    def _escribir(self, ruta, filas, meta):
+    def _escribir(self, ruta, cols, filas, meta):
         with open(ruta, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(self.columnas)
+            w.writerow(cols)
             w.writerows(filas)
         with open(ruta[:-4] + ".json", "w") as f:
             json.dump(meta, f, indent=1, ensure_ascii=False)
+
+    def marcar_ultimo(self, exito=None):
+        """[M]: el último episodio guardado pasa a fallido (o vuelve a bueno si ya lo estaba; con
+        exito=True/False se fija). Devuelve (ruta, exito) o None si no hay ninguno."""
+        if not self.ultimo:
+            return None
+        self.esperar()                                 # que esté escrito
+        ruta_json = self.ultimo[:-4] + ".json"
+        try:
+            with open(ruta_json, encoding="utf-8") as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            meta = {}
+        meta["exito"] = (not bool(meta.get("exito", True))) if exito is None else bool(exito)
+        with open(ruta_json, "w") as f:
+            json.dump(meta, f, indent=1, ensure_ascii=False)
+        return self.ultimo, meta["exito"]
 
     def esperar(self):
         for h in self._hilos:

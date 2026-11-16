@@ -1,0 +1,43 @@
+<!--
+  DECORACIÓN CORPORATIVA ELECNOR — materiales y texturas
+  ======================================================
+  Se incluye UNA vez desde arctos_mjcf.xml (fuera de <worldbody>):
+      <include file="decoracion/deco_assets.xml"/>
+
+  Las rutas de los PNG son relativas a la carpeta de arctos_mjcf.xml (así resuelve
+  MuJoCo TODAS las rutas, también las de los ficheros incluidos).
+
+  Los logos (logo_elecnor_material y logo_departamento_material) ya están definidos
+  en arctos_mjcf.xml y se reutilizan aquí: no se cargan dos veces.
+
+  Solo hay materiales: nada de esto cambia la física.
+-->
+<mujoco model="decoracion_assets">
+  <asset>
+    <!-- Colores corporativos (los mismos valores que azul/naranja_personalizado) -->
+    <material name="deco_azul"     rgba="0.0 0.278 0.6 1"   specular="0.3" shininess="0.4"/>
+    <material name="deco_naranja"  rgba="1.0 0.498 0.0 1"   specular="0.3" shininess="0.4"/>
+    <material name="deco_blanco"   rgba="0.97 0.97 0.97 1"  specular="0.2"/>
+    <material name="deco_grafito"  rgba="0.20 0.22 0.25 1"  specular="0.6" shininess="0.6"/>
+    <material name="deco_metal"    rgba="0.72 0.74 0.78 1"  specular="0.9" shininess="0.8"/>
+    <material name="deco_amarillo" rgba="0.98 0.78 0.10 1"  specular="0.3"/>
+    <material name="deco_negro"    rgba="0.08 0.08 0.09 1"  specular="0.3"/>
+    <material name="deco_pantalla" rgba="0.55 0.68 0.62 1"  specular="0.8" shininess="0.8"/>
+
+    <!-- Rótulo de cabecera de las paredes: "SKILL SHIELD · Teleoperación robótica" (12:1) -->
+    <texture name="deco_tex_rotulo" type="2d" file="decoracion/texturas/rotulo_skill_shield.png"/>
+    <material name="deco_rotulo" texture="deco_tex_rotulo" texuniform="false" rgba="1 1 1 1"/>
+
+    <!-- Rótulo del panel de la mesa: "PUESTO DE MONTAJE ELÉCTRICO" (15:1) -->
+    <texture name="deco_tex_rotulo_taller" type="2d" file="decoracion/texturas/rotulo_taller.png"/>
+    <material name="deco_rotulo_taller" texture="deco_tex_rotulo_taller" texuniform="false" rgba="1 1 1 1"/>
+
+    <!-- Cinta de seguridad amarilla/negra (se repite 10 veces por metro) -->
+    <texture name="deco_tex_cinta" type="2d" file="decoracion/texturas/cinta_seguridad.png"/>
+    <material name="deco_cinta" texture="deco_tex_cinta" texuniform="true" texrepeat="10 10"/>
+
+    <!-- Panel perforado del puesto de trabajo (un agujero cada 2.5 cm) -->
+    <texture name="deco_tex_perforado" type="2d" file="decoracion/texturas/panel_perforado.png"/>
+    <material name="deco_perforado" texture="deco_tex_perforado" texuniform="true" texrepeat="40 40"/>
+  </asset>
+</mujoco>

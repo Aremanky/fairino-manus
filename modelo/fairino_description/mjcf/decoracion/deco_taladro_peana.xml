@@ -1,0 +1,57 @@
+<!--
+  DECORACIÓN CORPORATIVA ELECNOR — peana del taladro (teclas [4] y [5])
+  =====================================================================
+  Se incluye DENTRO del body "taladro_soporte" de escena_taladro.xml, después de su geom:
+      <include file="decoracion/deco_taladro_peana.xml"/>
+  así se mueve y se esconde con la peana sin tocar nada de Python.
+
+  Marco de la peana: la placa original (taladro_soporte_geom, 16 x 16 x 2 cm) va de
+  z = -0.01 a +0.01 y su cara de arriba es TALADRO_POS_SOPORTE (config.py). La placa,
+  el taladro y su posición NO se tocan: la demo [5] sigue igual.
+
+  Hasta ahora la placa flotaba en el aire a 0.95 m del suelo; aquí se le pone debajo
+  una columna corporativa (azul con franja naranja, logos verticales y base de
+  grafito en el suelo).
+
+  REGLAS: sin colisión (contype = conaffinity = 0), grupo 2, density="0", y ningún
+  nombre empieza por "taladro_" (EntornoTaladro busca sus geoms de choque por ese
+  prefijo).
+
+  [Z] La base de suelo está calculada para TALADRO_POS_SOPORTE z = 0.25 y suelo en
+      z = -0.975 (soporte de hombros, 27-oct; antes -0.70): suelo en coordenadas de la
+      peana = -0.975 - (0.25 - 0.01) = -1.215.
+      Si cambias esa altura, mueve la base (la columna ya es larga de sobra y se
+      mete bajo el suelo).
+-->
+<mujoco model="decoracion_taladro_peana">
+
+  <!-- Canto naranja de la placa (queda 6 mm por debajo de su cara de arriba:
+       el taladro sigue apoyando solo en la placa original) -->
+  <geom name="deco_peana_tal_canto" type="box" pos="0 0 -0.0025" size="0.0825 0.0825 0.0065"
+        material="deco_naranja" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- Cabezal de grafito bajo la placa -->
+  <geom name="deco_peana_tal_cabezal" type="box" pos="0 0 -0.02" size="0.07 0.07 0.01"
+        material="deco_grafito" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- Columna azul (de -0.03 hasta 1.26 m más abajo: llega al suelo y se mete debajo) -->
+  <geom name="deco_peana_tal_columna" type="box" pos="0 0 -0.66" size="0.06 0.06 0.63"
+        material="deco_azul" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- Franja naranja cerca de la parte de arriba -->
+  <geom name="deco_peana_tal_franja" type="box" pos="0 0 -0.07" size="0.0615 0.0615 0.012"
+        material="deco_naranja" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- Base de grafito apoyada en el suelo [Z] -->
+  <geom name="deco_peana_tal_base" type="box" pos="0 0 -1.205" size="0.11 0.11 0.01"
+        material="deco_grafito" group="2" contype="0" conaffinity="0" density="0"/>
+
+  <!-- Logos en VERTICAL (se leen de abajo arriba), sobre placas blancas -->
+  <!-- Cara -Y: logo Elecnor (la que ve la cámara de [4]) -->
+  <geom name="deco_peana_tal_placa_y" type="box" pos="0 -0.0605 -0.42" size="0.052 0.0005 0.16"
+        material="deco_blanco" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_peana_tal_logo_y" type="plane" pos="0 -0.0612 -0.42" xyaxes="0 0 1 -1 0 0" size="0.15 0.05 0.01"
+        material="logo_elecnor_material" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- Cara -X: logo I+D+i (la que ve la cámara de la demo [5]) -->
+  <geom name="deco_peana_tal_placa_x" type="box" pos="-0.0605 0 -0.42" size="0.0005 0.052 0.16"
+        material="deco_blanco" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_peana_tal_logo_x" type="plane" pos="-0.0612 0 -0.42" xyaxes="0 0 1 0 1 0" size="0.15 0.05 0.01"
+        material="logo_departamento_material" group="2" contype="0" conaffinity="0" density="0"/>
+
+</mujoco>

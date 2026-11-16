@@ -11,12 +11,15 @@ Controles de teclado:
   [A]  Activar control por cámara
   [S]  Standby (devuelve todos los actuadores a 0)
   [G]  Empezar / terminar un episodio (BRAZO + MANO a 30 Hz) en episodios/<tarea>/.
-       La 1ª vez pide el nombre de la TAREA; [Shift+G] cambia de tarea.
+       La 1ª vez pide el nombre de la TAREA; [Shift+G] cambia de tarea. Con IA_FUENTES_GRABACION
+       graba también el mundo: FR5 y OrcaHand reales, táctiles y el objeto más cercano a la palma.
+  [M]  El último episodio NO salió bien: se marca como fallido y no se entrena con él (otra vez
+       [M] lo desmarca)
   [E]  Entrenar la tarea actual (modelos/<tarea>.pth) en OTRO proceso: la app sigue
   [Shift+E]  Reentrenar TODAS las tareas grabadas (también en otro proceso)
   [P]  Pedal (tecla mantenida, TELEOP_FR5_PEDAL = "teclado"): arma el brazo mientras se pulsa
-  [I]  Modo IA — elige una TAREA y la reproduce (brazo + mano; con el FR5 conectado,
-       arranca y para con el PEDAL)
+  [I]  Modo IA — elige un MODELO (y su tarea, si sabe varias) y lo reproduce (brazo + mano;
+       con el FR5 conectado, arranca y para con el PEDAL; se para sola al terminar)
   [3]  Mostrar / ocultar el ENTORNO DE TRABAJO (mesa con alicates, destornillador,
        bombilla y fusible — definido en mesa_trabajo.xml)
   [F]  Modo FINO del brazo: el robot se mueve FINO_ESCALA veces lo que te mueves tú
@@ -45,7 +48,8 @@ Uso:
 #   │                 angulos_humano.py (Pose + estéreo → ángulos del brazo humano)
 #   ├── simulacion/   objetos.py · entorno_taller.py [3] · entorno_taladro.py [4]
 #   │                 demo_taladro.py [5] · hilo_fisica.py
-#   ├── ia/           act.py (modelo ACT, episodios, entrenamiento, carga)
+#   ├── ia/           act.py (modelo ACT, entrenamiento, carga) · episodios.py (qué ve y hace la red)
+#   │                 grabador.py · fuentes.py (el mundo al grabar) · politica.py ([I]) · evaluar.py
 #   ├── hardware/     sincronizacion.py (array de motores para la mano física)
 #   ├── interfaz/     hud_logo.py · menu.py · perfil.py
 #   └── comun/        suavizador.py
@@ -395,6 +399,30 @@ def main():
         modelo, ARM_JOINTS, OFFSET_MANO, N_ACT, fps=float(globals().get("IA_FPS", 30.0)),
         robot=str(globals().get("ROBOT_BRAZO", "?")),
         recortar=bool(globals().get("IA_RECORTAR_QUIETOS", True)))
+    # 16-nov: formato 3 — además, el mundo: FR5 y OrcaHand reales, táctiles y el objeto más cercano
+    # a la palma (cámara de cabeza si está libre, o la mesa del taller [3] en MuJoCo). Lo mismo
+    # alimenta al modo IA [I]. Si algo falta se graba vacío (NaN) y la red lo sabe.
+    fuentes_ia = None
+    if globals().get("IA_FUENTES_GRABACION", True):
+        try:
+            from skill_shield.ia.fuentes import FuenteObjetosSim, crear_fuentes_teleop
+            _obj_sim_ia = (FuenteObjetosSim(datos, {_n: _v[0] for _n, _v in taller.objetos.items()},
+                                            visible=lambda: taller.visible)
+                           if taller.disponible and taller.objetos else None)
+            fuentes_ia = crear_fuentes_teleop(
+                globals(), os.path.dirname(os.path.abspath(__file__)), list(ARM_JOINTS),
+                grabador.nombres[len(ARM_JOINTS):], fr5=fr5, mano_real=mano_real,
+                # (guante se crea más abajo: hasta entonces, sin táctiles)
+                tactil=lambda: (guante.tactil.fuerzas()
+                                if guante is not None and getattr(guante, "tactil", None) is not None else None),
+                # cámara de cabeza solo en la teleoperación con cámaras y si no la usa (cámara A
+                # sola); en el gemelo con sliders no se abre ninguna cámara (13-nov)
+                objetos_sim=_obj_sim_ia, camara_libre=not sin_camaras and not MULTICAMARA_ACTIVA,
+                hardware=mano_fisica and not modo_sliders)
+            grabador.fuentes = fuentes_ia
+        except Exception as _e_fu:
+            print(f"⚠️  IA: se grabará sin el mundo (formato 2): {_e_fu}")
+            fuentes_ia = None
 
     def _zenity(args):
         """Diálogo de zenity (texto devuelto) o None si no hay zenity / se cancela."""
@@ -446,10 +474,11 @@ def main():
         _ruta, _n = grabador.parar(os.path.join(EPISODIOS_DIR, tarea_actual or "tarea_1"))
         if _ruta:
             print(f"💾 Episodio guardado{(' (' + motivo + ')') if motivo else ''}: {_ruta} "
-                  f"({_n} fotogramas, {_n / grabador.fps:.1f} s)")
+                  f"({_n} fotogramas, {_n / grabador.fps:.1f} s). Si no salió bien: [M]")
     modo_ia_real  = False
     modo_demo_taladro = False   # [5] demo automática: coger taladro y agujerear el techo
     red_neuronal  = None
+    tarea_ia      = None        # 16-nov: tarea a reproducir de un modelo multitarea
 
     pipeline = None if sin_camaras else crear_pipeline_oak()
     salir    = False
@@ -466,7 +495,7 @@ def main():
                   if sin_camaras else "⚠️  [MANUS] Sigo con los dedos de la CÁMARA.")
             guante = None
 
-    print("\n  Controles: [A] Activar | [S] Standby | [G] Grabar | "
+    print("\n  Controles: [A] Activar | [S] Standby | [G] Grabar | [M] Último episodio fallido | "
           "[E] Entrenar tarea actual | [Shift+E] Entrenar todas | [P] Pedal | [I] Modo IA (red neuronal) | "
           "[3] Taller | [4] Taladro | [5] Demo taladro | [R] Diagnóstico T-pose (v2) | [X] Reset errores FR5 | [Q] Salir\n")
 
@@ -482,58 +511,68 @@ def main():
 
         # ══════════════════════════════════════════════════
         # ESTADO A2 — MODO IA REAL (Aprendizaje por demostración)
-        # Usa el modelo ACT entrenado con [E] a partir de tus episodios
-        # grabaciones [G]. En cada paso: mantiene un historial de los últimos
-        # fotogramas de postura (en vez de un reloj global), predice la acción
-        # (ctrl) y la aplica — así distingue "voy abriendo" de "voy cerrando"
-        # aunque la postura instantánea coincida.
+        # Reproduce un modelo entrenado con [E] a partir de las grabaciones [G]. 16-nov: la política
+        # (skill_shield/ia/politica.py) ve LO MISMO que al entrenar —la postura (real si la hay), los
+        # táctiles y el objeto, que se fija al arrancar— y cada acción pasa por el filtro de
+        # seguridad antes de mover nada. Los modelos antiguos (ciegos) se reproducen como antes.
         # ══════════════════════════════════════════════════
         if modo_ia_real:
-            # 5-nov: BRAZO + MANO (modelos de formato 2) o solo mano (formato 1, como antes).
-            #  · La física avanza a TIEMPO REAL (antes 4 mj_step = 8 ms por fotograma de ~33 ms:
-            #    la mano iba 4 veces más lenta que al grabar y la red veía posturas retrasadas).
-            #  · Los comandos se interpolan entre fotogramas paso a paso de la física.
+            #  · La física avanza a TIEMPO REAL y los comandos se interpolan entre fotogramas.
             #  · Con el FR5 conectado: empieza PARADO, con el simulador copiando la postura real;
             #    el PEDAL arranca (ServoJ desde la postura real) y para. Sin FR5: arranca solo y
             #    el pedal pausa.
-            from skill_shield.ia.act import PoliticaACT
+            #  · Se para sola cuando la red dice que ha terminado (IA_PROGRESO_FIN) o si el filtro
+            #    rechaza una acción (IK imposible, salto, mano lejos del objeto…).
+            from skill_shield.ia.politica import FiltroSeguridad, Politica
             from skill_shield.teleop_fr5.pedal import Pedal
             cv2.destroyAllWindows()
             cv2.namedWindow("Modo IA Real", cv2.WINDOW_AUTOSIZE)
 
-            dt_objetivo = float(red_neuronal["dt_objetivo"])
-            n_sub = max(1, int(round(dt_objetivo / float(modelo.opt.timestep))))
-            politica = PoliticaACT(red_neuronal, peso_exp=float(globals().get("IA_PESO_EXP", 0.15)))
-
-            # — qué joint del simulador es cada columna del modelo —
-            _por_nombre = {n: (qa, ci) for n, qa, ci in zip(grabador.nombres, grabador.qadr, grabador.cidx)}
-            if red_neuronal.get("formato", 1) == 2:
-                _nombres_ia = [c[2:] for c in red_neuronal["col_estado"]]       # "q:joint1" → "joint1"
-                _acc_ia = [c[2:] for c in red_neuronal["col_accion"]]
-                _faltan = [n for n in set(_nombres_ia + _acc_ia) if n not in _por_nombre]
-            else:                                                              # solo mano
-                _nombres_ia = _acc_ia = list(grabador.nombres[len(ARM_JOINTS):])
-                _faltan = []
-            if _faltan:
-                print(f"❌ Modo IA: el modelo usa articulaciones que este robot no tiene: {_faltan}")
+            try:
+                politica = Politica(red_neuronal, tarea=tarea_ia,
+                                    cadena=getattr(fuentes_ia, "cadena", None),
+                                    peso_exp=float(globals().get("IA_PESO_EXP", 0.15)))
+            except Exception as _e_pol:
+                print(f"❌ Modo IA: {_e_pol}")
                 modo_ia_real = False
                 cv2.destroyWindow("Modo IA Real")
                 continue
-            qadr_ia = [_por_nombre[n][0] for n in _nombres_ia]
-            cidx_ia = np.array([_por_nombre[n][1] for n in _acc_ia])
-            es_brazo = np.array([n in ARM_JOINTS for n in _acc_ia])
-            lim_ia = np.array([LIMITES_CTRL_BRAZO[ARM_JOINTS.index(n)] if n in ARM_JOINTS
-                               else LIMITES_CTRL[int(c) - OFFSET_MANO] for n, c in zip(_acc_ia, cidx_ia)],
-                              dtype=float)
-            paso_max_brazo = float(globals().get("IA_V_MAX_BRAZO", 1.0)) * dt_objetivo
+            dt_objetivo = politica.dt
+            n_sub = max(1, int(round(dt_objetivo / float(modelo.opt.timestep))))
+
+            # — qué joint del simulador es cada salida del modelo —
+            _por_nombre = {n: (qa, ci) for n, qa, ci in zip(grabador.nombres, grabador.qadr, grabador.cidx)}
+            _nombres_mano_ia = list(politica.nombres_mano or grabador.nombres[len(ARM_JOINTS):])
+            _faltan = [n for n in politica.nombres_brazo + _nombres_mano_ia if n not in _por_nombre]
+            if _faltan or (politica.nombres_brazo and politica.nombres_brazo != list(ARM_JOINTS)):
+                print(f"❌ Modo IA: el modelo usa articulaciones que este robot no tiene: "
+                      f"{_faltan or politica.nombres_brazo}")
+                modo_ia_real = False
+                cv2.destroyWindow("Modo IA Real")
+                continue
+            con_brazo = politica.mueve_brazo
+            qadr_mano_ia = [_por_nombre[n][0] for n in _nombres_mano_ia]
+            cidx_brazo_ia = np.array([_por_nombre[n][1] for n in ARM_JOINTS]) if con_brazo else np.zeros(0, int)
+            cidx_mano_ia = np.array([_por_nombre[n][1] for n in _nombres_mano_ia])
+            cidx_ia = np.concatenate([cidx_brazo_ia, cidx_mano_ia]).astype(int)
+            n_b_ia = len(cidx_brazo_ia)
             try:                                     # colisiones del brazo (las de la IK de teleop)
                 col_ia = teleop_v2.ik.col if teleop_v2 is not None else None
             except NameError:
                 col_ia = None
-            con_brazo = bool(es_brazo.any())
-            print(f"🧠 Modo IA (ACT) — {'BRAZO + MANO' if con_brazo else 'solo MANO'}: "
-                  f"{len(_acc_ia)} articulaciones, {1 / dt_objetivo:.0f} Hz, {n_sub} pasos de física "
-                  "por fotograma (tiempo real).")
+            filtro_ia = FiltroSeguridad(
+                lim_brazo=LIMITES_CTRL_BRAZO if con_brazo else None,
+                lim_mano=[LIMITES_CTRL[int(c) - OFFSET_MANO] for c in cidx_mano_ia],
+                v_max_brazo=float(globals().get("IA_V_MAX_BRAZO", 1.0)), dt=dt_objetivo,
+                salto_max=float(globals().get("IA_SALTO_MAX_RAD", 0.35)) if politica.usa_ik else None,
+                max_dist_objeto=float(globals().get("IA_MAX_DIST_OBJETO_M", 0.35)) if politica.usa_ik else None,
+                libre=col_ia.libre if col_ia is not None else None)
+            progreso_fin = float(globals().get("IA_PROGRESO_FIN", 0.97))
+            parar_al_terminar = bool(globals().get("IA_PARAR_AL_TERMINAR", True))
+            print(f"🧠 Modo IA (ACT) — {'BRAZO + MANO' if con_brazo else 'solo MANO'}"
+                  + (f" · tarea '{politica.tarea}'" if politica.tarea else "")
+                  + f": {1 / dt_objetivo:.0f} Hz, {n_sub} pasos de física por fotograma (tiempo real)."
+                  + (" Necesita ver el objeto al arrancar." if politica.necesita_objeto else ""))
 
             usar_hardware_real = (mano_fisica
                                   and mano_real and mano_real.conectado)
@@ -545,9 +584,31 @@ def main():
                 print("🦾 FR5 REAL conectado: la reproducción empieza PARADA. Pisa el PEDAL para "
                       "arrancar (el robot sale de su postura real) y otra vez para parar.")
             pedal_ia = Pedal.desde_config(globals())
-            en_marcha = fr5_ia is None                   # sin FR5 arranca solo
+            en_marcha = False
             fr5_ia_enviando = False
-            n_bloqueos = 0
+            aviso_ia, progreso_ia = "", None
+
+            def _obs_ia():
+                """Lo que ve la política ahora (el objeto se fija aparte, en _arrancar_ia)."""
+                _q_b = np.array([float(datos.qpos[a]) for a in qpos_idx_brazo])
+                _q_m = np.array([float(datos.qpos[a]) for a in qadr_mano_ia])
+                if fuentes_ia is not None:
+                    return fuentes_ia.observacion(_q_b, _q_m)
+                return dict(q_brazo=_q_b, q_mano=_q_m)
+
+            def _arrancar_ia():
+                """(Re)empieza: historial con la postura actual y, si la red lo usa, fija el objeto
+                que hay ahora junto a la palma. True si puede arrancar."""
+                _o = _obs_ia()
+                if politica.necesita_objeto:
+                    _q_ref = _o["q_brazo_real"] if _o.get("q_brazo_real") is not None else _o["q_brazo"]
+                    _o["objeto"] = fuentes_ia.objeto_cercano(_q_ref) if fuentes_ia is not None else None
+                if not politica.reiniciar(_o):
+                    return False
+                if politica.objeto is not None:
+                    print(f"🎯 Objeto fijado: {politica.objeto['nombre']} en ("
+                          + ", ".join(f"{_v:+.3f}" for _v in politica.objeto["T"][:3, 3]) + ") m")
+                return True
 
             def _salir_ia():
                 if fr5_ia is not None:
@@ -561,7 +622,11 @@ def main():
 
             if fr5_ia is not None:
                 _sincronizar_con_fr5("modo IA")
-            politica.reiniciar([float(datos.qpos[a]) for a in qadr_ia])
+            else:                                        # sin FR5 arranca solo
+                en_marcha = _arrancar_ia()
+                if not en_marcha:
+                    aviso_ia = politica.error or "no puede arrancar"
+                    print(f"⏸ Modo IA: {aviso_ia}. Pulsa el pedal para reintentar.")
 
             while modo_ia_real and not salir:
                 t_inicio_paso = time.perf_counter()
@@ -572,13 +637,16 @@ def main():
                 if _ev == "armar" and not en_marcha:
                     if fr5_ia is not None:
                         _sincronizar_con_fr5()           # parte EXACTAMENTE de la postura real
-                    politica.reiniciar([float(datos.qpos[a]) for a in qadr_ia])
-                    if fr5_ia is not None:
-                        fr5_ia.publicar(datos.ctrl[idx_ctrl_brazo])
-                        fr5_ia.habilitar(True)
-                        fr5_ia_enviando = True
-                    en_marcha = True
-                    print("▶ Modo IA: EN MARCHA")
+                    if _arrancar_ia():
+                        if fr5_ia is not None:
+                            fr5_ia.publicar(datos.ctrl[idx_ctrl_brazo])
+                            fr5_ia.habilitar(True)
+                            fr5_ia_enviando = True
+                        en_marcha, aviso_ia, progreso_ia = True, "", None
+                        print("▶ Modo IA: EN MARCHA")
+                    else:
+                        aviso_ia = politica.error or "no puede arrancar"
+                        print(f"⏸ Modo IA: no arranco — {aviso_ia}")
                 elif _ev == "desarmar" and en_marcha:
                     if fr5_ia is not None:
                         fr5_ia.habilitar(False)
@@ -599,51 +667,61 @@ def main():
                     break
 
                 if en_marcha:
-                    # — 1. Predecir + ensamblado temporal —
-                    estado_ia = [float(datos.qpos[a]) for a in qadr_ia]
-                    accion = np.clip(politica.paso(estado_ia), lim_ia[:, 0], lim_ia[:, 1])
+                    # — 1. Predecir (con ensamblado temporal) y filtro de seguridad —
+                    paso_ia = politica.paso(_obs_ia())
+                    progreso_ia = paso_ia.progreso
                     ctrl_ant = np.array([float(datos.ctrl[c]) for c in cidx_ia])
-                    # — 2. Seguridad del brazo: velocidad limitada y sin colisiones —
-                    if con_brazo:
-                        accion[es_brazo] = ctrl_ant[es_brazo] + np.clip(
-                            accion[es_brazo] - ctrl_ant[es_brazo], -paso_max_brazo, paso_max_brazo)
-                        if col_ia is not None:
-                            _q_brazo = np.array([float(datos.ctrl[i]) for i in idx_ctrl_brazo])
-                            for _n, _v in zip(np.array(_acc_ia)[es_brazo], accion[es_brazo]):
-                                _q_brazo[ARM_JOINTS.index(_n)] = _v
-                            if not col_ia.libre(_q_brazo):
-                                accion[es_brazo] = ctrl_ant[es_brazo]      # no se mueve
-                                n_bloqueos += 1
-                    # — 3. Física a tiempo real, con el comando interpolado —
-                    for _k in range(1, n_sub + 1):
-                        _c = ctrl_ant + (accion - ctrl_ant) * (_k / n_sub)
-                        for _j, _ci in enumerate(cidx_ia):
-                            datos.ctrl[int(_ci)] = float(_c[_j])
-                        mujoco.mj_step(modelo, datos)
-                        if fr5_ia_enviando:
-                            fr5_ia.publicar(datos.ctrl[idx_ctrl_brazo])
-                    if usar_hardware_real:
-                        objetivo_hw = limitar_salto_hardware(construir_hardware_target(datos),
-                                                             ultimo_hardware_target)
-                        mano_real.enviar_posiciones(objetivo_hw)
-                        ultimo_hardware_target = objetivo_hw
-                    # — red de seguridad: la simulación se ha desestabilizado —
-                    _q_chk = np.array([float(datos.qpos[a]) for a in qadr_ia])
-                    if not np.all(np.isfinite(_q_chk)) or np.max(np.abs(_q_chk)) > 10.0:
-                        print("⚠️  Modo IA: la simulación se ha desestabilizado → STANDBY.")
-                        modo_ia_real = False
-                        for _i, _v in enumerate(POSICION_STANDBY):
-                            ctrl_mano[_i] = float(_v)
-                        mujoco.mj_forward(modelo, datos)
-                        _salir_ia()
-                        break
+                    cmd_ia = filtro_ia.aplicar(paso_ia, ctrl_ant[:n_b_ia] if con_brazo else None, ctrl_ant[n_b_ia:])
+                    if cmd_ia.motivo:
+                        aviso_ia = cmd_ia.motivo
+                    terminado_ia = (parar_al_terminar and not cmd_ia.parar and progreso_ia is not None
+                                    and progreso_ia >= progreso_fin)
+                    if cmd_ia.parar or terminado_ia:
+                        if fr5_ia is not None:
+                            fr5_ia.habilitar(False)
+                            fr5_ia_enviando = False
+                        en_marcha = False
+                        if terminado_ia:
+                            aviso_ia = "terminado (pedal para repetir)"
+                            print("✅ Modo IA: la red dice que ha TERMINADO → PARADO.")
+                        else:
+                            print(f"🛑 Modo IA: PARADO — {cmd_ia.motivo}")
+                    else:
+                        accion = ctrl_ant.copy()
+                        if con_brazo and cmd_ia.brazo is not None:
+                            accion[:n_b_ia] = cmd_ia.brazo
+                        if cmd_ia.mano is not None:
+                            accion[n_b_ia:] = cmd_ia.mano
+                        # — 2. Física a tiempo real, con el comando interpolado —
+                        for _k in range(1, n_sub + 1):
+                            _c = ctrl_ant + (accion - ctrl_ant) * (_k / n_sub)
+                            for _j, _ci in enumerate(cidx_ia):
+                                datos.ctrl[int(_ci)] = float(_c[_j])
+                            mujoco.mj_step(modelo, datos)
+                            if fr5_ia_enviando:
+                                fr5_ia.publicar(datos.ctrl[idx_ctrl_brazo])
+                        if usar_hardware_real:
+                            objetivo_hw = limitar_salto_hardware(construir_hardware_target(datos),
+                                                                 ultimo_hardware_target)
+                            mano_real.enviar_posiciones(objetivo_hw)
+                            ultimo_hardware_target = objetivo_hw
+                        # — red de seguridad: la simulación se ha desestabilizado —
+                        _q_chk = np.array([float(datos.qpos[a]) for a in list(qpos_idx_brazo) + qadr_mano_ia])
+                        if not np.all(np.isfinite(_q_chk)) or np.max(np.abs(_q_chk)) > 10.0:
+                            print("⚠️  Modo IA: la simulación se ha desestabilizado → STANDBY.")
+                            modo_ia_real = False
+                            for _i, _v in enumerate(POSICION_STANDBY):
+                                ctrl_mano[_i] = float(_v)
+                            mujoco.mj_forward(modelo, datos)
+                            _salir_ia()
+                            break
                 elif fr5_ia is not None:
                     _sincronizar_con_fr5()                 # parado: el simulador = el robot real
                 visor.sync()
                 _dibujar_logo_mujoco(visor, _logo_mj_px, _logo_mj_w, _logo_mj_h)
 
                 # --- HUD ---
-                panel = np.zeros((175, 460, 3), dtype=np.uint8)
+                panel = np.zeros((215, 520, 3), dtype=np.uint8)
                 titulo_hud = f"MODO IA (ACT) - {'BRAZO + MANO' if con_brazo else 'MANO'}"
                 if fr5_ia is not None:
                     titulo_hud += "  [FR5 REAL]"
@@ -654,14 +732,28 @@ def main():
                 cv2.putText(panel, "EN MARCHA" if en_marcha else "PARADO - pisa el PEDAL", (10, 55),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                             (0, 255, 0) if en_marcha else (0, 165, 255), 2)
-                cv2.putText(panel, f"Ritmo {dt_objetivo * 1000:.0f} ms | bloque {red_neuronal['chunk']} | "
-                                    f"historial {red_neuronal['ventana']}", (10, 85),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
-                if n_bloqueos:
-                    cv2.putText(panel, f"Brazo frenado por colision: {n_bloqueos} veces", (10, 110),
+                cv2.putText(panel, f"Ritmo {dt_objetivo * 1000:.0f} ms | bloque {politica.C} | historial "
+                                    f"{politica.H} | {politica.receta['accion']}"
+                                    + (f" | tarea {politica.tarea}" if politica.tarea and len(red_neuronal['tareas']) > 1 else ""),
+                            (10, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
+                if progreso_ia is not None:
+                    cv2.rectangle(panel, (10, 92), (310, 104), (80, 80, 80), 1)
+                    cv2.rectangle(panel, (10, 92), (10 + int(300 * min(max(progreso_ia, 0.0), 1.0)), 104),
+                                  (0, 200, 0), -1)
+                    cv2.putText(panel, f"progreso {100 * progreso_ia:3.0f} %", (320, 103),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
+                if politica.necesita_objeto:
+                    _txt_obj = (f"Objeto: {politica.objeto['nombre']} (fijado al arrancar)"
+                                if politica.objeto is not None else "Objeto: ninguno junto a la palma")
+                    cv2.putText(panel, _txt_obj, (10, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                                (200, 200, 200) if politica.objeto is not None else (0, 165, 255), 1)
+                if aviso_ia:
+                    cv2.putText(panel, aviso_ia[:70], (10, 148), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 255), 1)
+                if filtro_ia.n_choques:
+                    cv2.putText(panel, f"Brazo frenado por colision: {filtro_ia.n_choques} veces", (10, 170),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 255), 1)
                 cv2.putText(panel, "[P/pedal] marcha/paro  |  [S] Salir al teleop  |  [Q] Cerrar app",
-                            (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                            (10, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
                 _superponer_logo(panel, _logo_bgr_sm, _logo_alpha_sm, margen=5, posicion="bottom-right")
                 cv2.imshow("Modo IA Real", panel)
 
@@ -2250,8 +2342,20 @@ def main():
                                     grabador.iniciar(tarea_actual, datos)
                                     print(f"🔴 GRABANDO brazo + mano a {grabador.fps:.0f} Hz "
                                           f"(tarea '{tarea_actual}'). [G] para terminar el episodio.")
+                                    print(f"   🌍 {grabador.resumen_fuentes(datos)}")
                         else:
                             _parar_grabacion()
+
+                    elif key in (ord("m"), ord("M")):
+                        # 16-nov: el último episodio NO salió bien → fallido (no se entrena con él)
+                        _parar_grabacion("antes de marcarlo")
+                        _marca = grabador.marcar_ultimo()
+                        if _marca is None:
+                            print("ℹ️  [M] Todavía no hay ningún episodio guardado en esta sesión.")
+                        else:
+                            print(f"🏷️  {os.path.basename(_marca[0])}: "
+                                  + ("BUENO (se entrenará con él)" if _marca[1] else
+                                     "FALLIDO (no se entrenará con él; [M] otra vez lo desmarca)"))
 
                     elif key == ord("G"):
                         # 5-nov: [Shift+G] cambiar de tarea (las siguientes [G] graban en la nueva)
@@ -2340,8 +2444,18 @@ def main():
                             if tarea_elegida:
                                 ruta_pesos = os.path.join(MODELOS_DIR, f"{tarea_elegida}.pth")
                                 red_neuronal = cargar_ia(ruta_pesos)
+                                tarea_ia = None
+                                if red_neuronal is not None and len(red_neuronal["tareas"]) > 1:
+                                    # 16-nov: modelo multitarea → cuál de sus tareas
+                                    with _soltar():
+                                        tarea_ia = _elegir(f"Tarea del modelo '{tarea_elegida}'",
+                                                           red_neuronal["tareas"])
+                                    if tarea_ia is None:
+                                        red_neuronal = None
+                                        print("   Cancelado.")
                                 if red_neuronal is not None:
-                                    print(f"🎯 Tarea seleccionada: '{tarea_elegida}'")
+                                    print(f"🎯 Modelo seleccionado: '{tarea_elegida}'"
+                                          + (f" · tarea '{tarea_ia}'" if tarea_ia else ""))
                                     _parar_grabacion("antes del modo IA")
                                     modo_ia_real = True
                                     estado["camara_activa"] = False
@@ -2449,6 +2563,8 @@ def main():
     if visor.is_running():
         visor.close()
 
+    if fuentes_ia is not None:             # 16-nov: hilo de la mano real y cámara de objetos
+        fuentes_ia.cerrar()
     if mano_real is not None:
         mano_real.desconectar()
     if guante is not None:

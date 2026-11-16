@@ -107,4 +107,33 @@ El robot solo se mueve con el pedal y a ≤ `CALIB_ROBOT_VEL_MAX_DEG_S` (10 °/s
 - Necesita Tkinter en el entorno: `sudo apt install python3.12-tk`.
 - Probar la ventana sola, sin robot: `python -m skill_shield.interfaz.sliders_brazo`
 
+---
+## IA: grabar, entrenar y reproducir (G / E / I)
+`skill_shield/ia/` — la red (ACT) aprende de demostraciones. Desde el 16-nov **ve el mundo**: el objeto visto desde la mano, los táctiles y la postura real de la mano y del brazo (antes era «ciega»: solo repetía el gesto).
+
+**Datos fuera del repo:** `~/skill_shield_datos/episodios/<tarea>/` y `~/skill_shield_datos/modelos/` (`IA_DATOS_DIR` o la variable `SKILL_SHIELD_DATOS` para cambiarlo). Mientras ahí no haya nada se siguen usando los `episodios/` del repo. Para moverlos: `mkdir -p ~/skill_shield_datos && mv episodios modelos ~/skill_shield_datos/ && git rm -r --cached episodios modelos`.
+
+### Grabar (`[G]`, `[M]`)
+- `[G]` empieza y termina un episodio (30 Hz). Al empezar dice qué del mundo se graba: `brazo real ✓ · mano real ✓ · táctiles ✓ · objeto ✓ (Pelota de tenis)`.
+- **Objeto:** el que se puede coger más cercano a la palma (a menos de `IA_OBJETO_RADIO_M`) la primera vez que se ve. En «Mano Física + Gemelo Digital» lo ve la **cámara de cabeza** (la del modo autónomo, calibrada con `calibrar_camara_robot.py`), que se lanza sola si la teleoperación no la usa: pon `MULTICAMARA_ACTIVA = False` (teleoperación solo con la cámara A + guante). En el gemelo con sliders no se abre ninguna cámara. En simulación, los objetos de la mesa del taller `[3]`.
+- **Cómo grabar un agarre:** empieza con la mano ya encima del objeto (unos 10–15 cm), con el objeto bien visible; acércate, cógelo y súbelo; termina con `[G]`. Variad la posición del objeto y la dirección de llegada (orientativo: ~50 demos por tarea). Alguna demo con un fallo **corregido** ayuda.
+- `[M]`: el último episodio no salió bien → se marca como **fallido** y no se entrena con él (otra vez `[M]` lo desmarca).
+
+### Entrenar (`[E]`, o en la terminal)
+```bash
+python -m skill_shield.ia.act coger_pelota                    # → modelos/coger_pelota.pth
+python -m skill_shield.ia.act coger_pelota coger_destornillador --modelo agarre   # multitarea
+python -m skill_shield.ia.act --todas                         # cada tarea, su modelo ([Shift+E])
+```
+- Decide solo qué usar según lo que haya en los episodios (lo imprime): con objeto, la acción es **«dónde poner la mano respecto al objeto»** (la IK analítica la pasa a joints), así el gesto se traslada si el objeto está en otro sitio. Sin objeto, joints como antes. Opciones: `--accion`, `--ventana`, `--pasos`, `--sin-tactil`, `--sin-objeto`, `--incluir-fallidos`, `--cpu`.
+- Separa episodios enteros para validación, guarda checkpoints en `modelos/<nombre>/` y elige el mejor con un **ensayo en lazo cerrado** (la red reproduce cada episodio de validación viendo sus propias posturas). Informe en `modelos/<nombre>/informe.json`.
+- Comparar después: `python -m skill_shield.ia.evaluar <modelo> --checkpoints`.
+- GPU: con la RTX 50xx hace falta torch con CUDA 12.8 (`pip install torch --index-url https://download.pytorch.org/whl/cu128`). En la CPU también entrena (más lento).
+
+### Reproducir (`[I]`)
+- Elige el modelo (y la tarea, si es multitarea). Con el FR5 conectado arranca y para con el **pedal**; al arrancar **fija el objeto** que hay junto a la palma (luego la mano lo tapa). Se para sola cuando la red dice que ha terminado (`IA_PROGRESO_FIN`).
+- Cada acción pasa por el **filtro de seguridad** (`politica.FiltroSeguridad`): límites, velocidad máxima (`IA_V_MAX_BRAZO`), choques, saltos de la IK (`IA_SALTO_MAX_RAD`) y la mano lejos del objeto (`IA_MAX_DIST_OBJETO_M`). Si algo no cuadra, para y lo dice en el panel.
+- Los modelos antiguos (ciegos) se siguen reproduciendo como antes.
+- Pruebas sin hardware: `python -m pytest tests/test_ia.py -q` (las del modelo necesitan torch).
+
 SDK de FAIRINO en `fairino/Robot.py`: versión V4.0.0 (SDK V2.2.8), la del controlador V4.0.0.x.

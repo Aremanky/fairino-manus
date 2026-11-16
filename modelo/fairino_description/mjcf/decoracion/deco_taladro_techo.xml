@@ -1,0 +1,79 @@
+<!--
+  DECORACIÓN CORPORATIVA ELECNOR — techo del taladro (teclas [4] y [5])
+  =====================================================================
+  Se incluye DENTRO del body "taladro_techo" de escena_taladro.xml, después de su geom:
+      <include file="decoracion/deco_taladro_techo.xml"/>
+  así sube/baja con el techo (la altura la calcula Python) y se esconde con él.
+
+  Marco del techo: losa original de 1.2 x 1.2 x 0.03 m centrada en el origen; su cara
+  de abajo (donde se taladra) está en z = -0.015. La losa no se toca.
+
+    · faldón perimetral azul con franja naranja y logos Elecnor / I+D+i en sus 4 caras
+    · marco de cinta de seguridad en la cara de abajo alrededor de la zona de
+      taladrado de la demo [5]
+
+  La zona de taladrado está centrada en (-0.15, -0.10) = TALADRO_DEMO_AGUJERO_XY menos
+  TALADRO_TECHO_XY (config.py). Los agujeros de la demo caen como mucho a 5.6 cm de
+  ese centro (rejilla 3x3 de TALADRO_DEMO_SEP_AGUJEROS = 5 cm + radio de la marca) y el
+  marco empieza a 8.5 cm: nunca tapa un agujero. Si cambias esos valores de config.py,
+  mueve aquí el centro del marco [A].
+
+  REGLAS: sin colisión (contype = conaffinity = 0), grupo 2, density="0", y ningún
+  nombre empieza por "taladro_".
+-->
+<mujoco model="decoracion_taladro_techo">
+
+  <!-- ── Faldón perimetral azul (z -0.06 … 0.05), por fuera de la losa ── -->
+  <geom name="deco_techo_faldon_xp" type="box" pos=" 0.608 0 -0.005" size="0.008 0.616 0.055"
+        material="deco_azul" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_techo_faldon_xn" type="box" pos="-0.608 0 -0.005" size="0.008 0.616 0.055"
+        material="deco_azul" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_techo_faldon_yp" type="box" pos="0  0.608 -0.005" size="0.6 0.008 0.055"
+        material="deco_azul" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_techo_faldon_yn" type="box" pos="0 -0.608 -0.005" size="0.6 0.008 0.055"
+        material="deco_azul" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- Franja naranja bajo el faldón (z -0.075 … -0.06) -->
+  <geom name="deco_techo_franja_xp" type="box" pos=" 0.608 0 -0.0675" size="0.008 0.616 0.0075"
+        material="deco_naranja" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_techo_franja_xn" type="box" pos="-0.608 0 -0.0675" size="0.008 0.616 0.0075"
+        material="deco_naranja" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_techo_franja_yp" type="box" pos="0  0.608 -0.0675" size="0.6 0.008 0.0075"
+        material="deco_naranja" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_techo_franja_yn" type="box" pos="0 -0.608 -0.0675" size="0.6 0.008 0.0075"
+        material="deco_naranja" group="2" contype="0" conaffinity="0" density="0"/>
+
+  <!-- ── Logos en las caras exteriores del faldón (sobre placa blanca) ── -->
+  <!-- -Y: Elecnor (vista de [4]) -->
+  <geom name="deco_techo_placa_yn" type="box" pos="0 -0.6165 -0.005" size="0.17 0.0005 0.048"
+        material="deco_blanco" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_techo_logo_yn" type="plane" pos="0 -0.6172 -0.005" xyaxes="1 0 0 0 0 1" size="0.135 0.045 0.01"
+        material="logo_elecnor_material" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- -X: I+D+i (vista de la demo [5]) -->
+  <geom name="deco_techo_placa_xn" type="box" pos="-0.6165 0 -0.005" size="0.0005 0.17 0.048"
+        material="deco_blanco" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_techo_logo_xn" type="plane" pos="-0.6172 0 -0.005" xyaxes="0 -1 0 0 0 1" size="0.135 0.045 0.01"
+        material="logo_departamento_material" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- +X: Elecnor -->
+  <geom name="deco_techo_placa_xp" type="box" pos="0.6165 0 -0.005" size="0.0005 0.17 0.048"
+        material="deco_blanco" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_techo_logo_xp" type="plane" pos="0.6172 0 -0.005" xyaxes="0 1 0 0 0 1" size="0.135 0.045 0.01"
+        material="logo_elecnor_material" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- +Y: I+D+i -->
+  <geom name="deco_techo_placa_yp" type="box" pos="0 0.6165 -0.005" size="0.17 0.0005 0.048"
+        material="deco_blanco" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_techo_logo_yp" type="plane" pos="0 0.6172 -0.005" xyaxes="-1 0 0 0 0 1" size="0.135 0.045 0.01"
+        material="logo_departamento_material" group="2" contype="0" conaffinity="0" density="0"/>
+
+  <!-- ── Marco de cinta de seguridad en la cara de abajo: zona de taladrado [A] ──
+       Centro (-0.15, -0.10); exterior ±0.105, interior ±0.085. Planos mirando hacia
+       abajo, 0.5 mm por debajo de la losa (las marcas de agujero sobresalen 2.7 mm). -->
+  <geom name="deco_techo_zona_n" type="plane" pos="-0.15 -0.005 -0.0155" xyaxes="1 0 0 0 -1 0" size="0.105 0.01 0.01"
+        material="deco_cinta" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_techo_zona_s" type="plane" pos="-0.15 -0.195 -0.0155" xyaxes="1 0 0 0 -1 0" size="0.105 0.01 0.01"
+        material="deco_cinta" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_techo_zona_e" type="plane" pos="-0.055 -0.10 -0.0155" xyaxes="1 0 0 0 -1 0" size="0.01 0.085 0.01"
+        material="deco_cinta" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_techo_zona_o" type="plane" pos="-0.245 -0.10 -0.0155" xyaxes="1 0 0 0 -1 0" size="0.01 0.085 0.01"
+        material="deco_cinta" group="2" contype="0" conaffinity="0" density="0"/>
+
+</mujoco>

@@ -1,0 +1,92 @@
+<!--
+  Soporte del FR5: columna con cabezal en T y dos hombros a 45°,
+  sobre bastidor con ruedas. El FR5 va en la placa del hombro DERECHO (-X).
+  GENERADO por decoracion/crear_soporte_hombros.py — para cambiar medidas o colores,
+  edita el script y vuelve a ejecutarlo (rehace también la base del brazo).
+  Solo visual: geoms estáticos sin colisión ni masa (como la peana de antes).
+  Suelo en z = -0.9749 · columna en x = 0.2601 · placa de arriba en z = 0.4251
+-->
+<mujoco>
+  <asset>
+    <material name="sop_columna" rgba="0.0 0.278 0.6 1" specular="0.5" shininess="0.6"/>
+    <material name="sop_chapa" rgba="0.20 0.22 0.25 1" specular="0.6" shininess="0.6"/>
+    <material name="sop_bastidor" rgba="0.20 0.22 0.25 1" specular="0.6" shininess="0.6"/>
+    <material name="sop_rueda" rgba="1.0 0.498 0.0 1" specular="0.3" shininess="0.4"/>
+    <material name="sop_acento" rgba="1.0 0.498 0.0 1" specular="0.4" shininess="0.5"/>
+    <material name="sop_herraje" rgba="0.62 0.63 0.66 1" specular="0.8" shininess="0.7"/>
+    <material name="sop_hueco" rgba="0.03 0.03 0.035 1" specular="0"/>
+    <mesh name="sop_ala_derecha_0" vertex="0.20011 -0.075 0.35511  0.20011 -0.069 0.35511  0.044548 -0.075 0.35511  0.044548 -0.069 0.35511  0.20011 -0.075 0.19955  0.20011 -0.069 0.19955"/>
+    <mesh name="sop_ala_derecha_1" vertex="0.20011 0.075 0.35511  0.20011 0.069 0.35511  0.044548 0.075 0.35511  0.044548 0.069 0.35511  0.20011 0.075 0.19955  0.20011 0.069 0.19955"/>
+    <mesh name="sop_ala_izquierda_0" vertex="0.32011 -0.075 0.35511  0.32011 -0.069 0.35511  0.47567 -0.075 0.35511  0.47567 -0.069 0.35511  0.32011 -0.075 0.19955  0.32011 -0.069 0.19955"/>
+    <mesh name="sop_ala_izquierda_1" vertex="0.32011 0.075 0.35511  0.32011 0.069 0.35511  0.47567 0.075 0.35511  0.47567 0.069 0.35511  0.32011 0.075 0.19955  0.32011 0.069 0.19955"/>
+  </asset>
+  <worldbody>
+    <!-- Ruedas giratorias bajo las esquinas del bastidor -->
+    <geom name="sop_rueda0" type="cylinder" fromto="0.71911 0.375 -0.92489 0.75111 0.375 -0.92489" size="0.05" material="sop_rueda" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda0_buje" type="cylinder" fromto="0.71411 0.375 -0.92489 0.75611 0.375 -0.92489" size="0.016" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda0_horquilla0" type="box" pos="0.71011 0.363 -0.89639" size="0.003 0.022 0.0385" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda0_horquilla1" type="box" pos="0.76011 0.363 -0.89639" size="0.003 0.022 0.0385" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda0_placa" type="box" pos="0.73511 0.375 -0.85389" size="0.04 0.04 0.004" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda1" type="cylinder" fromto="0.71911 -0.375 -0.92489 0.75111 -0.375 -0.92489" size="0.05" material="sop_rueda" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda1_buje" type="cylinder" fromto="0.71411 -0.375 -0.92489 0.75611 -0.375 -0.92489" size="0.016" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda1_horquilla0" type="box" pos="0.71011 -0.387 -0.89639" size="0.003 0.022 0.0385" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda1_horquilla1" type="box" pos="0.76011 -0.387 -0.89639" size="0.003 0.022 0.0385" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda1_placa" type="box" pos="0.73511 -0.375 -0.85389" size="0.04 0.04 0.004" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda2" type="cylinder" fromto="-0.23089 0.375 -0.92489 -0.19889 0.375 -0.92489" size="0.05" material="sop_rueda" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda2_buje" type="cylinder" fromto="-0.23589 0.375 -0.92489 -0.19389 0.375 -0.92489" size="0.016" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda2_horquilla0" type="box" pos="-0.23989 0.363 -0.89639" size="0.003 0.022 0.0385" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda2_horquilla1" type="box" pos="-0.18989 0.363 -0.89639" size="0.003 0.022 0.0385" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda2_placa" type="box" pos="-0.21489 0.375 -0.85389" size="0.04 0.04 0.004" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda3" type="cylinder" fromto="-0.23089 -0.375 -0.92489 -0.19889 -0.375 -0.92489" size="0.05" material="sop_rueda" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda3_buje" type="cylinder" fromto="-0.23589 -0.375 -0.92489 -0.19389 -0.375 -0.92489" size="0.016" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda3_horquilla0" type="box" pos="-0.23989 -0.387 -0.89639" size="0.003 0.022 0.0385" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda3_horquilla1" type="box" pos="-0.18989 -0.387 -0.89639" size="0.003 0.022 0.0385" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_rueda3_placa" type="box" pos="-0.21489 -0.375 -0.85389" size="0.04 0.04 0.004" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <!-- Bastidor de tubo cuadrado y pletina bajo la columna -->
+    <geom name="sop_bastidor_delante" type="box" pos="0.26011 -0.375 -0.82489" size="0.5 0.025 0.025" material="sop_bastidor" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_bastidor_detras" type="box" pos="0.26011 0.375 -0.82489" size="0.5 0.025 0.025" material="sop_bastidor" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_bastidor_derecha" type="box" pos="-0.21489 0 -0.82489" size="0.025 0.35 0.025" material="sop_bastidor" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_bastidor_izquierda" type="box" pos="0.73511 0 -0.82489" size="0.025 0.35 0.025" material="sop_bastidor" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_pletina" type="box" pos="0.26011 0 -0.79589" size="0.1 0.4 0.004" material="sop_bastidor" contype="0" conaffinity="0" group="2"/>
+    <!-- Columna -->
+    <geom name="sop_pie" type="box" pos="0.26011 0 -0.78439" size="0.12 0.11 0.0075" material="sop_chapa" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_pie_tornillo0" type="cylinder" fromto="0.35811 0.088 -0.77689 0.35811 0.088 -0.76789" size="0.01" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_pie_tornillo1" type="cylinder" fromto="0.35811 -0.088 -0.77689 0.35811 -0.088 -0.76789" size="0.01" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_pie_tornillo2" type="cylinder" fromto="0.16211 0.088 -0.77689 0.16211 0.088 -0.76789" size="0.01" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_pie_tornillo3" type="cylinder" fromto="0.16211 -0.088 -0.77689 0.16211 -0.088 -0.76789" size="0.01" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_columna" type="box" pos="0.26011 0 -0.18189" size="0.06 0.075 0.595" material="sop_columna" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_columna_franja" type="box" pos="0.26011 0 -0.74689" size="0.062 0.077 0.012" material="sop_acento" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_ventana0_derecha" type="box" pos="0.19931 0 -0.47489" size="0.001 0.0375 0.09" material="sop_hueco" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_ventana0_izquierda" type="box" pos="0.32091 0 -0.47489" size="0.001 0.0375 0.09" material="sop_hueco" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_ventana1_derecha" type="box" pos="0.19931 0 -0.19489" size="0.001 0.0375 0.06" material="sop_hueco" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_ventana1_izquierda" type="box" pos="0.32091 0 -0.19489" size="0.001 0.0375 0.06" material="sop_hueco" contype="0" conaffinity="0" group="2"/>
+    <!-- Cabezal: placa de arriba y dos alas con placas de montaje a 45 grados -->
+    <geom name="sop_placa_arriba" type="box" pos="0.26011 0 0.41911" size="0.11 0.11 0.006" material="sop_chapa" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_arriba_franja" type="box" pos="0.26011 0 0.40511" size="0.062 0.077 0.008" material="sop_acento" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_arriba_agujero" type="cylinder" fromto="0.26011 0 0.42461 0.26011 0 0.42571" size="0.045" material="sop_hueco" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_arriba_taladro0" type="cylinder" fromto="0.34811 0.088 0.42461 0.34811 0.088 0.42571" size="0.0045" material="sop_hueco" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_arriba_taladro1" type="cylinder" fromto="0.34811 -0.088 0.42461 0.34811 -0.088 0.42571" size="0.0045" material="sop_hueco" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_arriba_taladro2" type="cylinder" fromto="0.17211 0.088 0.42461 0.17211 0.088 0.42571" size="0.0045" material="sop_hueco" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_arriba_taladro3" type="cylinder" fromto="0.17211 -0.088 0.42461 0.17211 -0.088 0.42571" size="0.0045" material="sop_hueco" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_ala_derecha_0" type="mesh" mesh="sop_ala_derecha_0" material="sop_columna" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_ala_derecha_1" type="mesh" mesh="sop_ala_derecha_1" material="sop_columna" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_derecha" type="box" pos="0.11809 0 0.27309" size="0.11 0.11 0.006" quat="0.38268 0 -0.92388 0" material="sop_chapa" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_derecha_agujero" type="cylinder" fromto="0.1142 0 0.2692 0.11342 0 0.26842" size="0.045" material="sop_hueco" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_derecha_tornillo0" type="cylinder" fromto="0.17642 0.088 0.20697 0.16999 0.088 0.20054" size="0.009" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_derecha_tornillo1" type="cylinder" fromto="0.17642 -0.088 0.20697 0.16999 -0.088 0.20054" size="0.009" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_derecha_tornillo2" type="cylinder" fromto="0.051972 0.088 0.33142 0.045538 0.088 0.32499" size="0.009" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_derecha_tornillo3" type="cylinder" fromto="0.051972 -0.088 0.33142 0.045538 -0.088 0.32499" size="0.009" material="sop_herraje" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_derecha_disco" type="cylinder" fromto="0.11384 0 0.26884 0.1096 0 0.2646" size="0.085" material="sop_acento" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_ala_izquierda_0" type="mesh" mesh="sop_ala_izquierda_0" material="sop_columna" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_ala_izquierda_1" type="mesh" mesh="sop_ala_izquierda_1" material="sop_columna" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_izquierda" type="box" pos="0.40214 0 0.27309" size="0.11 0.11 0.006" quat="0.38268 0 0.92388 0" material="sop_chapa" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_izquierda_agujero" type="cylinder" fromto="0.40602 0 0.2692 0.4068 0 0.26842" size="0.045" material="sop_hueco" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_izquierda_taladro0" type="cylinder" fromto="0.46825 0.088 0.33142 0.46903 0.088 0.33065" size="0.0045" material="sop_hueco" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_izquierda_taladro1" type="cylinder" fromto="0.46825 -0.088 0.33142 0.46903 -0.088 0.33065" size="0.0045" material="sop_hueco" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_izquierda_taladro2" type="cylinder" fromto="0.3438 0.088 0.20697 0.34458 0.088 0.20619" size="0.0045" material="sop_hueco" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_placa_izquierda_taladro3" type="cylinder" fromto="0.3438 -0.088 0.20697 0.34458 -0.088 0.20619" size="0.0045" material="sop_hueco" contype="0" conaffinity="0" group="2"/>
+    <!-- Logos verticales: Elecnor en la cara delantera (-Y), I+D+i en la trasera (+Y) -->
+    <geom name="sop_logo_elecnor" type="plane" pos="0.26011 -0.0765 -0.21089" xyaxes="0 0 1 -1 0 0" size="0.144 0.048 0.01" material="logo_elecnor_material" contype="0" conaffinity="0" group="2"/>
+    <geom name="sop_logo_idi" type="plane" pos="0.26011 0.0765 -0.21089" xyaxes="0 0 1 1 0 0" size="0.144 0.048 0.01" material="logo_departamento_material" contype="0" conaffinity="0" group="2"/>
+  </worldbody>
+</mujoco>

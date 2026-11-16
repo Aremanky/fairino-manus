@@ -1,0 +1,89 @@
+<!--
+  DECORACIÓN CORPORATIVA ELECNOR — escenario base (siempre visible)
+  =================================================================
+  Se incluye UNA vez desde arctos_mjcf.xml (fuera de <worldbody>):
+      <include file="decoracion/deco_escena_base.xml"/>
+
+  Completa lo que ya había en arctos_mjcf.xml (suelo azul, pared blanca, logos y
+  peana del brazo) para que el escenario parezca un stand / célula de pruebas:
+    · cabecera azul con rótulo y doble cenefa azul-naranja en la pared del fondo
+    · pared lateral derecha (x = +1.8) con logo Elecnor, cabecera y zócalo
+    · cinta de seguridad amarilla/negra en el suelo delimitando la célula del robot
+    · placa con el logo Elecnor en el suelo, delante del soporte del brazo
+    · (el logo I+D+i de la antigua peana va ahora en el soporte: soporte_hombros.xml)
+    · una luz de relleno suave (sin sombras, no carga la GPU)
+
+  REGLAS (para no tocar la funcionalidad):
+    · Todo son geoms SIN colisión (contype = conaffinity = 0) y en el grupo 2.
+    · No hay ningún <body> nuevo: no cambian qpos, mocap, ids de cuerpos ni masas.
+    · Nada se pone en -X ni en -Y del robot más allá de la cinta del suelo: por ahí
+      están las cámaras del visor de [4] y de la demo [5] (TALADRO_DEMO_CAMARA).
+    · El suelo está en z = -0.975 (soporte de hombros, 27-oct; antes -0.70 con la
+      peana). Si cambias esa altura, cambia también las z marcadas con [H].
+-->
+<mujoco model="decoracion_escena_base">
+  <worldbody>
+
+    <!-- Luz de relleno: ilumina paredes y logos sin sombras -->
+    <light name="deco_luz_relleno" directional="true" pos="-1.0 -1.6 2.4" dir="0.45 0.55 -0.70"
+           diffuse="0.25 0.25 0.25" specular="0.05 0.05 0.05" castshadow="false"/>
+
+    <!-- ══ PARED DEL FONDO (y = 1.8, cara delantera en y = 1.79) ══ -->
+    <!-- Cabecera azul con el rótulo (arriba del todo: z 1.09 … 1.35) -->
+    <geom name="deco_fondo_cabecera" type="box" pos="0 1.778 1.22" size="1.8 0.012 0.13"
+          material="deco_azul" group="2" contype="0" conaffinity="0"/>
+    <geom name="deco_fondo_rotulo" type="plane" pos="0 1.7655 1.22" xyaxes="1 0 0 0 0 1" size="1.2 0.1 0.01"
+          material="deco_rotulo" group="2" contype="0" conaffinity="0"/>
+    <geom name="deco_fondo_cabecera_linea" type="box" pos="0 1.776 1.082" size="1.8 0.014 0.008"
+          material="deco_naranja" group="2" contype="0" conaffinity="0"/>
+    <!-- Cenefa azul + naranja por debajo de los logos -->
+    <geom name="deco_fondo_cenefa_azul" type="box" pos="0 1.784 0.40" size="1.8 0.006 0.02"
+          material="deco_azul" group="2" contype="0" conaffinity="0"/>
+    <geom name="deco_fondo_cenefa_naranja" type="box" pos="0 1.784 0.355" size="1.8 0.006 0.008"
+          material="deco_naranja" group="2" contype="0" conaffinity="0"/>
+
+    <!-- ══ PARED LATERAL DERECHA (x = 1.8, cara interior en x = 1.79) ══
+         Va de y = -0.59 hasta la pared del fondo: forma la esquina del stand.
+         No se pone pared en -X ni en -Y (taparía las cámaras de [4] y [5]). -->
+    <geom name="deco_lateral_pared" type="box" pos="1.8 0.6 0.1875" size="0.01 1.19 1.1625"
+          material="deco_blanco" group="2" contype="0" conaffinity="0"/>                     <!-- [H] -->
+    <geom name="deco_lateral_zocalo" type="box" pos="1.785 0.6 -0.915" size="0.008 1.19 0.06"
+          material="deco_naranja" group="2" contype="0" conaffinity="0"/>                    <!-- [H] -->
+    <geom name="deco_lateral_cabecera" type="box" pos="1.778 0.6 1.22" size="0.012 1.19 0.13"
+          material="deco_azul" group="2" contype="0" conaffinity="0"/>
+    <geom name="deco_lateral_rotulo" type="plane" pos="1.7655 0.6 1.22" xyaxes="0 -1 0 0 0 1" size="1.08 0.09 0.01"
+          material="deco_rotulo" group="2" contype="0" conaffinity="0"/>
+    <geom name="deco_lateral_cabecera_linea" type="box" pos="1.776 0.6 1.082" size="0.014 1.19 0.008"
+          material="deco_naranja" group="2" contype="0" conaffinity="0"/>
+    <geom name="deco_lateral_cenefa_azul" type="box" pos="1.784 0.6 0.40" size="0.006 1.19 0.02"
+          material="deco_azul" group="2" contype="0" conaffinity="0"/>
+    <geom name="deco_lateral_cenefa_naranja" type="box" pos="1.784 0.6 0.355" size="0.006 1.19 0.008"
+          material="deco_naranja" group="2" contype="0" conaffinity="0"/>
+    <!-- Logo Elecnor grande, mirando hacia -X (hacia el robot) -->
+    <geom name="deco_lateral_logo" type="plane" pos="1.785 0.6 0.75" xyaxes="0 -1 0 0 0 1" size="0.6 0.2 0.01"
+          material="logo_elecnor_material" group="2" contype="0" conaffinity="0"/>
+
+    <!-- ══ SUELO (z = -0.975) ══ -->
+    <!-- Cinta de seguridad: cuadrado de 2.2 m alrededor del robot (incluye mesa y peana
+         del taladro). 2 mm por encima del suelo para que no parpadee con él. -->
+    <geom name="deco_cinta_n" type="box" pos="0  1.075 -0.9742" size="1.10 0.025 0.0008"
+          material="deco_cinta" group="2" contype="0" conaffinity="0"/>                      <!-- [H] -->
+    <geom name="deco_cinta_s" type="box" pos="0 -1.075 -0.9742" size="1.10 0.025 0.0008"
+          material="deco_cinta" group="2" contype="0" conaffinity="0"/>                      <!-- [H] -->
+    <geom name="deco_cinta_e" type="box" pos=" 1.075 0 -0.9742" size="0.025 1.05 0.0008"
+          material="deco_cinta" group="2" contype="0" conaffinity="0"/>                      <!-- [H] -->
+    <geom name="deco_cinta_o" type="box" pos="-1.075 0 -0.9742" size="0.025 1.05 0.0008"
+          material="deco_cinta" group="2" contype="0" conaffinity="0"/>                      <!-- [H] -->
+    <!-- Placa blanca con el logo Elecnor DELANTE del soporte (centrada con su columna, por
+         delante del bastidor, que llega a y = -0.40). Se lee desde -Y: cámaras de [4] y de la
+         demo [5]. No pisa la base de la peana del taladro (x de -0.56 a -0.34). -->
+    <geom name="deco_suelo_placa" type="box" pos="0.26 -0.58 -0.9743" size="0.42 0.155 0.0006"
+          material="deco_blanco" group="2" contype="0" conaffinity="0"/>                     <!-- [H] -->
+    <geom name="deco_suelo_logo" type="plane" pos="0.26 -0.58 -0.9735" size="0.375 0.125 0.01"
+          material="logo_elecnor_material" group="2" contype="0" conaffinity="0"/>           <!-- [H] -->
+
+    <!-- (El logo I+D+i que iba en la peana del brazo está ahora en la cara trasera de la
+         columna del soporte: decoracion/soporte_hombros.xml) -->
+
+  </worldbody>
+</mujoco>

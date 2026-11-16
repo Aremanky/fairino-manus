@@ -1173,13 +1173,33 @@ SLIDERS_LIMITES_DEG       = None    # ((min, max) × 6) en grados para fijarlos 
 # [G] graba un episodio de la SIMULACIÓN (6 joints del FR5 + 17 de la OrcaHand: posición y
 # comando) a ritmo fijo, desde el hilo de la física (skill_shield/ia/grabador.py). [E] entrena
 # en otro proceso (python -m skill_shield.ia.act <tarea>). [I] reproduce en la simulación y,
-# si están conectados y ARMADOS, en el FR5 y la mano reales. La IA es "ciega": aprende el
-# movimiento (historial de posturas → comandos siguientes), no ve objetos.
+# si están conectados y ARMADOS, en el FR5 y la mano reales.
+# 16-nov: la IA VE EL MUNDO (formato 3, skill_shield/ia/episodios.py): además se graban la postura
+# REAL del FR5 y de la OrcaHand, los táctiles y el objeto más cercano a la palma (cámara de cabeza
+# o mesa del taller [3] en simulación), y la red aprende el gesto RESPECTO AL OBJETO. [M] marca el
+# último episodio como fallido (no se entrena con él). Los modelos antiguos (ciegos) siguen yendo.
 IA_FPS              = 30.0    # fotogramas por segundo de la grabación (y de la reproducción)
 IA_RECORTAR_QUIETOS = True    # quitar el rato quieto del principio y del final de cada episodio
 IA_MISMA_TAREA      = True    # [G] no vuelve a pedir el nombre: [Shift+G] para cambiar de tarea
 IA_V_MAX_BRAZO      = 1.0     # rad/s: tope por joint del brazo al reproducir (además de fr5_servo)
 IA_PESO_EXP         = 0.15    # ensamblado temporal: más alto = más peso a la predicción reciente
+IA_DATOS_DIR        = None    # episodios/ y modelos/ FUERA del repo; None = ~/skill_shield_datos (o la
+                              # variable SKILL_SHIELD_DATOS). Si ahí no hay nada y en el repo quedan
+                              # episodios/, se siguen usando los del repo (avisa cómo moverlos)
+IA_FUENTES_GRABACION = True   # grabar también el mundo (formato 3). False = como antes (formato 2)
+IA_OBJETOS_CAMARA   = True    # «Mano Física + Gemelo»: lanzar la cámara de cabeza (AUTONOMO_CAM_MXID)
+                              # para ver los objetos al grabar. Solo si la teleoperación no la usa:
+                              # MULTICAMARA_ACTIVA = False (teleoperación con la cámara A + guante).
+                              # En el gemelo con sliders nunca se abre (no abre cámaras)
+IA_OBJETOS_VENTANA  = False   # enseñar la imagen de esa cámara en una ventana
+IA_OBJETO_RADIO_M   = 0.35    # objeto «objetivo» = el que se puede coger más cercano a la palma, a
+                              # menos de esto, la primera vez que se ve (al grabar y al arrancar [I])
+IA_MANO_REAL_PERIODO_S = 0.066  # leer la postura real de la OrcaHand cada estos s (hilo propio)
+IA_PROGRESO_FIN     = 0.97    # [I] se para sola cuando la red dice que ha terminado (progreso ≥ esto)
+IA_PARAR_AL_TERMINAR = True
+IA_SALTO_MAX_RAD    = 0.35    # con acciones respecto al objeto: si la IK pide saltar más que esto de un
+                              # fotograma a otro (cambio de rama), se para
+IA_MAX_DIST_OBJETO_M = 0.35   # ídem: si la red lleva la palma más lejos que esto del objeto, se para
 
 
 # ═══════════════════════════════════════════════════════════════════════════

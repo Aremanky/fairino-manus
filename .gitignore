@@ -243,3 +243,12 @@ diagnosticos/*.npz
 
 # Resultados que genera cada puesto al calibrar / verificar
 *_verificacion.json
+
+# IA (16-nov): episodios y modelos van FUERA del repo (IA_DATOS_DIR, por defecto ~/skill_shield_datos).
+# Los que ya estaban subidos se quitan con: git rm -r --cached episodios modelos
+/episodios/
+/modelos/
+
+# Contraseña de la web del modo autónomo: config.py la lee de aquí (o de SKILL_SHIELD_WEB_CLAVE).
+# NUNCA al repo: git rm --cached clave_web.txt (y cambiadla: sigue en el historial)
+clave_web.txt

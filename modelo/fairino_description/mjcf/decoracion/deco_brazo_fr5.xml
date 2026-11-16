@@ -1,0 +1,21 @@
+<!--
+  Decoración corporativa ELECNOR del brazo FAIRINO FR5 (solo visual).
+  GENERADO por decorar_fr5.py — para cambiar algo, edita el script y vuelve a ejecutarlo.
+  Lo incluye fairino_mjcf.xml. Los logos usan los materiales logo_elecnor_material y
+  logo_departamento_material definidos allí (mismos PNG que la mano y la pared).
+-->
+<mujoco>
+  <asset>
+    <!-- ── Paleta del brazo (un material por papel; ver PAPELES en decorar_fr5.py) ── -->
+    <material name="fr5e_carcasa" rgba="0.0 0.278 0.6 1" specular="0.5" shininess="0.6"/>
+    <material name="fr5e_tapa" rgba="0.03 0.13 0.30 1" specular="0.7" shininess="0.8"/>
+    <material name="fr5e_banda" rgba="1.0 0.498 0.0 1" specular="0.5" shininess="0.6"/>
+    <material name="fr5e_acento" rgba="1.0 0.498 0.0 1" specular="0.3" shininess="0.4" emission="0.15"/>
+    <material name="fr5e_oscuro" rgba="0.20 0.22 0.25 1" specular="0.6" shininess="0.6"/>
+    <material name="fr5e_detalle" rgba="0.28 0.30 0.33 1" specular="0.9" shininess="0.9"/>
+    <material name="fr5e_pegatina" rgba="1 1 1 1" specular="0.2" shininess="0.3"/>
+    <material name="fr5e_franja" rgba="1.0 0.498 0.0 1" specular="0.4" shininess="0.5"/>
+
+    <!-- ── Pegatinas: placa blanca redondeada + logo, curvadas al radio del tubo ── -->
+  </asset>
+</mujoco>

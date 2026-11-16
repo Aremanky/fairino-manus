@@ -1,0 +1,106 @@
+<!--
+  DECORACIÓN CORPORATIVA ELECNOR — mesa de trabajo (tecla [3])
+  ============================================================
+  Se incluye DENTRO del body "taller_mesa" de mesa_trabajo.xml, después de sus geoms:
+      <include file="decoracion/deco_mesa.xml"/>
+  así se mueve y se esconde con la mesa sin tocar nada de Python.
+
+  Coordenadas en el marco de la mesa: origen = centro de la superficie de trabajo
+  (z = 0), +X = lado del robot, tablero de 36 x 56 cm (x ±0.18, y ±0.28).
+
+    · canto naranja alrededor del tablero
+    · faldón azul bajo el tablero con logos Elecnor (+X) e I+D+i (+Y)
+    · panel trasero (lado -X, el lejano al robot) de taller: tablero perforado,
+      logos, rótulo "PUESTO DE MONTAJE ELÉCTRICO" y algo de herramienta colgada
+      (polímetro, rollo de cable naranja y cinta aislante)
+
+  REGLAS (para no tocar la funcionalidad):
+    · group="2" → EntornoTaller solo enciende/apaga colisiones de los geoms del
+      grupo 0, así que estos NUNCA chocan (además contype = conaffinity = 0).
+    · density="0" → no cambian la masa de nada.
+    · Nada encima del tapete (z > 0) entre x = -0.18 y x = +0.18: la zona de trabajo
+      y los objetos sueltos quedan exactamente igual.
+-->
+<mujoco model="decoracion_mesa">
+
+  <!-- ── Canto naranja del tablero (tablero: z -0.026 … -0.002) ── -->
+  <geom name="deco_mesa_canto_xp" type="box" pos=" 0.1825 0 -0.014" size="0.0025 0.285 0.012"
+        material="deco_naranja" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_canto_xn" type="box" pos="-0.1825 0 -0.014" size="0.0025 0.285 0.012"
+        material="deco_naranja" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_canto_yp" type="box" pos="0  0.2825 -0.014" size="0.18 0.0025 0.012"
+        material="deco_naranja" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_canto_yn" type="box" pos="0 -0.2825 -0.014" size="0.18 0.0025 0.012"
+        material="deco_naranja" group="2" contype="0" conaffinity="0" density="0"/>
+
+  <!-- ── Faldón azul bajo el tablero, entre las patas (z -0.106 … -0.026) ── -->
+  <geom name="deco_mesa_faldon_xp" type="box" pos=" 0.155 0 -0.066" size="0.006 0.245 0.04"
+        material="deco_azul" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_faldon_xn" type="box" pos="-0.155 0 -0.066" size="0.006 0.245 0.04"
+        material="deco_azul" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_faldon_yp" type="box" pos="0  0.255 -0.066" size="0.145 0.006 0.04"
+        material="deco_azul" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_faldon_yn" type="box" pos="0 -0.255 -0.066" size="0.145 0.006 0.04"
+        material="deco_azul" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- Logo Elecnor en el faldón +X (mira al robot y a la cámara de [3]) -->
+  <geom name="deco_mesa_placa_xp" type="box" pos="0.1615 0 -0.066" size="0.0005 0.105 0.036"
+        material="deco_blanco" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_logo_xp" type="plane" pos="0.1625 0 -0.066" xyaxes="0 1 0 0 0 1" size="0.1 0.0333 0.01"
+        material="logo_elecnor_material" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- Logo I+D+i en el faldón +Y -->
+  <geom name="deco_mesa_placa_yp" type="box" pos="0 0.2615 -0.066" size="0.105 0.0005 0.036"
+        material="deco_blanco" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_logo_yp" type="plane" pos="0 0.2625 -0.066" xyaxes="-1 0 0 0 0 1" size="0.1 0.0333 0.01"
+        material="logo_departamento_material" group="2" contype="0" conaffinity="0" density="0"/>
+
+  <!-- ── Panel trasero de taller (lado -X, detrás del tablero: x -0.21 … -0.19) ── -->
+  <!-- Postes de grafito -->
+  <geom name="deco_mesa_poste_1" type="box" pos="-0.2  0.272 0.15" size="0.012 0.012 0.256"
+        material="deco_grafito" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_poste_2" type="box" pos="-0.2 -0.272 0.15" size="0.012 0.012 0.256"
+        material="deco_grafito" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- Tablero blanco (z 0.03 … 0.40) y remate azul con línea naranja -->
+  <geom name="deco_mesa_panel" type="box" pos="-0.203 0 0.215" size="0.005 0.26 0.185"
+        material="deco_blanco" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_panel_remate" type="box" pos="-0.2 0 0.412" size="0.014 0.286 0.008"
+        material="deco_azul" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_panel_linea" type="box" pos="-0.1972 0 0.392" size="0.0008 0.26 0.004"
+        material="deco_naranja" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- Zona perforada (abajo) -->
+  <geom name="deco_mesa_perforado" type="plane" pos="-0.1975 0 0.1375" xyaxes="0 1 0 0 0 1" size="0.25 0.1075 0.01"
+        material="deco_perforado" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- Rótulo del puesto y logos (arriba) -->
+  <geom name="deco_mesa_rotulo" type="plane" pos="-0.1975 0 0.268" xyaxes="0 1 0 0 0 1" size="0.24 0.016 0.01"
+        material="deco_rotulo_taller" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_panel_logo_elecnor" type="plane" pos="-0.1975 -0.125 0.335" xyaxes="0 1 0 0 0 1" size="0.115 0.0383 0.01"
+        material="logo_elecnor_material" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_panel_logo_idi" type="plane" pos="-0.1975 0.125 0.335" xyaxes="0 1 0 0 0 1" size="0.115 0.0383 0.01"
+        material="logo_departamento_material" group="2" contype="0" conaffinity="0" density="0"/>
+
+  <!-- Herramienta colgada en el perforado (solo decorado, no se puede coger) -->
+  <!-- Ganchos -->
+  <geom name="deco_mesa_gancho_1" type="cylinder" fromto="-0.198 -0.15 0.225 -0.178 -0.15 0.225" size="0.003"
+        material="deco_metal" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_gancho_2" type="cylinder" fromto="-0.198  0.0  0.225 -0.178  0.0  0.225" size="0.003"
+        material="deco_metal" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_gancho_3" type="cylinder" fromto="-0.198  0.15 0.225 -0.178  0.15 0.225" size="0.003"
+        material="deco_metal" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- Polímetro amarillo con pantalla -->
+  <geom name="deco_mesa_polimetro" type="box" pos="-0.188 -0.15 0.15" size="0.008 0.035 0.06"
+        material="deco_amarillo" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_polimetro_pantalla" type="box" pos="-0.1795 -0.15 0.18" size="0.0006 0.025 0.017"
+        material="deco_pantalla" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_polimetro_selector" type="cylinder" fromto="-0.1805 -0.15 0.135 -0.1775 -0.15 0.135" size="0.013"
+        material="deco_negro" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- Rollo de cable naranja -->
+  <geom name="deco_mesa_cable" type="cylinder" fromto="-0.197 0 0.17 -0.181 0 0.17" size="0.045"
+        material="deco_naranja" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_cable_eje" type="cylinder" fromto="-0.197 0 0.17 -0.179 0 0.17" size="0.015"
+        material="deco_negro" group="2" contype="0" conaffinity="0" density="0"/>
+  <!-- Cinta aislante negra -->
+  <geom name="deco_mesa_cinta_aislante" type="cylinder" fromto="-0.197 0.15 0.18 -0.181 0.15 0.18" size="0.026"
+        material="deco_negro" group="2" contype="0" conaffinity="0" density="0"/>
+  <geom name="deco_mesa_cinta_aislante_hueco" type="cylinder" fromto="-0.197 0.15 0.18 -0.1805 0.15 0.18" size="0.016"
+        material="deco_metal" group="2" contype="0" conaffinity="0" density="0"/>
+
+</mujoco>
