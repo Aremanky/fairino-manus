@@ -249,22 +249,56 @@ class FuentesGrabacion:
     · objetos: () → lista de detecciones (formato de pelotas.py / herramientas.py)."""
 
     def __init__(self, nombres_brazo, nombres_mano, cadena=None, brazo_real=None, mano_real=None,
-                 tactil=None, objetos=None, radio_objeto=0.35, mapa_tactil=None):
+                 tactil=None, objetos=None, radio_objeto=0.35, mapa_tactil=None, frenado=None):
         self.nombres_brazo, self.nombres_mano = list(nombres_brazo), list(nombres_mano)
         self.cadena = cadena
         self.brazo_real, self.mano_real, self.tactil, self.objetos = brazo_real, mano_real, tactil, objetos
         self.radio = float(radio_objeto)
         self.mapa_tactil = dict(mapa_tactil) if mapa_tactil else None   # sensor → dedo físico
+        self.frenado = frenado            # () → True si el brazo está frenado por un obstáculo (GRABACION)
+        self.grabando = False
+        self._fijo = None                 # objetivo fijado de antemano (agarre asistido): fijar_objetivo
         self.iniciar_episodio()
+        self.grabando = False
 
     def columnas(self):
         return ([f"br:{n}" for n in self.nombres_brazo] + [f"hr:{n}" for n in self.nombres_mano]
                 + [f"hc:{n}" for n in self.nombres_mano]
-                + [f"tac:{d}:{e}" for d in DEDOS for e in EJES_TACTIL] + [f"obj:{c}" for c in COLS_OBJ])
+                + [f"tac:{d}:{e}" for d in DEDOS for e in EJES_TACTIL] + [f"obj:{c}" for c in COLS_OBJ]
+                + ["ev:frenado"])
+
+    def fijar_objetivo(self, det):
+        """Agarre asistido (16-nov): el objetivo de los PRÓXIMOS episodios es esta detección (la
+        misma a la que el planificador llevó la mano), no la más cercana. None = otra vez la más
+        cercana. Si ya se está grabando, cambia también el de ahora."""
+        self._fijo = None
+        if det is not None:
+            o = objeto_desde_deteccion(det)
+            if o is not None:
+                self._fijo = {k: o[k] for k in ("nombre", "clase", "tipo", "id", "clave")}
+        if self.grabando:
+            self._objeto = dict(self._fijo) if self._fijo else None
 
     def iniciar_episodio(self):
-        self._objeto = None                     # el objetivo: se fija con la 1ª detección cercana
-        self._n = dict(filas=0, br=0, hr=0, tac=0, obj=0)
+        # el objetivo: el fijado de antemano o, si no, se fija con la 1ª detección cercana
+        self._objeto = dict(self._fijo) if self._fijo else None
+        self._n = dict(filas=0, br=0, hr=0, tac=0, obj=0, frenado=0)
+        self.grabando = True
+
+    def fin_episodio(self):
+        self.grabando = False
+
+    def objetivo_clave(self):
+        """Clave («tipo:id») del objetivo fijado en el episodio que se está grabando, o None."""
+        return self._objeto["clave"] if self.grabando and self._objeto else None
+
+    def leer_frenado(self):
+        if self.frenado is None:
+            return None
+        try:
+            return bool(self.frenado())
+        except Exception:
+            return None
 
     # ── lecturas sueltas: nunca lanzan ──
     def leer_brazo_real(self):
@@ -344,7 +378,10 @@ class FuentesGrabacion:
                      *o["T"][:3, 3].tolist(), *mat_a_quat(o["T"][:3, :3]).tolist(), o["tam"]]
         else:
             fila += [NAN] * len(COLS_OBJ)
+        fr = self.leer_frenado()
+        fila.append(NAN if fr is None else float(fr))
         self._n["filas"] += 1
+        self._n["frenado"] += bool(fr)
         self._n["br"] += q_br is not None
         self._n["hr"] += mr is not None
         self._n["tac"] += bool(np.all(np.isfinite(tac[:, 2])))
@@ -355,7 +392,8 @@ class FuentesGrabacion:
         """Para el .json del episodio: el objeto objetivo y la fracción de filas con cada dato."""
         n = max(self._n["filas"], 1)
         return dict(objeto=dict(self._objeto) if self._objeto else None,
-                    fuentes={k: round(self._n[k] / n, 3) for k in ("br", "hr", "tac", "obj")})
+                    fuentes={k: round(self._n[k] / n, 3) for k in ("br", "hr", "tac", "obj")},
+                    frenado=round(self._n["frenado"] / n, 3) if self.frenado is not None else None)
 
     def resumen(self, q_brazo_sim=None):
         """Una línea con lo que hay disponible AHORA (se imprime al empezar a grabar)."""
@@ -399,8 +437,9 @@ class FuentesGrabacion:
 
 
 def crear_fuentes_teleop(cfg, raiz, nombres_brazo, nombres_mano, fr5=None, mano_real=None, tactil=None,
-                         objetos_sim=None, camara_libre=False, hardware=False):
-    """Las fuentes del formato 3 para Skill_Shield_Nivel_6.py ([G] y [I]). cfg: globals() de la app."""
+                         objetos_sim=None, camara_libre=False, hardware=False, objetos_camara=None):
+    """Las fuentes del formato 3 para Skill_Shield_Nivel_6.py ([G] y [I]). cfg: globals() de la app.
+    objetos_camara: fuente de objetos ya lanzada (modo GRABACION: la de CamaraCabeza)."""
     from skill_shield.teleop_fr5.cinematica import CadenaFR5
     cadena = None
     try:
@@ -411,8 +450,8 @@ def crear_fuentes_teleop(cfg, raiz, nombres_brazo, nombres_mano, fr5=None, mano_
     lector = None
     if mano_real is not None:
         lector = LectorManoReal(mano_real, periodo_s=float(cfg.get("IA_MANO_REAL_PERIODO_S", 0.066))).iniciar()
-    cam = None
-    if hardware and cfg.get("IA_OBJETOS_CAMARA", True):
+    cam = objetos_camara
+    if cam is None and hardware and cfg.get("IA_OBJETOS_CAMARA", True):
         if camara_libre:
             try:
                 cam = FuenteObjetosCamara.lanzar(cfg, raiz)

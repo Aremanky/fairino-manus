@@ -55,12 +55,25 @@ def _trayectoria(T0, palma_final, T):
     return np.array(out)
 
 
+def _rot_z(a):
+    c, s_ = np.cos(a), np.sin(a)
+    return np.array([[c, -s_, 0.0], [s_, c, 0.0], [0.0, 0.0, 1.0]])
+
+
 def grabar_episodio(carpeta, desplaz=(0.0, 0.0, 0.0), T=40, tactil=True, mano_real=True, objeto=True,
-                    tapar_desde=None, exito=True, tarea="coger_pelota"):
+                    tapar_desde=None, exito=True, tarea="coger_pelota", giro=0.0):
     """Graba con GrabadorEpisodio un agarre de pelota sintético: la mano baja en recta hasta la
-    pelota y cierra los dedos. desplaz traslada a la vez la pelota y la postura de partida."""
+    pelota y cierra los dedos. desplaz traslada a la vez la pelota y la postura de partida; giro
+    (rad) gira las dos alrededor de la vertical que pasa por el origen de joint1 (la pelota en otro
+    sitio de la mesa y la mano llegando girada; el FR5 va montado inclinado, así que no es solo
+    girar joint1: la IK resuelve otra postura)."""
     d = np.asarray(desplaz, float)
     T0 = CADENA.fk_marcos(Q0)[6].copy()
+    if giro:
+        b = CADENA.fk_marcos(Q0)[0][:3, 3]
+        Rz = _rot_z(giro)
+        T0[:3, :3] = Rz @ T0[:3, :3]
+        T0[:3, 3] = Rz @ (T0[:3, 3] - b) + b
     T0[:3, 3] += d
     palma0 = T0[:3, :3] @ OFFSET_PALMA_ORCA + T0[:3, 3]
     pelota = palma0 + np.array([0.0, 0.0, -0.10])
@@ -316,6 +329,56 @@ def test_si_se_mueve_la_pelota_el_gesto_es_el_mismo(tmp_path):
     assert np.allclose(sa, sb, atol=1e-6) and np.allclose(na, nb, atol=1e-6) and np.allclose(aa, ab, atol=1e-6)
 
 
+def test_marco_de_agarre_mano_girada_mismo_gesto(tmp_path):
+    """16-nov: el mismo agarre con la pelota en otro sitio de la mesa y la mano llegando GIRADA
+    (otro joint1) → con el marco de agarre, entradas y acciones IDÉNTICAS; con los ejes del mundo
+    (como antes), no."""
+    ra, _ = grabar_episodio(str(tmp_path / "a"))
+    rb, _ = grabar_episodio(str(tmp_path / "b"), giro=0.5)
+    ea, eb = E.leer_episodio(ra), E.leer_episodio(rb)
+    r = E.receta_para([ea, eb], ["coger_pelota"])
+    assert r["marco"] == "agarre"
+    ca, cb = E.crudo_de_episodio(ea, r), E.crudo_de_episodio(eb, r)
+    assert np.allclose(ca["objeto"]["q_ref"], ca["q_brazo"][0])
+    sa, na, aa = E.caracteristicas(r, ca, CADENA)
+    sb, nb, ab = E.caracteristicas(r, cb, CADENA)
+    assert np.max(np.abs(eb["q"][:, :6] - ea["q"][:, :6])) > 0.2            # el brazo va distinto
+    assert np.allclose(na, nb, atol=1e-6) and np.allclose(aa, ab, atol=1e-6)
+    # y la acción vuelve a los joints del episodio girado
+    brazo, _, err = E.accion_a_joints(r, ab[20], cb["objeto"], cb["q_brazo"][20], CADENA)
+    assert err is None and np.allclose(brazo, cb["a_brazo"][20], atol=1e-6)
+    rm = E.receta_para([ea, eb], ["coger_pelota"], marco="mundo")
+    _, nma, ama = E.caracteristicas(rm, E.crudo_de_episodio(ea, rm), CADENA)
+    _, nmb, amb = E.caracteristicas(rm, E.crudo_de_episodio(eb, rm), CADENA)
+    assert not np.allclose(ama, amb, atol=1e-3)
+    # sin la postura de referencia no se puede: error claro (no ejes inventados)
+    sin_ref = dict(cb["objeto"], q_ref=None)
+    assert E.accion_a_joints(r, ab[0], sin_ref, cb["q_brazo"][0], CADENA)[2] is not None
+
+
+def test_rot_agarre_vertical_y_eje_lateral():
+    R = CADENA.fk_marcos(Q0)[6][:3, :3]
+    Ra = E.rot_agarre(R)
+    assert np.allclose(Ra.T @ Ra, np.eye(3), atol=1e-9) and np.isclose(np.linalg.det(Ra), 1.0)
+    assert np.allclose(Ra[:, 2], [0, 0, 1])
+    assert np.allclose(E.rot_agarre(_rot_z(0.7) @ R), _rot_z(0.7) @ Ra, atol=1e-9)
+
+
+def test_politica_fija_la_referencia_al_arrancar(tmp_path):
+    ra, _ = grabar_episodio(str(tmp_path / "a"))
+    ep = E.leer_episodio(ra)
+    r = E.receta_para([ep], ["coger_pelota"])
+    crudo = E.crudo_de_episodio(ep, r)
+    pol = Politica(_red_oraculo(r, ep), cadena=CADENA)
+    obj = dict(crudo["objeto"])
+    obj.pop("q_ref")
+    q0 = crudo["q_brazo"][0]
+    obs = dict(q_brazo=q0, q_mano=crudo["q_mano"][0], tactil=crudo["tactil"][0], q_brazo_real=q0, objeto=obj)
+    assert pol.reiniciar(obs)
+    assert np.allclose(pol.objeto["q_ref"], q0) and pol.objeto["R_agarre"].shape == (3, 3)
+    assert "q_ref" not in obj                                   # no toca el objeto de fuera
+
+
 def test_ventanas_con_relleno_al_principio_y_al_final(datos_pelota):
     _, rutas = datos_pelota
     eps = [E.leer_episodio(r) for r in rutas[:2]]
@@ -483,3 +546,158 @@ def test_modelo_antiguo_se_sigue_reproduciendo():
     p = pol.paso(obs)
     assert p.brazo.shape == (6,) and p.mano.shape == (17,) and p.progreso is None
     assert isinstance(torch.__version__, str)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# modo GRABACION: colisiones con el mapa, zona de agarre, objetivo automático, frenado
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _modelo_col():
+    from skill_shield.teleop_fr5.ik_teleop import Entorno, ModeloColision
+    return ModeloColision(CADENA, Entorno(z_suelo=None))
+
+
+def _plano(z, centro, lado=0.5, res=0.02):
+    g = np.arange(-lado, lado + 1e-9, res)
+    X, Y = np.meshgrid(g + centro[0], g + centro[1])
+    return np.column_stack([X.ravel(), Y.ravel(), np.full(X.size, z)])
+
+
+def test_zona_de_agarre_pelota_y_herramienta():
+    from skill_shield.teleop_fr5.colision_mapa import zona_de
+    T = np.eye(4)
+    T[:3, 3] = [0.4, -0.1, -0.3]
+    cxy, rh, z_base, z_arriba, z_abajo = zona_de(dict(tipo="pelota", T_mundo=T, caja=[0.033] * 3), radio_extra=0.1)
+    assert np.allclose(cxy, [0.4, -0.1]) and rh == pytest.approx(0.133) and z_base == pytest.approx(-0.333)
+    assert z_arriba > -0.3 > z_base > z_abajo
+    # destornillador tumbado y girado 90° en z: la caja (10 × 1,6 × 1,6 cm) apenas levanta
+    Rz = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1.0]])
+    Th = np.eye(4)
+    Th[:3, :3], Th[:3, 3] = Rz, [0.4, -0.1, -0.3]
+    _, rh, z_base, _, _ = zona_de(dict(tipo="herramienta", T_mundo=Th, caja=[0.10, 0.016, 0.016]), radio_extra=0.0)
+    assert z_base == pytest.approx(-0.316) and rh == pytest.approx(np.hypot(0.016, 0.10))
+    assert zona_de(dict(tipo="pelota", T_mundo=None)) is None
+
+
+def test_el_mapa_frena_salvo_en_la_zona_de_agarre():
+    from skill_shield.teleop_fr5.colision_mapa import ColisionConMapa, zona_de
+    col = ColisionConMapa(_modelo_col())
+    punta = CADENA.fk_marcos(Q0)[6][:3, :3] @ np.array([0.0, 0.26, 0.0]) + CADENA.fk_marcos(Q0)[6][:3, 3]
+    assert col.libre(Q0)                                         # sin mapa: lo de siempre
+    mesa = _plano(punta[2] - 0.03, punta, lado=0.10)              # mesa 3 cm por debajo de los dedos
+    col.poner_mapa(mesa, 0.02)
+    assert [(a, b) for a, b, _ in col.colisiones(Q0)] == [("mano", "mapa")]
+    # la misma mesa con una pelota debajo de los dedos (zona de agarre): ya no frena…
+    Tp = np.eye(4)
+    Tp[:3, 3] = punta + [0.0, 0.0, -0.03 + 0.033]                # pelota apoyada en la mesa
+    zona = zona_de(dict(tipo="pelota", T_mundo=Tp, caja=[0.033] * 3), radio_extra=0.15)
+    obstaculo = np.array([[0.072, 0.0, -0.281 - 0.07]])           # …pero un bulto bajo el antebrazo, sí
+    n = col.poner_mapa(np.vstack([mesa, obstaculo]), 0.02, [zona])
+    assert n == 1 and [(a, b) for a, b, _ in col.colisiones(Q0)][0][1] == "mapa"
+    col.poner_mapa(mesa, 0.02, [zona])
+    assert col.libre(Q0)
+    # …pero si los dedos bajaran de la base de la pelota (la mesa), sí: choque «mesa»
+    Tp2 = Tp.copy()
+    Tp2[2, 3] += 0.06
+    col.poner_mapa(_plano(punta[2] - 0.03, punta), 0.02, [zona_de(dict(tipo="pelota", T_mundo=Tp2, caja=[0.033] * 3))])
+    assert any(b == "mesa" for _, b, _ in col.colisiones(Q0))
+    col.quitar_mapa()
+    assert col.libre(Q0)
+    # la interfaz de siempre sigue ahí (la usa la IK)
+    assert col.PARES_PROPIOS and col.entorno is not None and col.camino_libre(Q0, Q0)
+
+
+class _CabezaFalsa:
+    def __init__(self, lista, mapa):
+        self.lista, self.m, self.objetivos, self.poses = lista, mapa, [], []
+
+    def objetos(self):
+        return self.lista
+
+    def estado(self):
+        return "ok"
+
+    def publicar_pose(self, q, real, caps=None):
+        self.poses.append((np.asarray(q), real))
+
+    def poner_objetivo(self, id_):
+        self.objetivos.append(id_)
+
+    def mapa(self):
+        return self.m
+
+
+def test_mundo_grabacion_objetivo_mapa_y_frenado(tmp_path):
+    from skill_shield.ia.cabeza import MundoGrabacion
+    palma = CADENA.fk(Q0)["palma"]
+    T_cerca, T_lejos = np.eye(4), np.eye(4)
+    T_cerca[:3, 3], T_lejos[:3, 3] = palma + [0, 0, -0.10], palma + [0.6, 0, -0.10]
+    lista = [dict(id=5, nombre="Pelota roja", tipo="pelota", T_mundo=T_lejos.tolist(), caja=[0.035] * 3),
+             dict(id=20, nombre="Destornillador", tipo="herramienta", T_mundo=T_cerca.tolist(),
+                  caja=[0.10, 0.016, 0.016], estable=True)]
+    mesa = _plano(palma[2] - 0.13, palma)
+    cab = _CabezaFalsa(lista, (0.02, mesa))
+    fuentes = FuentesGrabacion(BRAZO, MANO, cadena=CADENA, objetos=cab.objetos)
+    mundo = MundoGrabacion(cab, fuentes, cfg=dict(GRABACION_ZONA_OBJETO_M=0.15))
+    col = mundo.nueva_colision(_modelo_col())
+    mundo.paso(None, Q0, q_real=None, info_ik=dict(estado="exacta", motivo=""))
+    assert mundo.objetivo["id"] == 20 and cab.objetivos[-1] == 20 and cab.poses[-1][1] is False
+    assert 0 < col.n_voxeles < len(mesa)                          # la mesa bajo el destornillador, fuera
+    assert not mundo.frenando and "Destornillador" in mundo.texto()
+    mundo.paso(None, Q0, q_real=Q0, info_ik=dict(estado="bloqueado", motivo="colision mano-mapa"))
+    assert mundo.frenando and mundo.texto().startswith("FRENADO") and cab.poses[-1][1] is True
+    # grabando, el objetivo es el FIJADO al empezar aunque otro quede más cerca después
+    fuentes.iniciar_episodio()
+    fuentes.muestra(Q0)
+    lista[0]["T_mundo"] = (T_cerca @ np.diag([1, 1, 1, 1.0])).tolist()
+    lista[0]["T_mundo"][0][3] -= 0.01
+    mundo.paso(None, Q0)
+    assert mundo.objetivo["id"] == 20
+    fuentes.fin_episodio()
+
+
+def test_frenado_se_graba_y_el_entrenamiento_lo_sabe(tmp_path):
+    ruta, g = grabar_episodio(str(tmp_path / "f"))
+    ep = E.leer_episodio(ruta)
+    assert ep["frenado"] is not None and np.all(np.isnan(ep["frenado"])) and E.frac_frenado(ep) == 0.0
+    # con fuente de frenado: la mitad del episodio frenado
+    estado = dict(n=0)
+
+    def frenado():
+        estado["n"] += 1
+        return estado["n"] > 20
+
+    f = FuentesGrabacion(BRAZO, MANO, frenado=frenado)
+    g2 = GrabadorEpisodio(BRAZO + MANO, list(range(23)), list(range(23)), recortar=False, fuentes=f)
+    datos = SimpleNamespace(time=0.0, qpos=np.zeros(23), ctrl=np.zeros(23))
+    g2.iniciar("t", datos)
+    for k in range(40):
+        datos.time, datos.ctrl[0] = k / 30.0, 0.01 * k
+        g2.muestrear(datos)
+    r2, _ = g2.parar(str(tmp_path / "f2"))
+    g2.esperar()
+    ep2 = E.leer_episodio(r2)
+    assert E.frac_frenado(ep2) == pytest.approx(0.5) and ep2["meta"]["frenado"] == pytest.approx(0.5)
+    assert not f.grabando and f.objetivo_clave() is None
+
+
+def test_entrenar_quita_los_episodios_frenados(tmp_path, capsys):
+    pytest.importorskip("torch")
+    from skill_shield.ia import act
+    carpeta = tmp_path / "episodios" / "t"
+    for k, frenado in enumerate((False, False, True)):
+        f = FuentesGrabacion(BRAZO, MANO, frenado=lambda fr=frenado: fr)
+        g = GrabadorEpisodio(BRAZO + MANO, list(range(23)), list(range(23)), recortar=False, fuentes=f)
+        datos = SimpleNamespace(time=0.0, qpos=np.zeros(23), ctrl=np.zeros(23))
+        datos.qpos[:6] = Q0
+        g.iniciar("t", datos)
+        for i in range(40):
+            datos.time, datos.ctrl[6] = i / 30.0, 0.02 * i + 0.01 * k
+            datos.ctrl[:6] = Q0
+            g.muestrear(datos)
+        g.parar(str(carpeta))
+        g.esperar()
+    ruta = act.entrenar(["t"], episodios_dir=str(tmp_path / "episodios"), modelos_dir=str(tmp_path / "modelos"),
+                        pasos=20, lote=8, eval_cada=10, cpu=True)
+    salida = capsys.readouterr().out
+    assert ruta and "1 episodio(s) con el brazo frenado" in salida and "2 episodios" in salida

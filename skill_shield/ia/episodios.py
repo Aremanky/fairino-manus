@@ -16,6 +16,8 @@ Formatos de episodio (episodios/<tarea>/episodio_XXXX.csv + .json):
                                corregido con ORCA_TACTIL_SENSOR_DE_DEDO)
         obj:id, obj:x…obj:qz, obj:tam   pose en el mundo (marco del MJCF) del objeto «objetivo»
                                (el más cercano a la palma al empezar) y su tamaño (m)
+        ev:frenado             1 si el brazo estaba frenado por un obstáculo del mapa (modo
+                               GRABACION). No lo ve la red: sirve para avisar al entrenar
       y en el .json: exito (True salvo que se marque con [M]), objeto (nombre, tipo, clase)…
 
 Qué VE la red (la «receta», que se guarda dentro del .pth):
@@ -204,9 +206,10 @@ def leer_episodio(ruta):
                     obj[:, j] = datos[:, i]
         formato = 3 if any(x is not None for x in (br, hr, hc, tac, obj)) else 2
         fps = meta.get("fps")
+        i_fr = col.get("ev:frenado")
         return dict(ruta=ruta, formato=formato, fps=float(fps) if fps else None, t=datos[:, 0],
                     nombres=nombres, n_brazo=_n_brazo(nombres, meta), q=q, a=a, br=br, hr=hr, hc=hc,
-                    tac=tac, obj=obj, meta=meta)
+                    tac=tac, obj=obj, frenado=None if i_fr is None else datos[:, i_fr], meta=meta)
     n = int(_p("N_ACT", 17))                                         # ── formato 1 (solo mano)
     q, a, t = [], [], []
     for r in filas:
@@ -220,12 +223,21 @@ def leer_episodio(ruta):
         return None
     return dict(ruta=ruta, formato=1, fps=None, t=np.array(t) if len(t) == len(q) else None,
                 nombres=None, n_brazo=0, q=np.array(q), a=np.array(a), br=None, hr=None, hc=None,
-                tac=None, obj=None, meta=meta)
+                tac=None, obj=None, frenado=None, meta=meta)
 
 
 def exito(ep):
     """False si el episodio se marcó como fallido con [M] (no se usa para entrenar)."""
     return bool(ep.get("meta", {}).get("exito", True))
+
+
+def frac_frenado(ep):
+    """Fracción de fotogramas con el brazo frenado por un obstáculo (modo GRABACION), o 0."""
+    f = ep.get("frenado")
+    if f is None or len(f) == 0:
+        return 0.0
+    f = np.asarray(f, float)
+    return float(np.nanmean(f)) if np.isfinite(f).any() else 0.0
 
 
 def compatibles(episodios):
@@ -384,13 +396,59 @@ def objeto_congelado(ep, n_primeros=5):
                 id=info.get("id"), clave=info.get("clave"), estable=True, fila=int(idx[0]))
 
 
-def marco_objeto(objeto):
-    """Marco en el que se miden la mano y las acciones: el del objeto, salvo las pelotas (su
-    centro con los ejes del mundo, z hacia arriba)."""
+def rot_agarre(R_mano):
+    """Ejes del MARCO DE AGARRE de una pelota (16-nov) a partir del giro de la mano al empezar
+    (mano_mount, R = [−n | f | −l]): z = vertical del mundo (la gravedad y la mesa sí importan) y
+    x = el eje lateral de la mano (índice → meñique) llevado a la horizontal. Para cogerla desde
+    arriba o inclinada ese eje es casi horizontal; si no lo es, el de la palma y, si no, el de los
+    dedos. Así el MISMO gesto hecho con la mano girada (otro lado de la mesa, el robot girado en
+    joint1) da las MISMAS entradas y acciones a la red."""
+    R = np.asarray(R_mano, float)
+    z = np.array([0.0, 0.0, 1.0])
+    for col in (2, 0, 1):
+        h = R[:, col] - (R[:, col] @ z) * z
+        n = float(np.linalg.norm(h))
+        if n > 0.25:
+            break
+    if n < 1e-9:
+        return np.eye(3)
+    x = h / n
+    return np.column_stack([x, np.cross(z, x), z])
+
+
+def marco_objeto(objeto, receta=None, cadena=None):
+    """Marco en el que se miden la mano y las acciones.
+    · Herramientas: el del objeto (su orientación sí importa: el mango, la punta).
+    · Pelotas: su centro. Ejes: con receta["marco"] == "agarre" (recetas desde el 16-nov), los del
+      MARCO DE AGARRE (rot_agarre del giro de la mano en objeto["q_ref"], la postura del brazo al
+      empezar: al grabar, el primer fotograma; al reproducir, la de cuando se arranca); en recetas
+      anteriores, los del mundo."""
     T = np.array(objeto["T"], float)
-    if objeto.get("tipo") == "pelota":
-        T[:3, :3] = np.eye(3)
+    if objeto.get("tipo") != "pelota":
+        return T
+    T[:3, :3] = np.eye(3)
+    if (receta or {}).get("marco") == "agarre":
+        R = objeto.get("R_agarre")
+        if R is None:
+            q_ref = objeto.get("q_ref")
+            if q_ref is None or cadena is None:
+                raise ValueError("el marco de agarre necesita la postura del brazo al empezar (q_ref) "
+                                 "y la cinemática del FR5")
+            R = rot_agarre(cadena.fk_marcos(np.asarray(q_ref, float))[6][:3, :3])
+        T[:3, :3] = np.asarray(R, float)
     return T
+
+
+def con_q_ref(objeto, q_brazo):
+    """Copia del objeto con la postura de referencia del marco de agarre. q_brazo: la postura del
+    brazo al EMPEZAR (un R_agarre que trajera se quita: era de otra postura)."""
+    if objeto is None:
+        return None
+    o = dict(objeto)
+    o.pop("R_agarre", None)
+    q = None if q_brazo is None else np.asarray(q_brazo, float).ravel()
+    o["q_ref"] = q.copy() if q is not None and len(q) == 6 and np.all(np.isfinite(q)) else None
+    return o
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -419,9 +477,10 @@ def _frac_filas(arr):
 
 
 def receta_para(episodios, tareas, accion="auto", ventana=None, chunk=30, con_tactil=None,
-                con_objeto=None, incluir_q_brazo=None):
+                con_objeto=None, incluir_q_brazo=None, marco="agarre"):
     """Decide qué ve y qué hace la red a partir de lo que HAY en los episodios (ya compatibles).
-    con_tactil / con_objeto: None = si están en los datos, False = no usarlos, True = obligatorio."""
+    con_tactil / con_objeto: None = si están en los datos, False = no usarlos, True = obligatorio.
+    marco: "agarre" (pelotas: ejes de la mano al empezar, ver marco_objeto) o "mundo" (el de antes)."""
     eps = list(episodios)
     if not eps:
         raise ValueError("no hay episodios")
@@ -447,6 +506,8 @@ def receta_para(episodios, tareas, accion="auto", ventana=None, chunk=30, con_ta
         raise ValueError(f"acción desconocida: {accion}")
     if accion == "mano_en_objeto" and not hay_objeto:
         raise ValueError("la acción 'mano_en_objeto' necesita episodios con objeto")
+    if marco not in ("agarre", "mundo"):
+        raise ValueError(f"marco desconocido: {marco}")
     if incluir_q_brazo is None:          # con el objeto, la postura absoluta del brazo sobra: la red
         incluir_q_brazo = accion == "joints"   # se fijaría en DÓNDE está la mesa y no generalizaría
     estado = []
@@ -468,6 +529,7 @@ def receta_para(episodios, tareas, accion="auto", ventana=None, chunk=30, con_ta
                 nombres_brazo=list(nombres[:n_b]) if nombres else [],
                 nombres_mano=list(nombres[n_b:]) if nombres else None, n_brazo=n_b, n_mano=n_m,
                 accion=accion, estado=estado, entorno=entorno, clases=clases, tareas=list(tareas),
+                marco=marco if hay_objeto else None,
                 ventana=int(ventana), chunk=int(chunk), fps=fps_de(eps),
                 usar_mano_real=bool(usar_mano_real), usar_brazo_real=bool(usar_brazo_real),
                 tactil_escala=TACTIL_ESCALA_N, tam_defecto=tam_defecto,
@@ -503,7 +565,8 @@ def crudo_de_episodio(ep, receta):
     if receta.get("usar_mano_real") and ep.get("hr") is not None:
         q_m = _preferir(ep["hr"], q_m)
     return dict(T=len(q), q_brazo=q_b, q_mano=q_m, tactil=ep.get("tac"),
-                objeto=objeto_congelado(ep) if receta.get("entorno") else None,
+                objeto=(con_q_ref(objeto_congelado(ep), q_b[0] if len(q_b) else None)
+                        if receta.get("entorno") or receta["accion"] == "mano_en_objeto" else None),
                 a_brazo=a[:, :n_b], a_mano=a[:, n_b:])
 
 
@@ -572,7 +635,7 @@ def caracteristicas(receta, crudo, cadena=None):
             raise SinObjeto("la red necesita ver el objeto y no hay ninguno")
         if cadena is None:
             raise ValueError("hace falta la cinemática del FR5 para ver el objeto desde la mano")
-        T_om = _inv_T_lote(_T_mano(cadena, crudo["q_brazo"])) @ marco_objeto(obj)   # objeto en la mano
+        T_om = _inv_T_lote(_T_mano(cadena, crudo["q_brazo"])) @ marco_objeto(obj, receta, cadena)   # objeto en la mano
         partes = []
         for g, n in receta["entorno"]:
             if g == "obj_pos":
@@ -606,7 +669,7 @@ def acciones_de(receta, crudo, cadena=None):
     obj = crudo.get("objeto")
     if obj is None:
         raise SinObjeto("la acción 'mano_en_objeto' necesita el objeto")
-    Tt = _inv_T_lote(np.repeat(marco_objeto(obj)[None], len(a_b), axis=0)) @ _T_mano(cadena, a_b)
+    Tt = _inv_T_lote(np.repeat(marco_objeto(obj, receta, cadena)[None], len(a_b), axis=0)) @ _T_mano(cadena, a_b)
     return np.concatenate([Tt[:, :3, 3], rot6d(Tt[:, :3, :3]), a_m], axis=1)
 
 
@@ -621,7 +684,10 @@ def accion_a_joints(receta, a, objeto=None, q_brazo=None, cadena=None):
     mano = a[9:9 + n_m]
     if objeto is None or cadena is None:
         return None, mano, "falta el objeto o la cinemática del FR5"
-    T = marco_objeto(objeto) @ T_de(R_de_rot6d(a[3:9]), a[:3])
+    try:
+        T = marco_objeto(objeto, receta, cadena) @ T_de(R_de_rot6d(a[3:9]), a[:3])
+    except ValueError as e:
+        return None, mano, str(e)
     q_ref = None if q_brazo is None else np.asarray(q_brazo, float).ravel()
     sols = cadena.ik_analitica(T, q_ref=q_ref)
     if not sols:

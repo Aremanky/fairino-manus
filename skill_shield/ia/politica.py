@@ -18,8 +18,8 @@ from collections import deque, namedtuple
 
 import numpy as np
 
-from skill_shield.ia.episodios import (R_de_rot6d, SinObjeto, accion_a_joints, caracteristicas,
-                                       crudo_de_obs, rot6d)
+from skill_shield.ia.episodios import (R_de_rot6d, SinObjeto, accion_a_joints, caracteristicas, con_q_ref,
+                                       crudo_de_obs, marco_objeto, rot6d)
 from skill_shield.teleop_fr5.cinematica import OFFSET_PALMA_ORCA
 
 Paso = namedtuple("Paso", "brazo mano progreso accion error dist_objeto")
@@ -89,6 +89,17 @@ class Politica:
         if self.necesita_objeto and self.objeto is None:
             self.error = "no veo ningún objeto que coger cerca de la mano"
             return False
+        if self.objeto is not None:
+            # marco de agarre (16-nov): la postura del brazo AHORA, al arrancar, es la referencia
+            # (al entrenar, el primer fotograma del episodio); su giro se calcula una vez
+            q0 = crudo_de_obs(self.receta, obs, None)["q_brazo"][0]
+            self.objeto = con_q_ref(self.objeto, q0 if len(q0) == 6 else None)
+            if self.receta.get("marco") == "agarre" and self.objeto.get("tipo") == "pelota":
+                try:
+                    self.objeto["R_agarre"] = marco_objeto(self.objeto, self.receta, self.cadena)[:3, :3]
+                except ValueError as e:
+                    self.error = str(e)
+                    return False
         try:
             s, _, _ = self._entrada(obs)
         except (SinObjeto, ValueError) as e:

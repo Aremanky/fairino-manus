@@ -1162,6 +1162,114 @@ class Planificador:
                     raise ErrorPlan(f"subir con la pelota: {m}")
         return qs
 
+    # ── 16-nov: solo hasta la postura de AGARRE (modo GRABACION · agarre aprendido) ──
+    def planificar_previa(self, q0, det):
+        """Lleva la mano a la postura de agarre del objeto `det` (una entrada de la lista de la
+        cámara: T_mundo, tipo, diametro_m/caja) —la MISMA a la que llega la Tarea justo antes de
+        bajar a cogerlo— y se para ahí. Es donde empieza una demo del modo GRABACION (y, más
+        adelante, el agarre aprendido). Pelota: encima (o inclinada), con la bajada comprobada,
+        de cualquiera de las formas de cogerla. Herramienta: delante, a AUTONOMO_TAREA_DIST_PREVIA.
+        Plan: [Abrir la mano, Ir encima de la pelota / Ir a la herramienta]."""
+        T = np.asarray(det["T_mundo"], float)
+        if det.get("tipo") == "pelota":
+            caja = det.get("caja")
+            diam = float(det.get("diametro_m") or (2.0 * float(caja[0]) if caja else 0.07))
+            return self._previa_pelota(q0, T, diam)
+        q0 = self._empezar(q0)
+        ops = [(q, q, qs, inc) for q, qs, inc in self.opciones_palma(T, q0, "la herramienta")]
+        (h,), (ir,), _vuelta = self._combinar(q0, [("ir a la herramienta", ops)])
+        self.inclinaciones = [h[3]]
+        return Plan(q0, [Fase("Abrir la mano", mano="abierta"), Fase("Ir a la herramienta", ir)],
+                    nombre="llevar la mano a la herramienta")
+
+    def _previa_pelota(self, q0, T_pelota, diametro):
+        """Como planificar_pelota (mismas formas de cogerla, en el mismo orden), hasta encima."""
+        todos = {"pinza": ("en pinza", 0.0), "rodeándola": ("rodeándola", 0.0),
+                 "con los dedos": ("con los dedos", self.pel_dedos)}
+        modos = []
+        for m in self.pel_modos:
+            if m == "con los dedos" and self.pel_dedos <= 0:
+                continue
+            if m == "pinza" and self.pinza(diametro) is None:
+                continue
+            if m in todos:
+                modos.append((m,) + todos[m])
+        if not modos:
+            modos = [("rodeándola", "rodeándola", 0.0)]
+        errores = []
+        inc_antes = self.inc_max
+        self.inc_max = self.pel_inc_max
+        try:
+            for clave, nombre, extra in modos:
+                try:
+                    plan = self._previa_pelota_modo(q0, T_pelota, diametro, extra,
+                                                    pinza=self.pinza(diametro) if clave == "pinza" else None)
+                    plan.nombre = f"llevar la mano a la pelota ({nombre})"
+                    self.modo_pelota = nombre
+                    return plan
+                except ErrorPlan as e:
+                    errores.append((nombre, str(e)))
+        finally:
+            self.inc_max = inc_antes
+        if len(errores) == 1:
+            raise ErrorPlan(errores[0][1])
+        raise ErrorPlan(errores[0][1] + " · tampoco " + " ni ".join(n for n, _ in errores[1:]))
+
+    def _previa_pelota_modo(self, q0, T_pelota, diametro, extra=0.0, pinza=None):
+        """La primera parte de _plan_pelota: ir encima, comprobando que desde ahí se puede bajar a
+        cogerla y subir con ella (si no, esa postura de encima no vale)."""
+        q0 = self._empezar(q0)
+        r = float(diametro) / 2.0
+        d_palma = r + self.pel_holgura + extra
+        punto = OFFSET_PALMA_ORCA
+        if pinza is not None:
+            d_palma, punto = 0.0, np.asarray(pinza["punto"], float)
+            self._posturas["pinza_abierta"] = dict(self.pinza_ab)
+            self._posturas["pinza_contacto"] = dict(pinza["contacto"])
+            self._nubes = {k: v for k, v in self._nubes.items() if not str(k).startswith("pinza")}
+        k_ab = "pinza_abierta" if pinza is not None else "pelota_abierta"
+        c = np.asarray(T_pelota, float)[:3, 3]
+        T_p = self._marco_arriba(c)
+        self.zonas_apoyo([(c, r + self.zona_apoyo, r)])
+        if pinza is not None:
+            abierta, cerrada = ("pinza_abierta", None), ("pinza_contacto", self._pelota_en_mano(r, centro=punto))
+        else:
+            abierta, cerrada = ("pelota_abierta", None), ("pelota_cerrada", self._pelota_en_mano(r, extra))
+
+        def coger(q_l, a):
+            centro = c + _unit(a) * d_palma
+            with self.con_mano(*abierta):
+                qs = self.recta(q_l, punto, centro, "bajar a la pelota")
+            with self.con_mano(*cerrada):
+                for q in qs[::-1]:
+                    m = self.motivo(q)
+                    if m:
+                        raise ErrorPlan(f"subir con la pelota: {m}")
+            return qs
+
+        with self.con_mano(*abierta):
+            ops_p, info = self._opciones(T_p, q0, lambda a, ang: self.T_palma(T_p, ang, d_palma + self.pel_subida, a,
+                                                                          punto),
+                                         coger, todas=True)
+        if not ops_p:
+            raise self._con_aviso(str(self._no_encuentro("llegar a la pelota (ni desde arriba ni de lado)", info))
+                                  + self._que_estorba(c, r), c)
+        self._choques = []
+        try:
+            (p,), (ir_p,), _vuelta = self._combinar(
+                q0, [("ir a la pelota", [(q, q, qs, inc) for q, qs, inc in ops_p], abierta)], mano_vuelta=abierta)
+        except ErrorPlan as e:
+            raise self._con_aviso(str(e) + self._que_estorba(c, r), c) from None
+        self.inclinaciones = [p[3]]
+        f_ir = Fase("Ir encima de la pelota", ir_p)
+        f_ir.mano_chk = abierta
+        plan = Plan(q0, [Fase("Abrir la mano", mano=k_ab), f_ir], nombre="llevar la mano a la pelota")
+        plan.pelota = dict(c=c.copy(), r=r, d_palma=d_palma, extra=extra, punto=np.asarray(punto, float).copy(),
+                           bajada=np.asarray(p[2], float).copy())
+        if pinza is not None:
+            plan.posturas = dict(pinza_abierta=dict(self.pinza_ab))
+        return plan
+
     def valida(self, fase, q):
         """motivo(q) con la mano como estaba en ese tramo del plan (para comprobar un plan hecho)."""
         with self.con_mano(*fase.mano_chk):

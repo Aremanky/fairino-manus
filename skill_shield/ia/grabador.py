@@ -171,6 +171,8 @@ class GrabadorEpisodio:
         """Termina el episodio y lo guarda en segundo plano. Devuelve (ruta, n_fotogramas) o
         (None, 0) si no había nada que guardar."""
         self.activo = False
+        if self._con_fuentes:
+            self.fuentes.fin_episodio()
         filas, self._filas = self._filas, []
         if not guardar or not filas:
             return None, 0

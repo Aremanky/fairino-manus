@@ -10,7 +10,7 @@ import math
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ── CONFIGURACIÓN DE ENTORNO Y RUTAS ──────────────────────────────────────────
-MODO_EJECUCION = "SIMULACION"  # Opciones: "SIMULACION" | "GEMELO_SLIDERS" | "HARDWARE_REAL" | "AUTONOMO" (lo elige el menú)
+MODO_EJECUCION = "SIMULACION"  # Opciones: "SIMULACION" | "GEMELO_SLIDERS" | "HARDWARE_REAL" | "GRABACION" | "AUTONOMO" (lo elige el menú)
 
 # Puerto mano
 PUERTO_HARDWARE = "/dev/ttyUSB0"
@@ -560,6 +560,8 @@ PERFIL_BUCLE_CADA_S = 3.0
 # ═══════════════════════════════════════════════════════════════════════════
 MULTICAMARA_ACTIVA  = True   # True → abre la cámara B y fusiona el brazo (False = comportamiento de siempre)
 CAM_A_MXID          = "1944301001AAFA1700"    # MxId de la cámara principal (None = la primera libre). Fíjalos cuando ya funcione.
+CAM_C_MXID          = None                    # 16-nov: TERCERA OAK-D (modo GRABACION): con la A, las cámaras cruzadas de la
+                                              # teleoperación; la B queda de cámara de cabeza. None = sin C (teleoperación con la A sola)
 CAM_B_MXID          = "1944301081B5FA4800"    # MxId de la cámara secundaria. Se ven con:  python -c "from skill_shield.vision.multicamara import listar_camaras as l; print(l())"
 EXTRINSECAS_ARCHIVO = "camaras_extrinsecas.json"   # lo genera calibrar_extrinseca.py
 MULTICAM_SYNC_MAX_S = 0.04    # máx. desfase (s) entre el fotograma de A y el de B para emparejarlos
@@ -1200,6 +1202,41 @@ IA_PARAR_AL_TERMINAR = True
 IA_SALTO_MAX_RAD    = 0.35    # con acciones respecto al objeto: si la IK pide saltar más que esto de un
                               # fotograma a otro (cambio de rama), se para
 IA_MAX_DIST_OBJETO_M = 0.35   # ídem: si la red lleva la palma más lejos que esto del objeto, se para
+IA_MAX_FRENADO      = 0.2     # al entrenar, fuera los episodios con el brazo frenado por obstáculos más de
+                              # esta fracción del tiempo (modo GRABACION; --max-frenado 1 para usarlos)
+
+# ── MODO GRABACION (16-nov): teleoperación + lo que ve el modo autónomo, para grabar demos ──
+# Menú «Grabación (teleoperación + objetos)»: la teleoperación de «Mano Física + Gemelo» (pedal, FR5
+# con TELEOP_REAL_*) con las cámaras A y C cruzadas + guante, y la cámara de CABEZA (B,
+# AUTONOMO_CAM_MXID) haciendo lo mismo que en el autónomo: herramientas (ArUco), pelotas y mapa de
+# obstáculos. El objeto a coger es el más cercano a la palma (el fijado, mientras se graba); los
+# objetos y los obstáculos se ven en la ventana de MuJoCo y el brazo FRENA contra los obstáculos.
+# Cada episodio lleva el objeto y si el brazo iba frenado (skill_shield/ia/cabeza.py).
+GRABACION_EXTRINSECAS_ARCHIVO = "camaras_extrinsecas_ac.json"   # A↔C (no pisa la de A↔B del modo normal).
+                              # Con la extrínseca automática se calcula sola al pulsar [A]; o con el tablero:
+                              # python calibrar_extrinseca.py --mxid-b <MxId de C> --salida camaras_extrinsecas_ac.json
+GRABACION_MAPA      = True    # mapa de obstáculos con la cámara de cabeza (y frenar contra él)
+GRABACION_FRENAR    = True    # True = el brazo no entra en los obstáculos del mapa · False = solo se ven
+GRABACION_MAPA_MARGEN_M = 0.02  # holgura extra de las cápsulas del robot contra los cubos del mapa
+GRABACION_ZONA_OBJETO_M = 0.25  # alrededor del objeto a coger (más su tamaño) los cubos de la mesa no
+                              # frenan (cabe la mano entera, también de lado); en su lugar nada baja de
+                              # la base del objeto (hace de mesa). Lo que sobresale por encima, sí frena
+GRABACION_MAPA_VER  = True    # dibujar objetos y obstáculos en la ventana de MuJoCo
+GRABACION_MAPA_MAX_DIBUJO = 400   # cubos dibujados como mucho (los más cercanos a la palma)
+GRABACION_MAPA_RADIO_DIBUJO_M = 0.5
+GRABACION_CAM_VENTANA = False # además, la imagen de la cámara de cabeza en una ventana de OpenCV
+# Agarre asistido (16-nov, skill_shield/ia/agarre_asistido.py): [L] el planificador del autónomo lleva
+# la mano a la postura de agarre del objetivo ([O] cambia de objeto) con el PEDAL pisado; al llegar,
+# pisar = modo RELATIVO (embrague: el robot copia tus desplazamientos, escalados) y EMPIEZA a grabarse
+# el episodio; soltar = se para y se guarda ([M] = salió mal). [B] bloquea el giro · [K] vuelve a la
+# teleoperación normal. Así la demo empieza donde empezará el agarre aprendido (tras el planificador).
+GRABACION_AGARRE_ASISTIDO = True
+GRABACION_ESCALA_POS    = 0.5   # en relativo, el robot se mueve esta fracción de lo que mueves tú
+GRABACION_ESCALA_GIRO   = 0.5   # ídem con los giros de la mano
+GRABACION_BLOQUEAR_GIRO = False # True = arranca con el giro bloqueado (solo traslación; [B] lo cambia)
+GRABACION_V_MAX         = 0.8   # rad/s como mucho por eje en relativo
+GRABACION_SALTO_MAX_RAD = 0.5   # si la IK pide cambiar de postura de golpe (más que esto), no se mueve
+GRABACION_AFINAR_S      = 1.0   # quieto al llegar, para que la cámara de cabeza mida bien el objeto
 
 
 # ═══════════════════════════════════════════════════════════════════════════

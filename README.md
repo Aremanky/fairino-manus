@@ -46,7 +46,23 @@ python -m pytest tests -q
 | 💻 Simulación Virtual | solo MuJoCo | cámaras (solo MuJoCo) |
 | 🎚️ Gemelo Digital (sliders) | guante/cámara → mano real por USB | **ventana de sliders** |
 | 🤖 Mano Física + Gemelo Digital | guante/cámara → mano real por USB | cámaras |
+| 🎥 Grabación (teleoperación + objetos) | guante → mano real por USB | cámaras A + C; la B es la cámara de cabeza (objetos y obstáculos) |
 | 🧠 Funcionamiento autónomo | *(en desarrollo)* | *(en desarrollo)* |
+
+### Grabación (teleoperación + objetos) — para grabar demos con el mundo
+La teleoperación de «Mano Física + Gemelo» (mismo pedal, mismo FR5 con `TELEOP_REAL_*`) más lo que ve el modo autónomo con la cámara de cabeza (`skill_shield/ia/cabeza.py`):
+- **Cámaras:** A y C cruzadas para teleoperar (pon el MxId de la C en `CAM_C_MXID`; sin ella, solo la A) y la **B como cámara de cabeza**, con el mismo proceso que el autónomo: herramientas con ArUco, pelotas y mapa de obstáculos. Necesita la calibración cámara de cabeza → robot (`camara_robot.json`).
+- **Extrínseca A↔C** en su propio archivo (`GRABACION_EXTRINSECAS_ARCHIVO`, no pisa la A↔B del modo normal): se calcula sola con el cuerpo al pulsar `[A]`, o con el tablero: `python calibrar_extrinseca.py --mxid-b <MxId de C> --salida camaras_extrinsecas_ac.json`.
+- **Objetivo automático:** el objeto que se puede coger más cercano a la palma; mientras se graba, el fijado al empezar el episodio. Se pinta en naranja en la ventana de MuJoCo, junto al resto de objetos y los obstáculos cercanos a la mano (cubos naranjas).
+- **El brazo frena** contra los obstáculos del mapa (la IK lo deja lo más cerca posible sin chocar; en la ventana de la cámara sale `FRENADO`). Alrededor del objetivo (`GRABACION_ZONA_OBJETO_M`) la mesa no frena —si no, no se podría coger— y en su lugar nada baja de la base del objeto. `GRABACION_FRENAR = False` para que solo se vean.
+- **Agarre asistido** (`skill_shield/ia/agarre_asistido.py`, `GRABACION_AGARRE_ASISTIDO`): así se graban las demos buenas.
+  1. `[A]` + T-pose como siempre. `[O]` cambia el objeto a coger (por defecto el más cercano a la mano).
+  2. `[L]`: el planificador del autónomo calcula cómo llevar la mano a la **postura de agarre** de ese objeto (la misma a la que llega la Tarea antes de bajar). Con el **pedal pisado** el brazo va; al soltarlo se para. Al llegar, un segundo quieto para que la cámara mida bien el objeto → `LISTO`.
+  3. Abre la mano y **pisa el pedal**: modo **relativo** con embrague —el robot copia tus desplazamientos y giros a la mitad (`GRABACION_ESCALA_POS`, `GRABACION_ESCALA_GIRO`), no tu postura— y **empieza a grabarse** el episodio. Coge el objeto y súbelo unos cm.
+  4. **Suelta el pedal**: el robot se para y el episodio se guarda. `[M]` si salió mal. Volver a pisar = relativo **sin grabar** (para dejar el objeto y apartarte). `[L]` otro agarre, `[K]` vuelta a la teleoperación normal, `[B]` bloquea el giro (solo traslación).
+  Así cada demo empieza donde empezará el agarre aprendido: tras el planificador. La mano la sigue llevando el guante.
+- **Entrenamiento:** los episodios llevan el objeto (con su orientación si es una herramienta) y si el brazo iba frenado. Con las pelotas, la red mide la mano en el **marco de agarre**: centro de la pelota, vertical del mundo y el eje lateral de la mano al empezar (`--marco mundo` para los ejes del mundo, como antes). Así el mismo gesto hecho desde otro lado de la mesa le parece igual. Los que pasan más del 20 % del tiempo frenados no se usan (`IA_MAX_FRENADO`, o `--max-frenado 1`). La red ve el objeto, no los obstáculos: de esos se encarga el filtro de seguridad.
+- Tres OAK-D a la vez: cada una en un puerto USB3, mejor en controladores distintos.
 
 ### Funcionamiento autónomo (en desarrollo)
 - Última opción del menú. Fija `MODO_EJECUCION = "AUTONOMO"` y salta al paquete `skill_shield/autonomo/`, con su propio bucle.

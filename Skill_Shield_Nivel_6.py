@@ -143,12 +143,14 @@ def main():
     # ── MENÚ DE ARRANQUE CON ZENITY (compatible con Wayland/GNOME) ──────────
     # zenity es la herramienta de diálogos nativa de GNOME, siempre visible.
     # Si no está instalada: sudo apt install zenity
-    # La misma pregunta de siempre, con CUATRO botones (dos --extra-button), en este orden:
+    # La misma pregunta de siempre, con CINCO botones (tres --extra-button), en este orden:
     #   [Extra 1] 💻 Simulación             → SIMULACION
     #   [Extra 2] 🎚️ Gemelo (sliders)        → GEMELO_SLIDERS: mano física + guante igual que
     #             HARDWARE_REAL, pero el BRAZO se mueve con la ventana de sliders
     #             (skill_shield/interfaz/sliders_brazo.py)
-    #   [OK]      🤖 Mano Física + Gemelo   → HARDWARE_REAL
+    #   [Extra 3] 🤖 Mano Física + Gemelo   → HARDWARE_REAL
+    #   [OK]      🎥 Grabación              → GRABACION (16-nov): HARDWARE_REAL + cámara de cabeza
+    #             (herramientas, pelotas, mapa de obstáculos y frenado) para grabar demos
     #   [Cancel]  🧠 Funcionamiento autónomo → AUTONOMO (10-nov; paquete skill_shield/autonomo/)
     # zenity devuelve 1 tanto para Cancel como para los botones extra; los extra se distinguen
     # porque escriben su etiqueta en stdout.
@@ -158,6 +160,7 @@ def main():
     global MODO_EJECUCION
     _BOTON_SIMULACION = "💻  Simulación Virtual (MuJoCo)"
     _BOTON_SLIDERS    = "🎚️  Gemelo Digital (sliders)"
+    _BOTON_MANO       = "🤖  Mano Física (USB) + Gemelo Digital"
     try:
         resultado = subprocess.run(
             [
@@ -166,8 +169,9 @@ def main():
                 '--text=¿Qué modo de operación deseas iniciar?',
                 f'--extra-button={_BOTON_SIMULACION}',                  # 1º
                 f'--extra-button={_BOTON_SLIDERS}',                     # 2º
-                '--ok-label=🤖  Mano Física (USB) + Gemelo Digital',     # 3º
-                '--cancel-label=🧠  Funcionamiento autónomo',            # 4º (el último)
+                f'--extra-button={_BOTON_MANO}',                        # 3º
+                '--ok-label=🎥  Grabación (teleoperación + objetos)',   # 4º
+                '--cancel-label=🧠  Funcionamiento autónomo',            # 5º (el último)
                 '--width=420',
                 '--height=50',
             ],
@@ -182,9 +186,12 @@ def main():
         elif resultado.returncode == 1 and stdout_txt == _BOTON_SLIDERS:
             # Botón extra 2 → gemelo digital con el brazo en sliders
             MODO_EJECUCION = "GEMELO_SLIDERS"
-        elif resultado.returncode == 0:
-            # Botón OK → mano física + gemelo digital normal
+        elif resultado.returncode == 1 and stdout_txt == _BOTON_MANO:
+            # Botón extra 3 → mano física + gemelo digital normal
             MODO_EJECUCION = "HARDWARE_REAL"
+        elif resultado.returncode == 0:
+            # Botón OK → grabación: teleoperación + cámara de cabeza (16-nov)
+            MODO_EJECUCION = "GRABACION"
         elif resultado.returncode == 1 and not stdout_txt and not stderr_txt:
             # Botón Cancelar (el último) → funcionamiento autónomo
             MODO_EJECUCION = "AUTONOMO"
@@ -214,7 +221,9 @@ def main():
         ejecutar_autonomo(globals())
         return
     modo_sliders = MODO_EJECUCION == "GEMELO_SLIDERS"
-    mano_fisica  = MODO_EJECUCION in ("HARDWARE_REAL", "GEMELO_SLIDERS")   # OrcaHand por USB
+    # 16-nov: GRABACION = HARDWARE_REAL (misma teleoperación, mismo FR5 con pedal) + cámara de cabeza
+    modo_grabacion = MODO_EJECUCION == "GRABACION"
+    mano_fisica  = MODO_EJECUCION in ("HARDWARE_REAL", "GEMELO_SLIDERS", "GRABACION")   # OrcaHand por USB
     # 13-nov: en GEMELO_SLIDERS el brazo va con los sliders y los dedos con el guante MANUS: las
     # cámaras OAK-D no hacen falta y NO se abren (SLIDERS_SIN_CAMARAS = False → como antes).
     sin_camaras  = modo_sliders and bool(globals().get("SLIDERS_SIN_CAMARAS", True))
@@ -228,7 +237,8 @@ def main():
     # En SIMULACION solo si FR5_REAL_ACTIVO = True (como antes).
     fr5 = None
     _cfg_fr5 = dict(globals())
-    _pref_fr5 = {"GEMELO_SLIDERS": "SLIDERS", "HARDWARE_REAL": "TELEOP_REAL"}.get(MODO_EJECUCION)
+    _pref_fr5 = {"GEMELO_SLIDERS": "SLIDERS", "HARDWARE_REAL": "TELEOP_REAL",
+                 "GRABACION": "TELEOP_REAL"}.get(MODO_EJECUCION)
     _fr5_por_modo = _pref_fr5 is not None and bool(globals().get(f"{_pref_fr5}_CON_FR5", True))
     if _fr5_por_modo:
         _cfg_fr5["FR5_SIMULACRO"] = bool(globals().get(f"{_pref_fr5}_FR5_SIMULACRO", False))
@@ -403,7 +413,18 @@ def main():
     # a la palma (cámara de cabeza si está libre, o la mesa del taller [3] en MuJoCo). Lo mismo
     # alimenta al modo IA [I]. Si algo falta se graba vacío (NaN) y la red lo sabe.
     fuentes_ia = None
-    if globals().get("IA_FUENTES_GRABACION", True):
+    # 16-nov (modo GRABACION): la cámara de cabeza del autónomo (herramientas, pelotas, mapa)
+    cabeza_grab, mundo_grab = None, None
+    agarre_grab = None      # 16-nov: agarre asistido (planificador → postura de agarre → relativo + pedal)
+    if modo_grabacion:
+        try:
+            from skill_shield.ia.cabeza import CamaraCabeza
+            cabeza_grab = CamaraCabeza.lanzar(globals(), os.path.dirname(os.path.abspath(__file__)),
+                                              con_mapa=bool(globals().get("GRABACION_MAPA", True)))
+        except Exception as _e_cab:
+            print(f"⚠️  GRABACIÓN: no se pudo lanzar la cámara de cabeza ({_e_cab}): sin objetos ni mapa.")
+            cabeza_grab = None
+    if globals().get("IA_FUENTES_GRABACION", True) or cabeza_grab is not None:
         try:
             from skill_shield.ia.fuentes import FuenteObjetosSim, crear_fuentes_teleop
             _obj_sim_ia = (FuenteObjetosSim(datos, {_n: _v[0] for _n, _v in taller.objetos.items()},
@@ -418,11 +439,17 @@ def main():
                 # cámara de cabeza solo en la teleoperación con cámaras y si no la usa (cámara A
                 # sola); en el gemelo con sliders no se abre ninguna cámara (13-nov)
                 objetos_sim=_obj_sim_ia, camara_libre=not sin_camaras and not MULTICAMARA_ACTIVA,
-                hardware=mano_fisica and not modo_sliders)
+                hardware=mano_fisica and not modo_sliders,
+                objetos_camara=cabeza_grab.fuente_objetos if cabeza_grab is not None else None)
             grabador.fuentes = fuentes_ia
         except Exception as _e_fu:
             print(f"⚠️  IA: se grabará sin el mundo (formato 2): {_e_fu}")
             fuentes_ia = None
+    if cabeza_grab is not None:
+        from skill_shield.ia.cabeza import MundoGrabacion
+        mundo_grab = MundoGrabacion(cabeza_grab, fuentes_ia, modelo=modelo, cfg=globals())
+        if fuentes_ia is not None:
+            fuentes_ia.frenado = lambda: mundo_grab.frenando       # ev:frenado en cada fila
 
     def _zenity(args):
         """Diálogo de zenity (texto devuelto) o None si no hay zenity / se cancela."""
@@ -466,6 +493,13 @@ def main():
             subprocess.Popen([sys.executable, "-m", "skill_shield.ia.act"] + list(args),
                              stdout=_f, stderr=subprocess.STDOUT,
                              cwd=os.path.dirname(os.path.abspath(__file__)))
+
+    def _medida_humano(teleop, t):
+        """16-nov: tu mano ya en el mundo del robot (p_muneca, R_mano) si la teleop la acaba de medir."""
+        o, t_o = getattr(teleop, "obj_prev", None), getattr(teleop, "t_obj", None)
+        if o is None or t_o is None or t - t_o > float(getattr(teleop.cfg, "hold_s", 0.3)):
+            return None
+        return o
 
     def _parar_grabacion(motivo=""):
         """Cierra el episodio en curso (si lo hay) y lo guarda en episodios/<tarea>/."""
@@ -848,10 +882,20 @@ def main():
             else:
                 print("⚡ Conectando OAK-D (puede tardar ~2 s)...")
 
+            # 16-nov (GRABACION): las cámaras cruzadas de la teleoperación son la A y la C; la B es la
+            # de cabeza (la abre otro proceso, skill_shield/ia/cabeza.py) y no se toca aquí
+            _mxid_sec = CAM_C_MXID if modo_grabacion else None
+            _abrir_sec = MULTICAMARA_ACTIVA and (not modo_grabacion or bool(CAM_C_MXID))
+            _ruta_ext_cam = globals().get("GRABACION_EXTRINSECAS_ARCHIVO") if modo_grabacion else None
+            if modo_grabacion and MULTICAMARA_ACTIVA and not CAM_C_MXID and not sin_camaras:
+                print("ℹ️  GRABACIÓN: sin CAM_C_MXID en config.py → teleoperación con la cámara A sola "
+                      "(la B es la de cabeza).")
             with (nullcontext() if sin_camaras else
-                  abrir_dispositivo(pipeline, CAM_A_MXID, excluir=(CAM_B_MXID,))) as device, \
-                    (CamaraSecundaria(excluir=(device.getMxId(),))
-                     if MULTICAMARA_ACTIVA and device is not None else nullcontext()) as cam_b:
+                  abrir_dispositivo(pipeline, CAM_A_MXID,
+                                    excluir=(CAM_B_MXID, CAM_C_MXID if modo_grabacion else None))) as device, \
+                    (CamaraSecundaria(mxid=_mxid_sec,
+                                      excluir=(device.getMxId(), CAM_B_MXID if modo_grabacion else None))
+                     if _abrir_sec and device is not None else nullcontext()) as cam_b:
                 # (estas no dependen de la cámara)
                 buf_hd  = deque(maxlen=6)
                 t_ult_print_pinza = 0.0
@@ -900,7 +944,7 @@ def main():
                 fusor_b = None
                 ent_b   = None
                 if cam_b is not None:
-                    _ext = cargar_extrinsecas(device.getMxId(), cam_b.mxid)
+                    _ext = cargar_extrinsecas(device.getMxId(), cam_b.mxid, ruta=_ruta_ext_cam)
                     if _ext is not None:
                         fusor_b = FusorBrazo(_ext[0], _ext[1], BRAZO_HUMANO)
                         print(f"🔀 Fusión A+B activa (calibración {_ext[2].get('metodo', '?')}, "
@@ -948,7 +992,7 @@ def main():
                     def _guardar_ext_v2(_R, _t, _inf):
                         from skill_shield.teleop_fr5.autocalib import guardar_extrinsecas
                         from skill_shield.vision.multicamara import _ruta_extrinsecas
-                        _r = guardar_extrinsecas(_ruta_extrinsecas(), _R, _t, _inf, _mxid_a_v2, _mxid_b_v2)
+                        _r = guardar_extrinsecas(_ruta_extrinsecas(_ruta_ext_cam), _R, _t, _inf, _mxid_a_v2, _mxid_b_v2)
                         print(f"💾 Extrínseca A↔B guardada en {os.path.basename(_r)} (la anterior, en .bak_*)")
                     if globals().get("SOPORTE_HOMBROS", False):
                         _ent_v2 = entorno_soporte_hombros(SOPORTE_SUELO_Z)
@@ -1006,6 +1050,11 @@ def main():
                     teleop_v2.cadena.comparar_con_dh()
                     print(f"🦾 TELEOP FR5 v2 activa: cámaras {list(_cams_v2)}, alcance robot "
                           f"{teleop_v2.retarget.alcance_robot:.2f} m, suelo {_ent_v2.z_suelo}")
+                    # 16-nov (GRABACION): el mapa de la cámara de cabeza entra en los choques de la IK
+                    # → el brazo frena contra los obstáculos (salvo en la zona de agarre del objetivo)
+                    if mundo_grab is not None and globals().get("GRABACION_FRENAR", True):
+                        teleop_v2.ik.col = mundo_grab.nueva_colision(teleop_v2.ik.col, globals())
+                        print("🧱 GRABACIÓN: el brazo frena contra los obstáculos del mapa de la cámara de cabeza.")
                 t_ult_print_v2 = 0.0
                 t_prev_v2 = None
                 # 5-nov: pedal para ARMAR el brazo tras calibrar (skill_shield/teleop_fr5/pedal.py)
@@ -1015,6 +1064,21 @@ def main():
                     pedal_v2 = Pedal.desde_config(globals())
                     print(f"🦶 Armado del brazo: {pedal_v2.descripcion}; entrada a "
                           f"{globals().get('TELEOP_FR5_V_ENTRADA', 0.15)} rad/s")
+                # 16-nov (GRABACION): AGARRE ASISTIDO (skill_shield/ia/agarre_asistido.py). [L] el
+                # planificador lleva la mano a la postura de agarre; con el pedal, el agarre se hace en
+                # modo RELATIVO (embrague) y se graba solo: pisar = empieza, soltar = se guarda.
+                agarre_grab = None
+                if mundo_grab is not None and teleop_v2 is not None \
+                        and globals().get("GRABACION_AGARRE_ASISTIDO", True):
+                    if pedal_v2 is None or pedal_v2.modo is None:
+                        print("⚠️  GRABACIÓN: el agarre asistido necesita el pedal (TELEOP_FR5_PEDAL): desactivado.")
+                    else:
+                        from skill_shield.ia.agarre_asistido import AgarreAsistido
+                        agarre_grab = AgarreAsistido(globals(), os.path.dirname(os.path.abspath(__file__)),
+                                                     teleop_v2.cadena)
+                        print("🤲 GRABACIÓN: agarre asistido → [O] objeto · [L] llevar la mano · PEDAL = grabar "
+                              "el agarre (soltar = guardar) · [B] bloquear giro · [K] salir · [M] fallido")
+                t_prev_ag = None
                 # 28-oct (fluidez): la v2 en un hilo aparte, solapada con la cámara y MediaPipe
                 teleop_v2_par = None
                 if teleop_v2 is not None and globals().get("TELEOP_FR5_EN_PARALELO", True):
@@ -1943,6 +2007,7 @@ def main():
                         perfil.marca("dedos")
 
                     # ══ TELEOP FR5 v2: muñeca + codo (2 cámaras) → IK de 6 ejes → joint1..6 ══
+                    _obj_hum = None          # 16-nov: tu mano en el mundo del robot (agarre asistido)
                     if teleop_v2 is not None and estado["camara_activa"]:
                         _t_v2 = time.perf_counter()
                         _dt_v2 = None if t_prev_v2 is None else min(_t_v2 - t_prev_v2, 0.1)
@@ -1969,6 +2034,7 @@ def main():
                             # resultado del fotograma ANTERIOR (el hilo lo calculó mientras esta
                             # vuelta esperaba a la cámara y a MediaPipe) y se lanza el de este
                             _q_v2, _info_v2 = teleop_v2_par.recoger()
+                            _obj_hum = _medida_humano(teleop_v2, _t_v2)    # (el hilo está parado aquí)
                             _alimentar_registro = registro_v2 is not None and registro_v2.activo
                             if _alimentar_registro:                 # (el hilo está parado aquí)
                                 _fin_reg = registro_v2.alimentar(_t_v2, teleop_v2)
@@ -1978,6 +2044,7 @@ def main():
                             _q_v2, _info_v2 = teleop_v2.actualizar(
                                 {"A": _obs_a, "B": _obs_b}, _t_v2, mano=_mano_v2,
                                 q_actual=_q_act_v2, dt=_dt_v2)
+                            _obj_hum = _medida_humano(teleop_v2, _t_v2)
                             _alimentar_registro = registro_v2 is not None and registro_v2.activo
                             if _alimentar_registro:
                                 _fin_reg = registro_v2.alimentar(_t_v2, teleop_v2)
@@ -1988,7 +2055,8 @@ def main():
                             else:
                                 cv2.putText(frame_bgr, f"REGISTRO QUIETO {registro_v2.restante(_t_v2):4.1f} s - no te muevas",
                                             (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
-                        if _q_v2 is not None and _est_v2 in ("exacta", "aprox", "transicion", "bloqueado"):
+                        if _q_v2 is not None and _est_v2 in ("exacta", "aprox", "transicion", "bloqueado") \
+                                and not (agarre_grab is not None and agarre_grab.controla_brazo):
                             _enviar_brazo((0, 1, 2, 3, 4, 5), [float(_v) for _v in _q_v2])
                             brazo_imit_activo = True
                         if _est_v2 == "calibrando":
@@ -2029,7 +2097,32 @@ def main():
                         _ev_pedal = pedal_v2.tecla(key) or pedal_v2.actualizar()
                         if pedal_v2.modo in ("tecla", "teclado") and key in pedal_v2.teclas:
                             key = -1                     # la tecla del pedal no hace nada más
-                        if _ev_pedal == "armar":
+                        if agarre_grab is not None and agarre_grab.controla_brazo \
+                                and _ev_pedal in ("armar", "desarmar"):
+                            # 16-nov (GRABACION): el pedal es del agarre asistido
+                            _ev_ag = agarre_grab.pedal(
+                                _ev_pedal == "armar", obj_humano=_obj_hum,
+                                q_robot=(agarre_grab.q_cmd if agarre_grab.q_cmd is not None
+                                         else [float(datos.ctrl[_i]) for _i in _idx_ctrl_fr5]))
+                            if agarre_grab.aviso and _ev_pedal == "armar" and _ev_ag is None \
+                                    and agarre_grab.estado in ("listo", "relativo") and not agarre_grab.rel.enganchado:
+                                print(f"⚠ PEDAL: {agarre_grab.aviso}")
+                            if _ev_ag == "grabar":
+                                if grabador.activo:
+                                    _parar_grabacion("empieza otro agarre")
+                                if fisica is None or not tarea_actual:
+                                    print("⚠ No se graba: " + ("hace falta FISICA_EN_HILO = True" if fisica is None
+                                                               else "no hay tarea (pulsa [Shift+G])"))
+                                else:
+                                    if fuentes_ia is not None:
+                                        fuentes_ia.fijar_objetivo(agarre_grab.objetivo)
+                                    grabador.iniciar(tarea_actual, datos)
+                                    print(f"🔴 AGARRE: GRABANDO (tarea '{tarea_actual}', objetivo "
+                                          f"{(agarre_grab.objetivo or {}).get('nombre', '?')}). Suelta el pedal "
+                                          "para terminar; [M] si sale mal.")
+                            elif _ev_ag == "parar_grabacion":
+                                _parar_grabacion("pedal suelto")
+                        elif _ev_pedal == "armar":
                             if estado["camara_activa"] and teleop_v2.calibrado:
                                 teleop_v2.armar()
                                 print("🟠 PEDAL: brazo ARMADO → entra despacio hacia tu postura")
@@ -2039,6 +2132,41 @@ def main():
                         elif _ev_pedal == "desarmar":
                             teleop_v2.desarmar()
                             print("⏸ PEDAL: brazo DESARMADO → quieto")
+
+                    # ══ 16-nov (GRABACION): AGARRE ASISTIDO — el brazo lo lleva el plan o el modo relativo ══
+                    if agarre_grab is not None:
+                        _t_ag = time.perf_counter()
+                        _dt_ag = None if t_prev_ag is None else min(_t_ag - t_prev_ag, 0.1)
+                        t_prev_ag = _t_ag
+                        if agarre_grab.pisado and (pedal_v2 is None or not pedal_v2.armado):
+                            # el pedal se desarmó por otro lado (FR5 en error, [A], [S]…): como soltarlo
+                            if agarre_grab.pedal(False) == "parar_grabacion":
+                                _parar_grabacion("pedal desarmado")
+                        if agarre_grab.controla_brazo:
+                            if teleop_v2 is not None:     # la teleop solo MIDE tu mano (no manda)
+                                if agarre_grab.necesita_humano and estado["camara_activa"] and teleop_v2.calibrado:
+                                    if not teleop_v2.armado:
+                                        teleop_v2.armar()
+                                elif teleop_v2.armado:
+                                    teleop_v2.desarmar()
+                            _fr5_ag = fr5 is not None and fr5.conectado
+                            _q_ag = agarre_grab.paso(
+                                _dt_ag, q_real=fr5.q_real_rad() if fr5 is not None else None, obj_humano=_obj_hum,
+                                col=getattr(teleop_v2.ik, "col", None) if teleop_v2 is not None else None,
+                                mover=not _fr5_ag or fr5_enviando)
+                            if _q_ag is not None and (agarre_grab.quiere_mover or not _fr5_ag):
+                                _enviar_brazo((0, 1, 2, 3, 4, 5), [float(_v) for _v in _q_ag])
+                                brazo_imit_activo = True
+                            if not agarre_grab.controla_brazo and agarre_grab.aviso:   # se canceló solo
+                                print(f"⚠ AGARRE: {agarre_grab.aviso}")
+                                if grabador.activo:
+                                    _parar_grabacion("agarre cancelado")
+                                if pedal_v2 is not None:
+                                    pedal_v2.desarmar()
+                        cv2.putText(frame_bgr, agarre_grab.texto()[:110], (10, ALTO_CAM - 70),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                                    (0, 0, 255) if agarre_grab.estado == "agarrando" else
+                                    (0, 255, 0) if agarre_grab.estado == "listo" else (255, 255, 0), 1)
 
                     # ══ GEMELO_SLIDERS (9-nov): el brazo sigue a la ventana de sliders ══
                     # La ventana enseña la pose REAL (FR5, o simulador si no hay FR5) y, ARMADA,
@@ -2118,6 +2246,10 @@ def main():
                             _armar_fr5 = (teleop_v2 is not None and pedal_v2 is not None
                                           and pedal_v2.modo is not None
                                           and estado["camara_activa"] and teleop_v2.armado)
+                            if agarre_grab is not None and agarre_grab.controla_brazo:
+                                # 16-nov (GRABACION): con el agarre asistido, el pedal y el plan / relativo
+                                _armar_fr5 = (pedal_v2 is not None and pedal_v2.modo is not None
+                                              and estado["camara_activa"] and agarre_grab.quiere_mover)
                         if not _armar_fr5 or not fr5_enviando:
                             if fr5_enviando:
                                 fr5.habilitar(False)
@@ -2149,6 +2281,26 @@ def main():
                         except Exception as _e_f:
                             print(f"⚠ Brazo fantasma desactivado ({_e_f})")
                             fantasma = None
+
+                    # 16-nov (modo GRABACION): cámara de cabeza → objetivo, mapa en los choques,
+                    # ¿frenado?, y objetos + obstáculos en MuJoCo (detrás del fantasma)
+                    if mundo_grab is not None:
+                        try:
+                            _q_sim_g = np.array([float(datos.qpos[_a]) for _a in qpos_idx_brazo])
+                            _info_g = None
+                            if agarre_grab is not None and agarre_grab.controla_brazo:
+                                _info_g = agarre_grab.rel.info if agarre_grab.rel.enganchado else None
+                            elif teleop_v2 is not None:
+                                _info_g = getattr(teleop_v2.ik, "info", None) or getattr(teleop_v2, "info", None)
+                            mundo_grab.paso(datos, _q_sim_g, fr5.q_real_rad() if fr5 is not None else None, _info_g)
+                            mundo_grab.dibujar(visor, base=visor.user_scn.ngeom if fantasma is not None else None)
+                            cv2.putText(frame_bgr, mundo_grab.texto(), (10, ALTO_CAM - 50),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                                        (0, 0, 255) if mundo_grab.frenando else (0, 255, 255), 1)
+                        except Exception as _e_g:
+                            if not globals().get("_aviso_grab"):
+                                globals()["_aviso_grab"] = True
+                                print(f"⚠️  GRABACIÓN: fallo con la cámara de cabeza ({_e_g}); sigo intentándolo.")
 
                     # 9-nov: diagnóstico del gemelo — real (FR5) vs simulador vs comando, en grados
                     if fr5 is not None and globals().get("GEMELO_DEBUG", True) \
@@ -2463,6 +2615,59 @@ def main():
                             else:
                                 print("   Cancelado.")
 
+                    elif modo_grabacion and key in (ord("o"), ord("O")) and mundo_grab is not None:
+                        # 16-nov: el objeto a coger (por defecto, el más cercano a la palma)
+                        if agarre_grab is not None and agarre_grab.estado not in ("libre",):
+                            print("ℹ️  [O] El objetivo se cambia antes de [L] (o tras [K]).")
+                        else:
+                            _n_o = mundo_grab.siguiente_objetivo()
+                            print(f"🎯 [O] Objetivo: {_n_o or 'el más cercano a la mano (automático)'}")
+
+                    elif modo_grabacion and key in (ord("l"), ord("L")) and agarre_grab is not None:
+                        # 16-nov: el planificador lleva la mano a la postura de agarre (o cancela)
+                        if agarre_grab.estado in ("planificando", "llevando", "afinando"):
+                            agarre_grab.cancelar("cancelado con [L]")
+                            pedal_v2.desarmar()
+                            print("⏹ [L] Llevar la mano: cancelado (el robot se queda donde está).")
+                        elif not estado["camara_activa"] or not teleop_v2.calibrado:
+                            print("⚠ [L] Primero calibra la teleoperación ([A] + T-pose): el agarre se hace con tu mano.")
+                        elif agarre_grab.rel.enganchado:
+                            print("⚠ [L] Suelta antes el pedal.")
+                        else:
+                            if grabador.activo:
+                                _parar_grabacion("[L]")
+                            if tarea_actual is None:
+                                with _soltar():
+                                    tarea_actual = _pedir_tarea(tarea_actual)
+                            _det_l = mundo_grab.objetivo_para_plan()
+                            _q_l = fr5.q_real_rad() if fr5 is not None else None
+                            if _q_l is None:
+                                _q_l = [float(datos.qpos[_a]) for _a in qpos_idx_brazo]
+                            if agarre_grab.pedir_plan(_q_l, _det_l, mapa=mundo_grab.mapa_ult):
+                                # el objetivo se queda en éste (zona de agarre del mapa, lo que se graba)
+                                mundo_grab.elegido = f"{_det_l.get('tipo')}:{_det_l.get('id')}"
+                                pedal_v2.desarmar()
+                                teleop_v2.desarmar()
+                                print(f"🧭 [L] Planificando cómo llevar la mano a {_det_l.get('nombre', '?')}… "
+                                      "luego pisa el PEDAL para que vaya (soltar = se para).")
+                            else:
+                                print(f"⚠ [L] {agarre_grab.aviso}")
+
+                    elif modo_grabacion and key in (ord("b"), ord("B")) and agarre_grab is not None:
+                        agarre_grab.bloquear_giro = not agarre_grab.bloquear_giro
+                        if agarre_grab.rel.enganchado and _obj_hum is not None:   # sin salto al cambiar
+                            agarre_grab.rel.enganchar(_obj_hum, agarre_grab.q_cmd)
+                        print("🔒 [B] Giro BLOQUEADO: en relativo solo cuenta la traslación"
+                              if agarre_grab.bloquear_giro else "🔓 [B] Giro libre: la mano del robot gira con la tuya")
+
+                    elif modo_grabacion and key in (ord("k"), ord("K")) and agarre_grab is not None \
+                            and agarre_grab.controla_brazo:
+                        _parar_grabacion("[K]")
+                        agarre_grab.cancelar("")
+                        pedal_v2.desarmar()
+                        teleop_v2.desarmar()
+                        print("↩️  [K] Vuelta a la teleoperación normal (pisa el pedal para armar).")
+
                     elif key == ord("q"):
                         salir = True
 
@@ -2565,6 +2770,8 @@ def main():
 
     if fuentes_ia is not None:             # 16-nov: hilo de la mano real y cámara de objetos
         fuentes_ia.cerrar()
+    if cabeza_grab is not None:            # 16-nov: proceso de la cámara de cabeza (GRABACION)
+        cabeza_grab.cerrar()
     if mano_real is not None:
         mano_real.desconectar()
     if guante is not None:

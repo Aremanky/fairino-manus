@@ -40,8 +40,8 @@ import torch.nn as nn
 
 from config import *    # noqa: F401,F403  (N_ACT, ARM_JOINTS, ARCHIVO_PESOS, RUTA_XML…)
 from skill_shield.ia.episodios import (Conjunto, compatibles, describir, directorios, disposicion, exito,
-                                       leer_episodio, listar_episodios, listar_modelos, listar_tareas,
-                                       nombre_seguro, receta_para)
+                                       frac_frenado, leer_episodio, listar_episodios, listar_modelos,
+                                       listar_tareas, nombre_seguro, receta_para)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -76,6 +76,7 @@ RUIDO_ENTRADA       = 0.08    # ruido en la entrada normalizada (robustez)
 P_SIN_TACTIL        = 0.15    # a veces se le quitan los táctiles: sigue funcionando sin ellos
 PESO_RELLENO        = 1.0     # peso de las acciones repetidas tras el final (quedarse quieta)
 PESO_PROGRESO       = 1.0
+IA_MAX_FRENADO      = float(globals().get("IA_MAX_FRENADO", 0.2))   # (config) episodios más frenados: fuera
 
 EPISODIOS_DIR, MODELOS_DIR = directorios()    # cada TAREA: episodios/<tarea>/episodio_XXXX.csv
 
@@ -277,7 +278,7 @@ def _columnas(grupos, nombres):
 def entrenar(tareas, modelo=None, episodios_dir=None, modelos_dir=None, accion="auto", ventana=None,
              chunk=CHUNK_IA, pasos=IA_PASOS, lote=IA_LOTE, lr=IA_LR, incluir_fallidos=False, con_tactil=None,
              con_objeto=None, semilla=0, cpu=False, eval_cada=IA_EVAL_CADA, paciencia=IA_PACIENCIA_EVALS,
-             n_checkpoints=IA_N_CHECKPOINTS, ensayar=True):
+             n_checkpoints=IA_N_CHECKPOINTS, ensayar=True, max_frenado=None, marco="agarre"):
     """Entrena UN modelo con los episodios de una o varias tareas. Devuelve la ruta del .pth o None."""
     episodios_dir = episodios_dir or EPISODIOS_DIR
     modelos_dir = modelos_dir or MODELOS_DIR
@@ -287,7 +288,8 @@ def entrenar(tareas, modelo=None, episodios_dir=None, modelos_dir=None, accion="
     print(f"\n🧠 ENTRENANDO '{nombre}' con {len(tareas)} tarea(s): {', '.join(tareas)}")
 
     # ── 1. episodios ──
-    eps, tarea_de, n_fallidos = [], [], 0
+    max_frenado = IA_MAX_FRENADO if max_frenado is None else float(max_frenado)
+    eps, tarea_de, n_fallidos, frenados = [], [], 0, []
     for ti, t in enumerate(tareas):
         rutas = listar_episodios(os.path.join(episodios_dir, t))
         if not rutas:
@@ -301,11 +303,18 @@ def entrenar(tareas, modelo=None, episodios_dir=None, modelos_dir=None, accion="
             if not incluir_fallidos and not exito(ep):
                 n_fallidos += 1
                 continue
+            if frac_frenado(ep) > max_frenado:           # modo GRABACION: empujaba contra un obstáculo
+                frenados.append(f"{t}/{os.path.basename(r)} ({100 * frac_frenado(ep):.0f} %)")
+                continue
             ep["tarea"] = t
             eps.append(ep)
             tarea_de.append(ti)
     if n_fallidos:
         print(f"ℹ️  {n_fallidos} episodio(s) marcado(s) como fallidos ([M]): no se usan.")
+    if frenados:
+        print(f"ℹ️  {len(frenados)} episodio(s) con el brazo frenado por obstáculos más del "
+              f"{100 * max_frenado:.0f} % del tiempo: no se usan ({', '.join(frenados)}). "
+              "Para usarlos: --max-frenado 1")
     usados, avisos = compatibles(eps)
     for a in avisos:
         print("⚠️  " + a)
@@ -319,7 +328,7 @@ def entrenar(tareas, modelo=None, episodios_dir=None, modelos_dir=None, accion="
     # ── 2. qué ve y qué hace la red ──
     try:
         receta = receta_para(eps, tareas, accion=accion, ventana=ventana, chunk=chunk,
-                             con_tactil=con_tactil, con_objeto=con_objeto)
+                             con_tactil=con_tactil, con_objeto=con_objeto, marco=marco)
     except ValueError as e:
         print(f"❌ {e}")
         return None
@@ -543,12 +552,17 @@ def _main(argv=None):
     ap.add_argument("--incluir-fallidos", action="store_true", help="usar también los marcados con [M]")
     ap.add_argument("--sin-tactil", action="store_true")
     ap.add_argument("--sin-objeto", action="store_true")
+    ap.add_argument("--max-frenado", type=float, default=None,
+                    help=f"no usar episodios con el brazo frenado más de esta fracción (por defecto {IA_MAX_FRENADO})")
+    ap.add_argument("--marco", default="agarre", choices=("agarre", "mundo"),
+                    help="pelotas: ejes de la mano al empezar (agarre, por defecto) o del mundo (como antes)")
     ap.add_argument("--cpu", action="store_true", help="entrenar en la CPU aunque haya GPU")
     ap.add_argument("--semilla", type=int, default=0)
     a = ap.parse_args(argv)
     kw = dict(accion=a.accion, ventana=a.ventana, chunk=a.chunk, pasos=a.pasos, lote=a.lote,
               incluir_fallidos=a.incluir_fallidos, con_tactil=False if a.sin_tactil else None,
-              con_objeto=False if a.sin_objeto else None, cpu=a.cpu, semilla=a.semilla)
+              con_objeto=False if a.sin_objeto else None, cpu=a.cpu, semilla=a.semilla, max_frenado=a.max_frenado,
+              marco=a.marco)
     if a.todas:
         entrenar_todas_las_tareas(**kw)
         return 0

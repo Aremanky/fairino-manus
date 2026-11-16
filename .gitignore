@@ -15,6 +15,7 @@ MANUS_Core_3.2.1_SDK_Linux/MANUS Core Dashboard (Linux build)/
 venv_nivel6/
 taladro/textures_detailed.zip
 camaras_extrinsecas.json*
+camaras_extrinsecas_*.json*
 *.bak*
 
 # SDK de MANUS: subirlo entero (salvo el Dashboard)
