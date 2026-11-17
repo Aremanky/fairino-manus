@@ -96,8 +96,14 @@ class MapaOcupacion:
     L_MIN, L_MAX = -2.0, 3.5
     UMBRAL_OCUPADO, UMBRAL_LIBRE = 2.0, -0.6   # 11-nov: 3 aciertos seguidos (antes 2)
 
+    W_MIN, D_OCUPADO, D_LIBRE = 3.0, 0.35, 0.6   # (TSDF) peso mínimo para fiarse; umbrales de distancia
+
     def __init__(self, limites, resolucion=0.02, olvido_s=30.0, z_suelo=None, margen_robot=0.03,
-                 margen_suelo=0.015, min_puntos=4, min_grupo=4, z_min=0.35):
+                 margen_suelo=0.015, min_puntos=4, min_grupo=4, z_min=0.35, metodo="impactos",
+                 dist_max=None, k_trunc=0.02, w_max=20.0, motor="auto", superficies=False, banda_mesa=None):
+        """metodo (17-nov): "impactos" (contar puntos por cubo, el de siempre) o "tsdf" (fusión de
+        la distancia a la superficie: el ruido se promedia; ver tsdf.py). dist_max: más lejos de esto
+        (m) la profundidad no pone obstáculos. superficies: buscar mesas como planos."""
         lim = np.asarray(limites, float).reshape(3, 2)
         self.res = float(resolucion)
         self.origen = lim[:, 0]
@@ -118,12 +124,46 @@ class MapaOcupacion:
         self.excluir = []                                         # cajas (centro, semi) a ignorar
         self.ultima = dict(puntos=0, robot=0, suelo=0, ms=0.0)
         self.ultimos_puntos = None
+        # (17-nov) TSDF, distancia máxima y mesas como planos
+        self.metodo = str(metodo)
+        self.dist_max = None if dist_max is None else float(dist_max)
+        self.trunc_0, self.k_trunc, self.w_max = 2.0 * self.res, float(k_trunc), float(w_max)
+        self.D = np.ones(self.L.size, np.float32)                 # distancia truncada (TSDF), plana
+        self.W = np.zeros(self.L.size, np.float32)                # su peso
+        self._motor, self.motor = str(motor), None
+        self._observar = None
+        self.buscar_superficies = bool(superficies)
+        self.banda_mesa = banda_mesa                              # m sobre la tapa que se limpian (None: según ruido)
+        from skill_shield.autonomo.tsdf import SeguidorSuperficies
+        self.seguidor = SeguidorSuperficies(olvido_s=self.olvido_s)
+        self._t_planos = 0.0
 
     # ── utilidades ──
     def borrar(self):
         self.L[:] = 0.0
         self.t_visto[:] = 0.0
+        self.D[:] = 1.0
+        self.W[:] = 0.0
+        self.seguidor.borrar()
         self._dist = self._dist_desc = None
+
+    def _ocupado_bruto(self):
+        """Cubos con evidencia de estar ocupados (sin mirar si son recientes ni el tamaño del grupo)."""
+        if self.metodo == "tsdf":
+            # cerca de la superficie: un poco por delante y medio truncado por detrás (más adentro no se
+            # sabe; el planificador rellena hacia abajo lo que hay bajo lo visto)
+            o = ((self.W >= self.W_MIN) & (self.D < self.D_OCUPADO) & (self.D > -0.5)).reshape(self.L.shape)
+            if self.z_suelo is not None:                 # el suelo no es obstáculo (ya lo es en el modelo)
+                kz = int(math.floor((self.z_suelo + self.margen_suelo - self.origen[2]) / self.res))
+                if kz >= 0:
+                    o[:, :, :kz + 1] = False
+            return o
+        return self.L >= self.UMBRAL_OCUPADO
+
+    def _libre_bruto(self):
+        if self.metodo == "tsdf":
+            return ((self.W >= self.W_MIN) & (self.D >= self.D_LIBRE)).reshape(self.L.shape)
+        return self.L <= self.UMBRAL_LIBRE
 
     def indices(self, P):
         """Índices enteros (N x 3) de los puntos y máscara de los que caen dentro."""
@@ -136,14 +176,14 @@ class MapaOcupacion:
         ahora = time.time() if ahora is None else ahora
         e = np.full(self.L.shape, DESCONOCIDO, np.int8)
         reciente = (ahora - self.t_visto) <= self.olvido_s
-        ocupado = (self.L >= self.UMBRAL_OCUPADO) & reciente
+        ocupado = self._ocupado_bruto() & reciente
         if self.min_grupo > 1 and ocupado.any():
             from scipy.ndimage import label
             etiquetas, n = label(ocupado, structure=np.ones((3, 3, 3), bool))   # vecinos en 26 direcciones
             tam = np.bincount(etiquetas.ravel(), minlength=n + 1)
             ocupado &= tam[etiquetas] >= self.min_grupo
         e[ocupado] = OCUPADO
-        e[(self.L <= self.UMBRAL_LIBRE) & reciente] = LIBRE
+        e[self._libre_bruto() & reciente & ~ocupado] = LIBRE
         return e
 
     def centros_ocupados(self, ahora=None):
@@ -183,9 +223,15 @@ class MapaOcupacion:
         capsulas_mano: lo mismo para las piezas de la OrcaHand con su postura real (PiezasMano)."""
         t0 = time.perf_counter()
         ahora = time.time() if ahora is None else ahora
+        if self.metodo == "tsdf":
+            return self._actualizar_tsdf(prof_mm, K, T_mundo_cam, capsulas_robot, ahora, paso, capsulas_mano,
+                                         img_bgr, nube_robot, t0)
         R, t = T_mundo_cam[:3, :3], T_mundo_cam[:3, 3]
         fiables = pixeles_fiables(prof_mm, img_bgr)
-        P = nube_desde_profundidad(prof_mm, K, paso, self.z_min, fiables=fiables) @ R.T + t
+        P = nube_desde_profundidad(prof_mm, K, paso, self.z_min, fiables=fiables)
+        if self.dist_max:                                # (17-nov) distancia real a la cámara
+            P = P[np.linalg.norm(P, axis=1) <= self.dist_max]
+        P = P @ R.T + t
         self.ultimos_puntos = P                          # (para la autocorrección de la calibración)
         n_total = len(P)
         idx, dentro = self.indices(P)
@@ -217,7 +263,7 @@ class MapaOcupacion:
         golpe = aciertos >= self.min_puntos
 
         # libres: la cámara ve MÁS LEJOS que el vóxel en su píxel (pasa a través de él)
-        visto, libre = self._visibilidad(prof_mm, K, T_mundo_cam)
+        visto, libre, tapado = self._visibilidad(prof_mm, K, T_mundo_cam)
         libre &= ~golpe
         self.L[golpe] += self.L_OCUPADO
         self.L[libre] -= self.L_LIBRE
@@ -228,9 +274,123 @@ class MapaOcupacion:
                 self.L[d] = np.minimum(self.L[d], 0.0)
         np.clip(self.L, self.L_MIN, self.L_MAX, out=self.L)
         self.t_visto[golpe | visto] = ahora
+        # (17-nov) lo OCUPADO que ahora tapa algo (casi siempre el propio brazo, que se queda encima de la
+        # mesa) no se olvida: no se puede saber si sigue ahí, así que sigue contando. Antes, a los
+        # olvido_s, la mesa de debajo de la mano desaparecía del mapa y el plan la atravesaba.
+        self.t_visto[tapado & (self.L >= self.UMBRAL_OCUPADO)] = ahora
+        self._superficies(P[~quitar] if len(P) else P, T_mundo_cam, ahora)
         self._dist = self._dist_desc = None
         self.ultima = dict(puntos=n_total, robot=n_robot, suelo=n_suelo,
                            ms=round((time.perf_counter() - t0) * 1000, 1))
+
+    # ── (17-nov) fusión TSDF ──
+    def _actualizar_tsdf(self, prof_mm, K, T_mundo_cam, capsulas_robot, ahora, paso, capsulas_mano, img_bgr,
+                         nube_robot, t0):
+        from skill_shield.autonomo.tsdf import crear_observador, fundir, observar_numpy
+        if self._observar is None:
+            self._observar, self.motor = crear_observador(self._centros, self._motor)
+            print(f"🧱 [mapa] Fusión TSDF con {self.motor}")
+        R, t = T_mundo_cam[:3, :3], T_mundo_cam[:3, 3]
+        fiables = pixeles_fiables(prof_mm, img_bgr)
+        p = prof_mm[::paso, ::paso].astype(np.float32) * 0.001
+        ok = (p > self.z_min) & fiables[::paso, ::paso]
+        h, w = p.shape
+        Ks = np.array(K, float).copy()
+        Ks[0, 0] /= paso; Ks[0, 2] /= paso; Ks[1, 1] /= paso; Ks[1, 2] /= paso
+        v, u = np.mgrid[0:h, 0:w]
+        Pc = np.stack([(u - Ks[0, 2]) / Ks[0, 0] * p, (v - Ks[1, 2]) / Ks[1, 1] * p, p], -1)
+        rango = np.linalg.norm(Pc, axis=-1)              # distancia REAL a la cámara (no solo el eje z)
+        lejos = ok & (rango > self.dist_max) if self.dist_max else np.zeros_like(ok)
+        cerca = ok & ~lejos
+        ic = np.nonzero(cerca.ravel())[0]
+        P = Pc.reshape(-1, 3)[ic] @ R.T + t
+        self.ultimos_puntos = P
+        robot = np.zeros(len(P), bool)
+        for grupo in (capsulas_robot, capsulas_mano):
+            robot |= self._cerca(P, grupo)
+        if nube_robot is not None and len(nube_robot):
+            robot |= self._cerca_nube(P, nube_robot, self.margen_robot)
+        suelo = (P[:, 2] < self.z_suelo + self.margen_suelo) if self.z_suelo is not None else np.zeros(len(P), bool)
+        excl = np.zeros(len(P), bool)
+        for caja in self.excluir:
+            excl |= _en_caja(P, caja)
+        sup = ~(robot | suelo | excl)
+        d_sup = np.zeros(h * w, np.float32)
+        d_lib = np.zeros(h * w, np.float32)
+        pz = p.ravel()
+        d_sup[ic[sup]] = pz[ic[sup]]
+        d_lib[ic] = np.where(robot, np.maximum(pz[ic] - self.margen_robot - self.res, 0.0), pz[ic])
+        if self.dist_max:                                # lejos: libre hasta dist_max, sin superficies
+            il = np.nonzero(lejos.ravel())[0]
+            d_lib[il] = self.dist_max * pz[il] / np.maximum(rango.ravel()[il], 1e-6)   # en z de la cámara
+        T_cm = np.linalg.inv(T_mundo_cam)
+        args = (self._centros, T_cm, d_sup.reshape(h, w), d_lib.reshape(h, w), Ks, self.trunc_0, self.k_trunc)
+        try:
+            idx, obs, tap = self._observar(*args)
+        except Exception as e:                           # la GPU nunca debe tirar el mapa
+            if self._observar is not observar_numpy:
+                print(f"⚠️  [mapa] Fallo de la TSDF en la GPU ({e}): sigo con numpy (CPU).")
+                self._observar, self.motor = observar_numpy, "numpy (CPU)"
+            idx, obs, tap = observar_numpy(*args)
+        fundir(self.D, self.W, idx, obs, self.w_max)
+        tv = self.t_visto.reshape(-1)
+        tv[idx] = ahora
+        ocup = self._ocupado_bruto().reshape(-1)
+        tv[tap[ocup[tap]]] = ahora                       # lo ocupado que se ve tapado no se olvida
+        for caja in self.excluir:                        # lo excluido no es obstáculo (tampoco lo de antes)
+            dentro = _en_caja(self._centros, caja)
+            self.W[dentro] = 0.0
+        self._superficies(P[sup], T_mundo_cam, ahora)
+        self._dist = self._dist_desc = None
+        self.ultima = dict(puntos=int(len(P)), robot=int(robot.sum()), suelo=int(suelo.sum()),
+                           ms=round((time.perf_counter() - t0) * 1000, 1))
+
+    # ── (17-nov) mesas como planos ──
+    def _superficies(self, P, T_mundo_cam, ahora):
+        """Busca planos horizontales (como mucho 2 veces por segundo) y, en las mesas estables, deja
+        la tapa como UNA capa a su altura y limpia el ruido que queda justo encima."""
+        if not self.buscar_superficies:
+            return
+        from skill_shield.autonomo.tsdf import planos_horizontales
+        if ahora - self._t_planos >= 0.5 and len(P):
+            self._t_planos = ahora
+            alto = P[:, 2] > ((self.z_suelo if self.z_suelo is not None else -np.inf) + 0.10)
+            self.seguidor.actualizar(planos_horizontales(P[alto], self.res), ahora)
+        self.aplicar_superficies(T_mundo_cam)
+
+    def superficies(self):
+        """Mesas estables: [(z, vértices xy del contorno)]."""
+        return self.seguidor.estables()
+
+    def aplicar_superficies(self, T_mundo_cam=None):
+        from skill_shield.autonomo.tsdf import dentro_poligono
+        sup = self.superficies()
+        if not sup:
+            return
+        nx, ny, nz = self.n
+        xy = self._centros.reshape(nx, ny, nz, 3)[:, :, 0, :2].reshape(-1, 2)
+        Dg, Wg = self.D.reshape(self.L.shape), self.W.reshape(self.L.shape)
+        for z, poli in sup:
+            en = dentro_poligono(poli, xy).reshape(nx, ny)
+            if not en.any():
+                continue
+            kz = int(math.floor((z - self.origen[2]) / self.res))
+            if not 0 <= kz < nz:
+                continue
+            banda = self.banda_mesa
+            if banda is None:                            # ruido del estéreo a esa distancia
+                d = 1.0
+                if T_mundo_cam is not None:
+                    d = float(np.linalg.norm(np.r_[np.asarray(poli).mean(0), z] - T_mundo_cam[:3, 3]))
+                banda = 2.0 * self.res + self.k_trunc * d * d
+            k1 = min(nz, kz + 1 + int(math.ceil(banda / self.res)))
+            if self.metodo == "tsdf":
+                Dg[en, kz], Wg[en, kz] = 0.0, np.maximum(Wg[en, kz], self.W_MIN)
+                for k in range(kz + 1, k1):
+                    Dg[en, k], Wg[en, k] = 1.0, np.maximum(Wg[en, k], self.W_MIN)
+            else:
+                self.L[en, kz] = np.maximum(self.L[en, kz], self.UMBRAL_OCUPADO)
+                self.L[en, kz + 1:k1] = np.minimum(self.L[en, kz + 1:k1], self.UMBRAL_LIBRE)
 
     @staticmethod
     def _cerca_nube(P, nube, margen):
@@ -258,12 +418,15 @@ class MapaOcupacion:
         if dentro.any():
             d = dentro.reshape(self.L.shape)
             self.L[d] = np.minimum(self.L[d], self.L_MIN)
+            self.D[dentro] = 1.0                         # (TSDF) el robot estaba ahí: libre
+            self.W[dentro] = np.maximum(self.W[dentro], self.W_MIN)
             self._dist = self._dist_desc = None
         return int(dentro.sum())
 
     def _visibilidad(self, prof_mm, K, T_mundo_cam):
-        """(visto, libre) por vóxel. visto = en el campo de visión con profundidad medida en su
-        píxel y NO tapado; libre = además la medida está claramente más lejos que el vóxel."""
+        """(visto, libre, tapado) por vóxel. visto = en el campo de visión con profundidad medida en su
+        píxel y NO tapado; libre = además la medida está claramente más lejos que el vóxel;
+        tapado = en el campo de visión pero con algo delante (la medida, claramente más cerca)."""
         h, w = prof_mm.shape
         Tcm = np.linalg.inv(T_mundo_cam)
         C = self._centros @ Tcm[:3, :3].T + Tcm[:3, 3]
@@ -280,7 +443,8 @@ class MapaOcupacion:
         tol = 1.5 * self.res
         libre = valida & (medida > z + tol)
         visto = valida & (medida > z - tol)                      # delante o en la superficie medida
-        return visto.reshape(self.L.shape), libre.reshape(self.L.shape)
+        tapado = valida & ~visto
+        return visto.reshape(self.L.shape), libre.reshape(self.L.shape), tapado.reshape(self.L.shape)
 
     # ── distancias para las colisiones ──
     def distancias(self, desconocido_ocupado=False, ahora=None):
@@ -447,6 +611,36 @@ def empaquetar(centros, res, max_voxeles=6000):
     return np.concatenate([np.array([res, len(c)], np.float32), c.ravel()]).tobytes()
 
 
+def empaquetar_visto(mapa, ahora=None):
+    """(17-nov) Bytes con qué cubos ha VISTO la cámara (libres u ocupados) y cuáles no (desconocidos):
+    float32 [res, x0, y0, z0, nx, ny, nz] + 1 bit por cubo. Para que el planificador prefiera no
+    pasar por lo que no sabe qué hay."""
+    import json
+    conocido = mapa.estado(ahora) != DESCONOCIDO
+    cab = np.array([mapa.res, *mapa.origen, *mapa.n], np.float32)
+    mesas = json.dumps([[round(float(z), 4), np.round(np.asarray(p, float), 4).tolist()]
+                        for z, p in (mapa.superficies() if hasattr(mapa, "superficies") else [])]).encode()
+    return cab.tobytes() + np.packbits(conocido.ravel()).tobytes() + mesas
+
+
+def desempaquetar_visto(b):
+    if not b or len(b) < 28:
+        return None
+    cab = np.frombuffer(b[:28], np.float32)
+    n = tuple(int(round(v)) for v in cab[4:7])
+    import json
+    nb = (int(np.prod(n)) + 7) // 8
+    if len(b) < 28 + nb:
+        return None
+    bits = np.unpackbits(np.frombuffer(b[28:28 + nb], np.uint8))
+    try:
+        mesas = [(float(z), np.asarray(p, float)) for z, p in json.loads(b[28 + nb:].decode() or "[]")]
+    except ValueError:
+        mesas = []
+    return dict(res=float(cab[0]), origen=cab[1:4].astype(float), n=n,
+                conocido=bits[:int(np.prod(n))].reshape(n).astype(bool), superficies=mesas)
+
+
 def desempaquetar(b):
     a = np.frombuffer(b, np.float32)
     if len(a) < 2:
@@ -497,25 +691,34 @@ class ConstructorMapa:
     lee la pose real del brazo y los mandos de la web, actualiza el mapa a AUTONOMO_MAPA_HZ y lo
     publica. paso(prof_mm, K) se llama con cada imagen de profundidad nueva."""
 
-    def __init__(self, cfg, raiz, canal_q=None, canal_mapa=None, canal_mando=None):
+    def __init__(self, cfg, raiz, canal_q=None, canal_mapa=None, canal_mando=None, canal_visto=None):
         import os
         g = cfg if isinstance(cfg, dict) else {k: getattr(cfg, k) for k in dir(cfg) if k.isupper()}
         self.g = g
         ruta = g.get("CALIB_ROBOT_ARCHIVO", "camara_robot.json")
         self.ruta_calib = ruta if os.path.isabs(ruta) else os.path.join(raiz, ruta)
         z_suelo = g.get("SOPORTE_SUELO_Z") if g.get("SOPORTE_HOMBROS", False) else 0.0
-        lim = g.get("AUTONOMO_MAPA_LIMITES") or ((-1.0, 0.6), (-1.1, 0.4), (z_suelo, 0.6))
+        # (17-nov) antes acababa en y = −1,10 m y z = 0,60 m: la cajonera y el panel del punto de dejada
+        # seguían más allá y, para el planificador, ahí no había nada
+        lim = g.get("AUTONOMO_MAPA_LIMITES") or ((-1.0, 0.6), (-1.6, 0.4), (z_suelo, 0.9))
         self.mapa = MapaOcupacion(lim, float(g.get("AUTONOMO_MAPA_RES", 0.02)),
                                   olvido_s=float(g.get("AUTONOMO_MAPA_OLVIDO_S", 30.0)), z_suelo=z_suelo,
                                   margen_robot=float(g.get("AUTONOMO_MAPA_MARGEN_ROBOT", 0.03)),
                                   min_puntos=int(g.get("AUTONOMO_MAPA_MIN_PUNTOS", 4)),
                                   min_grupo=int(g.get("AUTONOMO_MAPA_MIN_GRUPO", 4)),
-                                  z_min=float(g.get("AUTONOMO_MAPA_Z_MIN", 0.35)))
+                                  z_min=float(g.get("AUTONOMO_MAPA_Z_MIN", 0.35)),
+                                  metodo=str(g.get("AUTONOMO_MAPA_METODO", "tsdf")),
+                                  dist_max=g.get("AUTONOMO_MAPA_DIST_MAX", 1.7),
+                                  k_trunc=float(g.get("AUTONOMO_MAPA_TSDF_K", 0.02)),
+                                  w_max=float(g.get("AUTONOMO_MAPA_TSDF_PESO_MAX", 20.0)),
+                                  motor=str(g.get("AUTONOMO_MAPA_MOTOR", "auto")),
+                                  superficies=bool(g.get("AUTONOMO_MAPA_MESAS", True)))
         from skill_shield.teleop_fr5.cinematica import cargar_cadena
         self.modelo = modelo_colision(cargar_cadena(g.get("RUTA_XML"), verbose=False), g)
         self.periodo = 1.0 / max(float(g.get("AUTONOMO_MAPA_HZ", 4.0)), 0.5)
         self.max_dibujo = int(g.get("AUTONOMO_MAPA_MAX_DIBUJO", 6000))
         self.canal_q, self.canal_mapa, self.canal_mando = canal_q, canal_mapa, canal_mando
+        self.canal_visto = canal_visto
         self.T, self._mtime = None, None
         self._t_ult, self._t_calib = 0.0, 0.0
         self._borrado_visto = None
@@ -712,6 +915,10 @@ class ConstructorMapa:
             b = empaquetar(self.mapa.centros_ocupados(), self.mapa.res, self.max_dibujo)
             if len(b) <= self.canal_mapa.capacidad:
                 self.canal_mapa.escribir(b)
+        if self.canal_visto is not None:
+            b = empaquetar_visto(self.mapa)
+            if len(b) <= self.canal_visto.capacidad:
+                self.canal_visto.escribir(b)
         self._n += 1
         if ahora - self._t_hz >= 2.0:
             self.hz, self._n, self._t_hz = self._n / (ahora - self._t_hz), 0, ahora

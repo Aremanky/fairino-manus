@@ -1033,6 +1033,40 @@ def test_la_sesion_real_ve_el_tablero_captura_y_lleva_el_robot(calib, cadena, re
     assert llegado is True and np.degrees(np.abs(fr5.q_real_rad() - q1).max()) < 0.3
 
 
+
+def test_sin_pedal_lleva_el_robot_solo_y_la_P_lo_pausa(calib, cadena, reloj, monkeypatch):
+    """(17-nov) --sin: sin pedal el robot va solo a la postura; con la P pulsada (pausa) no se mueve."""
+    crc_ = calib(CALIB_ROBOT_TABLERO=dict(TABLERO_20, marcador=0.0125))
+    q0 = np.radians(Q0_DEG)
+    fr5 = FR5Simulado(q0)
+    camara = CamaraSintetica(reloj, fr5, cadena, T_BRIDA_TABLERO_20)
+    monkeypatch.setattr(crc, "SIN_PEDAL", True)
+    monkeypatch.setattr(crc, "arrancar_fr5", lambda mover: fr5)
+    monkeypatch.setattr(crc, "abrir_mano_recta", lambda: None)
+    monkeypatch.setattr(crc, "abrir_camara", lambda: (camara, camara, dict(mxid="SINTETICA", K=K_CAM, dist=np.zeros(5),
+                                                                           ancho=ANCHO, alto=ALTO)))
+    for nombre in ("namedWindow", "resizeWindow", "imshow", "destroyAllWindows"):
+        monkeypatch.setattr(crc.cv2, nombre, lambda *a, **k: None)
+    teclas = []
+    monkeypatch.setattr(crc.cv2, "waitKeyEx", lambda *a, **k: teclas.pop(0) if teclas else -1)
+
+    s = crc_.Sesion(mover=True)
+    try:
+        assert isinstance(s.pedal, crc_.SinPedal)
+        s.seguridad = crc_.crear_seguridad(cadena, q0, T_BRIDA_TABLERO_20, T_MUNDO_CAM)
+        q1 = q0 + np.radians([0.0, 0.0, 0.0, 0.0, 0.0, 10.0])
+        teclas.append(ord("p"))                                   # pausa: no debe moverse
+        for _ in range(40):
+            s.vuelta(q1)
+        assert s.pedal.pausa and not s.armado
+        assert np.degrees(np.abs(fr5.q_real_rad() - q0).max()) < 0.3
+        teclas.append(ord("p"))                                   # sigue: va solo
+        llegado = s.ir_a(q1)
+    finally:
+        s.cerrar()
+    assert llegado is True and np.degrees(np.abs(fr5.q_real_rad() - q1).max()) < 0.3
+
+
 def test_calibracion_gira_la_mano_180_alrededor_de_la_brida():
     """(12-nov) En la calibración la mano va dada la vuelta: su modelo se gira CALIB_MANO_GIRO_DEG
     alrededor del eje de la brida (z de wrist3) para las comprobaciones de choque."""

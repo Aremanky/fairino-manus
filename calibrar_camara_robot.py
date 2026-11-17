@@ -19,6 +19,8 @@ Uso (cierra antes el modo autónomo / la teleoperación: la cámara y el robot t
   python calibrar_camara_robot.py --manual            # MANUAL: mueves tú el robot (arrastre en la
                                                       #   WebApp) y pulsas ESPACIO en cada postura
   python calibrar_camara_robot.py --recalcular        # recalcula con las muestras guardadas
+  python calibrar_camara_robot.py --auto --sin        # (17-nov) cualquier modo + --sin: SIN PEDAL, el robot se
+                                                      #   mueve solo (P = pausa/seguir, Q/Esc = parar y salir)
   python calibrar_camara_robot.py --girar-posturas 180  # la mano se ha vuelto a montar girada 180° en la
                                                       #   brida: adapta UNA VEZ las posturas guardadas
                                                       #   (J6 ± 180°) y el tablero de camara_robot.json
@@ -105,6 +107,7 @@ DISTANCIA = tuple(getattr(cfg, "CALIB_AUTO_DIST_M", (0.25, 1.6)))  # tablero a e
 TEMBLOR_PX = float(getattr(cfg, "CALIB_ROBOT_TEMBLOR_PX", 0.35))
 QUIETO_IMAGENES = int(getattr(cfg, "CALIB_ROBOT_QUIETO_IMAGENES", 5))
 TEMBLOR_ESPERA_MAX_S = float(getattr(cfg, "CALIB_ROBOT_TEMBLOR_ESPERA_S", 8.0))
+PERDIDAS_MAX = int(getattr(cfg, "CALIB_ROBOT_PERDIDAS_MAX", 2))   # imágenes seguidas sin tablero que se toleran al capturar
 QUIETO_DEG = 0.05               # el robot cuenta como quieto si en 0,6 s se mueve menos que esto
 LLEGADA_DEG = 0.3               # postura alcanzada
 
@@ -359,7 +362,46 @@ def arrancar_fr5(mover):
     return fr5
 
 
+SIN_PEDAL = False   # --sin (17-nov): lo pone main()
+
+
+class SinPedal:
+    """--sin (17-nov): hace de pedal SIEMPRE PISADO, así que el robot recorre las posturas solo.
+    Siguen todas las demás barreras (trayectos comprobados, vigilancia de la postura real,
+    velocidad CALIB_ROBOT_VEL_MAX_DEG_S, reinicio tras colisión). La P alterna pausa / seguir
+    (con la ventana de la cámara delante) y Q/Esc para y sale. Tras una colisión o un reinicio
+    sigue solo, sin volver a pulsar nada (la Sesion deja 2 s para que acabe el reinicio)."""
+    modo = "sin"
+    hombre_muerto = True
+    descripcion = "SIN PEDAL (--sin): el robot se mueve SOLO; P = pausa/seguir, Q/Esc = parar y salir"
+
+    def __init__(self, teclas=(ord("p"), ord("P"))):
+        self.teclas = tuple(teclas)
+        self.pausa = False
+        self.armado = True
+
+    def tecla(self, key):
+        if key is not None and key >= 0 and key in self.teclas:
+            self.pausa = not self.pausa
+            print("⏸  PAUSA: el robot se queda quieto (P para seguir)" if self.pausa
+                  else "▶  Sigo (P para pausar)")
+        self.armado = not self.pausa
+
+    def actualizar(self):
+        pass
+
+    def desarmar(self):
+        pass                     # sin pedal no hay que «soltar y volver a pisar»
+
+    def cerrar(self):
+        pass
+
+
 def crear_pedal():
+    if SIN_PEDAL:
+        print("⚠️  --sin: SIN PEDAL DE HOMBRE MUERTO. El robot se moverá solo en cuanto el programa lo pida.\n"
+              "    Nadie dentro de su alcance y la seta de emergencia a mano. P = pausa, Q/Esc = parar y salir.")
+        return SinPedal()
     from skill_shield.teleop_fr5.pedal import Pedal
     p = Pedal.desde_config(cfg)
     if p.modo is None or not p.hombre_muerto:
@@ -587,7 +629,8 @@ class Sesion:
         if self.pedal is not None:
             self.pedal.desarmar()
         self.armado = False
-        self.avisar(f"{motivo}: borrando el error (Clear, disable, enable)... suelta la P y vuelve a pulsarla")
+        self.avisar(f"{motivo}: borrando el error (Clear, disable, enable)... "
+                    + ("sigo solo en 2 s" if isinstance(self.pedal, SinPedal) else "suelta la P y vuelve a pulsarla"))
 
     def _vigilar_errores(self, key):
         """Colisión / fallo de la controladora: se reinicia solo (CALIB_AUTO_RESET) o con la X."""
@@ -620,7 +663,8 @@ class Sesion:
         if nuevo != self.armado:
             self.armado = nuevo
             self.fr5.habilitar(nuevo)
-            print("🦶 " + ("pedal PISADO → el robot se mueve" if nuevo else "pedal suelto → quieto"))
+            if not isinstance(self.pedal, SinPedal):
+                print("🦶 " + ("pedal PISADO → el robot se mueve" if nuevo else "pedal suelto → quieto"))
 
     def vuelta(self, objetivo=None, hud=()):
         """Una vuelta: lee robot y cámara, publica el objetivo y atiende el pedal. Devuelve
@@ -670,7 +714,7 @@ class Sesion:
         lineas = list(hud) + [
             "robot: " + ("sin lectura" if self.q is None else ("quieto" if self.robot.quieto else "en movimiento"))
             + ((("  |  COLISION: reiniciando..." if self.fr5.en_error or time.monotonic() - self._t_reset < 2.0
-                  else "  |  PEDAL PISADO" if self.armado else "  |  pedal suelto (P)")) if self.mover else ""),
+                  else self._txt_pedal())) if self.mover else ""),
             "tablero: " + self.txt_tab]
         if self.mensaje and time.monotonic() - self.t_mensaje < 4:
             lineas.append(self.mensaje)
@@ -684,12 +728,16 @@ class Sesion:
         cv2.imshow(self.ventana, img)
         return True
 
+    def _txt_pedal(self):
+        if isinstance(self.pedal, SinPedal):
+            return "  |  SIN PEDAL: EN PAUSA (P)" if self.pedal.pausa else "  |  SIN PEDAL (P = pausa)"
+        return "  |  PEDAL PISADO" if self.armado else "  |  pedal suelto (P)"
+
     def _movimiento(self, corners, ids):
         """Mediana (px) de lo que se han movido las esquinas del tablero desde la imagen anterior
         (solo las que salen en las dos), o None si no hay con qué comparar."""
         if corners is None or ids is None or len(ids) == 0:
-            self._esq_ant = None
-            return None
+            return None          # (17-nov) se guarda la última vista: un fotograma perdido no reinicia
         act = {int(i): c for i, c in zip(np.asarray(ids).ravel(), np.asarray(corners).reshape(-1, 2))}
         ant, self._esq_ant = self._esq_ant, act
         if not ant:
@@ -709,13 +757,17 @@ class Sesion:
         fotos, q = [], None
         t0 = time.monotonic()
         self.motivo_captura = ""
-        quietas, temblor, movs = 0, False, []
+        quietas, temblor, movs, perdidas = 0, False, [], 0
         while len(fotos) < FOTOS_POR_MUESTRA:
             _, nueva = self.vuelta(objetivo, hud=list(hud) + ["capturando..." if quietas >= QUIETO_IMAGENES
                                                               else "esperando a que el tablero deje de temblar..."])
             if not nueva:
                 continue
             if not self.listo:
+                # (17-nov) con el robot quieto, 1-2 imágenes sueltas sin tablero no reinician la espera
+                if self.q is not None and self.robot.quieto and self.T_ct is None and perdidas < PERDIDAS_MAX:
+                    perdidas += 1
+                    continue
                 if time.monotonic() - t0 > 3.0 + (TEMBLOR_ESPERA_MAX_S if movs else 0.0):
                     # (12-nov) por qué: para saber qué arreglar (tablero, luz, robot que no se para…)
                     self.motivo_captura = ("el robot no se queda quieto" if self.q is not None and
@@ -723,6 +775,7 @@ class Sesion:
                     return None
                 quietas, fotos = 0, []
                 continue
+            perdidas = 0
             # (16-nov) el tablero tiene que estar quieto EN LA IMAGEN; si se mueve, se empieza otra vez.
             # Si tras TEMBLOR_ESPERA_MAX_S sigue temblando, se captura igual y se avisa (no se pierde la postura).
             m = self.mov_px
@@ -921,7 +974,7 @@ def modo_auto(s=None):
             explorar += [dict(q=q.tolist(), capturar=True), dict(q=q0.tolist(), capturar=False)]
         if len(explorar) < 10:
             sys.exit("✗ Desde esta postura no hay sitio para explorar sin chocar: aléjala del soporte y la mesa.")
-        print(f"\n② Explorando ({len(explorar) // 2} movimientos pequeños). MANTÉN EL PEDAL (P).")
+        print(f"\n② Explorando ({len(explorar) // 2} movimientos pequeños). " + ("SIN PEDAL: va solo (P = pausa)." if SIN_PEDAL else "MANTÉN EL PEDAL (P)."))
         m0 = s.capturar(hud=["AUTO 1/3: explorando"])
         m1 = ([m0] if m0 else []) + s.recorrer(explorar, "AUTO 1/3: explorando")
         if len(m1) < 5:
@@ -946,7 +999,7 @@ def modo_auto(s=None):
         if info.get("elegidas", 0) < 8:
             sys.exit("✗ No salen suficientes posturas seguras y con el tablero a la vista. Prueba otra postura de "
                      "inicio (tablero más centrado en la imagen) o revisa CALIB_AUTO_AMPLITUD_DEG.")
-        print(f"\n④ Midiendo {info['elegidas']} posturas. MANTÉN EL PEDAL (P).")
+        print(f"\n④ Midiendo {info['elegidas']} posturas. " + ("SIN PEDAL: va solo (P = pausa)." if SIN_PEDAL else "MANTÉN EL PEDAL (P)."))
         m2 = s.recorrer(plan, "AUTO 3/3: midiendo", cada=lambda m: _guardar_muestras(s, m1 + m))
         muestras = m1 + m2
         _guardar_muestras(s, muestras)
@@ -1122,7 +1175,11 @@ def main():
     g.add_argument("--girar-posturas", type=float, metavar="GRADOS", default=None,
                    help="la mano se ha montado girada GRADOS en la brida: adapta las posturas guardadas")
     ap.add_argument("--aqui", action="store_true", help="con --verificar: en la postura actual, sin mover el robot")
+    ap.add_argument("--sin", action="store_true",
+                    help="SIN PEDAL: el robot se mueve solo (P = pausa/seguir, Q/Esc = parar). Vale con cualquier modo")
     args = ap.parse_args()
+    global SIN_PEDAL
+    SIN_PEDAL = bool(args.sin)
 
     if args.generar_tablero:
         return generar_tablero()

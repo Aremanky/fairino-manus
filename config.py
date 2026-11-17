@@ -1293,7 +1293,21 @@ AUTONOMO_SIM_VISTA    = None             # vista inicial; None = la del visor (a
 # con la profundidad (hace falta la calibración cámara→robot). Vóxeles en el marco del MJCF.
 AUTONOMO_MAPA          = True
 AUTONOMO_MAPA_RES      = 0.02            # m: lado de cada cubo
-AUTONOMO_MAPA_LIMITES  = None            # ((xmin, xmax), (ymin, ymax), (zmin, zmax)) m; None = delante
+AUTONOMO_MAPA_LIMITES  = None            # ((xmin, xmax), (ymin, ymax), (zmin, zmax)) m; None = delante:
+                                         # x −1,0…0,6 · y −1,6…0,4 · z suelo…0,9 (17-nov: antes acababa en y −1,1 y
+                                         # z 0,6 y la cajonera y el panel de la dejada se salían del mapa)
+# (17-nov) Cómo se construye el mapa: "tsdf" (fusión de la distancia a la superficie: el ruido del estéreo
+# se PROMEDIA y las superficies salen finas, como KinectFusion/nvblox) o "impactos" (contar puntos por cubo,
+# el de antes). La TSDF va en la GPU NVIDIA con PyTorch si hay CUDA; si no, en numpy (CPU).
+AUTONOMO_MAPA_METODO   = "tsdf"
+AUTONOMO_MAPA_MOTOR    = "auto"          # "auto" (GPU si hay) · "gpu" · "numpy"
+AUTONOMO_MAPA_DIST_MAX = 1.7             # m de distancia REAL a la cámara: más lejos no pone obstáculos
+                                         # (el estéreo ahí tiene ruido de varios cm); sí dice que hasta ahí está libre
+AUTONOMO_MAPA_TSDF_K   = 0.02            # truncado = 2 cubos + K·distancia² (m): el ruido crece con la distancia²
+AUTONOMO_MAPA_TSDF_PESO_MAX = 20.0       # medidas que se promedian como mucho (más: más suave pero más lento en cambiar)
+# Mesas como PLANOS: se buscan planos horizontales (RANSAC), la tapa queda como una sola capa a su altura,
+# se limpia el ruido de justo encima y el planificador la usa de suelo para la mano y el brazo
+AUTONOMO_MAPA_MESAS    = True
                                          # del robot: x -1.0…0.6, y -1.1…0.4, z suelo…0.6
 AUTONOMO_MAPA_HZ       = 4.0             # actualizaciones por segundo
 # Filtros contra obstáculos FALSOS (11-nov): la cámara de cabeza usa una profundidad «honrada» (sin
@@ -1448,6 +1462,47 @@ AUTONOMO_TAREA_PELOTA_INCLINACION_MAX_DEG = 90.0   # 90 = de lado (la palma en h
 AUTONOMO_TAREA_PELOTA_PREFERIR_DERECHO = 0.3      # coste extra por radián de inclinación
 AUTONOMO_TAREA_PELOTA_DEDOS_EXTRA = 0.035         # m más lejos la palma «con los dedos» (0 = no probarlo)
 AUTONOMO_TAREA_PELOTA_APOYO_GRUESO = 0.06         # m bajo la pelota que aún son «la mesa con ruido»
+# ── (17-nov) camino hasta el objeto: pensado para escalar a herramientas (el agarre, luego, entrenado) ──
+# Mesa: la cámara solo ve la superficie de las cosas; por debajo de lo visto, macizo hasta el suelo.
+AUTONOMO_TAREA_MAPA_MACIZO = True
+# Zona de la pelota: el «suelo» cubre la mesa que se ve alrededor (también el hueco que deja la mano) y
+# vale para la mano Y el brazo hasta esta profundidad (antes solo la mano: el antebrazo se metía en la cajonera)
+AUTONOMO_TAREA_PELOTA_GROSOR_SUELO_ZONA = 0.30
+AUTONOMO_TAREA_PELOTA_ZONA_MESA_EXTRA = 0.15  # m más allá de la zona donde se busca la mesa (para tapar huecos)
+# TODA la mano (el pulgar también) al menos esto por encima de la mesa (antes 5 mm: el pulgar de la pinza
+# quedaba a ~1 cm de la mesa estimada y, con 1-2 cm de error de altura, la tocaba). Si aún roza: 0.03
+AUTONOMO_TAREA_HOLGURA_MESA_MANO = 0.02
+# Comprobación continua entre dos posturas seguidas de cada tramo (mano, lo que lleva y brazo)
+AUTONOMO_TAREA_CONTINUO = True
+AUTONOMO_TAREA_SUBDIV_MAX = 4          # veces que se puede partir en dos un paso (2° → 0,125°)
+# Lo que la cámara no ha visto cuenta como COSTE (no se prohíbe): se prefiere el camino que menos pasa por ahí
+AUTONOMO_TAREA_PESO_DESCONOCIDO = 2.0  # 0 = no se tiene en cuenta
+AUTONOMO_TAREA_ALTERNATIVAS = 3        # planes completos que se comparan (como mucho 8 s más buscando)
+# De un sitio a otro POR ARRIBA: sube en vertical, se traslada y baja (si no se puede, como antes)
+AUTONOMO_TAREA_POR_ALTO = True
+AUTONOMO_TAREA_ALTO_MARGEN = 0.10      # m por encima de lo más alto que haya en el pasillo entre los dos sitios
+AUTONOMO_TAREA_ALTO_MAX = 0.35         # m que puede subir como mucho sobre el más alto de los dos sitios
+AUTONOMO_TAREA_ALTO_PASILLO = 0.15     # m de ancho extra del pasillo (a cada lado)
+# Si el brazo le tapa a la cámara la zona del objetivo, primero se aparta, mira y luego planifica (no en simulacro)
+AUTONOMO_TAREA_MIRAR = True
+AUTONOMO_TAREA_MIRAR_RADIO = 0.15      # m alrededor del objetivo que la cámara tiene que ver
+AUTONOMO_TAREA_MIRAR_S = 2.0           # s quieto mirando (el mapa se pone al día) antes de planificar
+AUTONOMO_TAREA_POSTURA_MIRAR_DEG = None   # postura fija para mirar (J1..J6 en grados) o None = la busca sola
+# Altura de la mesa medida con un plano alrededor de la pelota: el centro de la pelota = mesa + radio
+AUTONOMO_PELOTAS_MEDIR_APOYO = True
+AUTONOMO_PELOTAS_MESA_RADIO = 0.35       # m alrededor de la pelota donde se mide hasta dónde llega la mesa
+AUTONOMO_TAREA_PELOTA_APOYO_TOL = 0.04   # m que puede corregir (si la mesa medida no cuadra más, no se usa)
+# Cada plan que sale bien se guarda en diagnosticos/plan_ok_*.npz (los N últimos) para poder revisarlo
+# ── (17-nov) cuRobo (NVIDIA, GPU) para ir de un sitio a otro ──
+# "curobo": cuRobo PROPONE cada tramo en la GPU y el planificador de aquí lo VERIFICA con todas sus
+# comprobaciones (mano con su postura, lo que lleva, J4, mesas…); si no lo acepta, o si cuRobo no está
+# instalado o falla, se usa el camino propio. "propio": solo el de siempre. Instalar: bash instalar_curobo.sh
+AUTONOMO_TAREA_PLANIFICADOR = "curobo"
+AUTONOMO_CUROBO_ROBOT = "curobo_fr5/fr5_orca.yml"   # la genera python -m skill_shield.autonomo.curobo_fr5.robot
+AUTONOMO_CUROBO_INTENTOS = 4               # intentos de cuRobo por tramo (con RRT a partir del 2º)
+AUTONOMO_CUROBO_CUDA_GRAPH = False         # True = algo más rápido, pero el mundo no puede crecer de tamaño
+AUTONOMO_TAREA_GUARDAR_PLANES = True
+AUTONOMO_TAREA_PLANES_GUARDADOS = 10
 # Afinar (12-nov): encima de la pelota se para AFINAR_S con el brazo quieto; la cámara corrige la
 # calibración con el propio brazo y vuelve a medir la pelota; si se ha movido más de AFINAR_MIN_M
 # se rehace la bajada (si es más de AFINAR_MAX_M, se para: la pelota se ha movido de verdad).

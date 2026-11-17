@@ -248,6 +248,52 @@ class Planificador:
         self.zona_apoyo = float(_g(g, "AUTONOMO_TAREA_PELOTA_ZONA_APOYO", 0.20))   # + radio, en horizontal
         self.apoyo_grueso = float(_g(g, "AUTONOMO_TAREA_PELOTA_APOYO_GRUESO", 0.06))  # capa de mesa con ruido
         self.grosor_suelo = float(_g(g, "AUTONOMO_TAREA_PELOTA_GROSOR_SUELO", 0.08))  # grosor de ese «suelo»
+        # (17-nov) donde está apoyada la pelota, el suelo cubre TODA la zona (no solo donde la cámara vio la
+        # mesa: la tapa la propia mano, la pelota o el halo) y vale también para el BRAZO, hasta esta profundidad
+        self.grosor_suelo_zona = float(_g(g, "AUTONOMO_TAREA_PELOTA_GROSOR_SUELO_ZONA", 0.30))
+        # (17-nov) TODA la mano (el pulgar también) a esta distancia como mínimo por encima de la mesa: la
+        # altura de la pelota, la calibración y la mano real frente a su malla tienen 1-2 cm de error, y con
+        # 5 mm el pulgar de la pinza (que coge la pelota por debajo de su centro) tocaba la mesa
+        self.holgura_mesa_mano = float(_g(g, "AUTONOMO_TAREA_HOLGURA_MESA_MANO", 0.02))
+        # (17-nov) comprobación CONTINUA entre dos posturas seguidas de un tramo (mano, lo que lleva y brazo):
+        # si lo que se mueve un punto puede ser más que su holgura al mapa, se mira también entre medias
+        self.continuo = bool(_g(g, "AUTONOMO_TAREA_CONTINUO", True))
+        self.subdiv_max = int(_g(g, "AUTONOMO_TAREA_SUBDIV_MAX", 4))          # 2° / 2⁴ = 0,125° como mucho
+        # (17-nov) lo que la cámara NO ha visto cuenta como coste: de dos caminos válidos, el que menos pasa
+        # por ahí (no se prohíbe: no sabemos qué hay, pero mejor no meter la mano)
+        self.peso_desconocido = float(_g(g, "AUTONOMO_TAREA_PESO_DESCONOCIDO", 2.0))
+        self.alternativas = int(_g(g, "AUTONOMO_TAREA_ALTERNATIVAS", 3))      # planes completos que se comparan
+        self._visto = None
+        # (17-nov) cuRobo (GPU): propone los tramos articulares; los de aquí los verifican
+        self.curobo, self.tramos_curobo, self.curobo_rechazos = None, 0, 0
+        if str(_g(g, "AUTONOMO_TAREA_PLANIFICADOR", "propio")).lower() == "curobo":
+            self.curobo = self._crear_curobo(g)
+        self._discos = []                         # [(centro xy, radio, z del suelo, grosor, envolvente, r pelota)]
+        self._mesa = None                         # (17-nov) (z, vértices xy) de la mesa medida con un plano
+        self._superficies = []                    # (17-nov) mesas del mapa [(z, vértices xy)]
+        self._zonas_actuales = ()
+        self.zona_extra = float(_g(g, "AUTONOMO_TAREA_PELOTA_ZONA_MESA_EXTRA", 0.15))   # dónde se busca la mesa
+        # (17-nov) la cámara solo ve la SUPERFICIE de las cosas (la tapa y el frente de la cajonera): lo que
+        # hay debajo de cada cubo ocupado, hasta el suelo, se trata como macizo
+        self.macizo = bool(_g(g, "AUTONOMO_TAREA_MAPA_MACIZO", True))
+        ent = getattr(self.modelo, "entorno", None)
+        self.z_suelo_mapa = getattr(ent, "z_suelo", None)
+        if self.z_suelo_mapa is None:
+            self.z_suelo_mapa = g.get("SOPORTE_SUELO_Z")
+        self._macizo_hecho = False
+        # (17-nov) ir de un sitio a otro POR ARRIBA: subir en vertical hasta pasar por encima de lo que
+        # haya en el camino, trasladarse a esa altura y bajar en vertical (como se hace en pick-and-place)
+        self.por_alto = bool(_g(g, "AUTONOMO_TAREA_POR_ALTO", True))
+        self.alto_margen = float(_g(g, "AUTONOMO_TAREA_ALTO_MARGEN", 0.10))    # m sobre lo más alto del pasillo
+        self.alto_max = float(_g(g, "AUTONOMO_TAREA_ALTO_MAX", 0.35))          # m que puede subir sobre el sitio más alto
+        self.alto_pasillo = float(_g(g, "AUTONOMO_TAREA_ALTO_PASILLO", 0.15))  # m de ancho extra del pasillo
+        self.tramos_por_alto = 0
+        self.apoyo_tol = float(_g(g, "AUTONOMO_TAREA_PELOTA_APOYO_TOL", 0.04))  # m que puede corregir la mesa medida
+        # (17-nov) si el brazo le tapa a la cámara la zona del objetivo, primero se aparta para mirar
+        self.mirar_radio = float(_g(g, "AUTONOMO_TAREA_MIRAR_RADIO", 0.15))    # m alrededor del objetivo que hay que ver
+        self.mirar_s = float(_g(g, "AUTONOMO_TAREA_MIRAR_S", 2.0))             # s quieto mirando antes de replanificar
+        pm = _g(g, "AUTONOMO_TAREA_POSTURA_MIRAR_DEG", None)                  # postura fija para mirar (o None: busca)
+        self.postura_mirar = None if pm is None else np.radians(np.asarray(pm, float))
         self.pel_inc_max = float(_g(g, "AUTONOMO_TAREA_PELOTA_INCLINACION_MAX_DEG", 90.0))  # 90 = de lado
         self.pel_dedos = float(_g(g, "AUTONOMO_TAREA_PELOTA_DEDOS_EXTRA", 0.035))     # 0 = sin «con los dedos»
         self.margen_propio = float(_g(g, "AUTONOMO_TAREA_MARGEN_PROPIO", 0.05))     # cubos pegados al robot: él
@@ -289,8 +335,31 @@ class Planificador:
         self._C = C
         self._C_quitado = np.vstack(quitado) if quitado else np.zeros((0, 3))
         self._res = float(res or 0.02)
+        self._macizo_hecho = False
+        self._mesa = None                         # (17-nov) la mesa medida (z, envolvente): la pone el plan
         self.zonas_apoyo(())
         return len(C)
+
+    def rellenar_macizo(self, C):
+        """(17-nov) Cada columna de cubos ocupados se rellena desde su cubo más alto hasta el suelo: la
+        cámara solo ve la superficie (la tapa y el frente de una cajonera) y por dentro quedaba hueco,
+        así que el brazo podía «meterse» en la cajonera sin tocar ningún cubo."""
+        C = np.asarray(C, float).reshape(-1, 3)
+        if not len(C) or self.z_suelo_mapa is None:
+            return C
+        res = self._res
+        xy, inv = np.unique(np.round(C[:, :2], 4), axis=0, return_inverse=True)
+        inv = np.asarray(inv).ravel()
+        alto = np.full(len(xy), -np.inf)
+        np.maximum.at(alto, inv, C[:, 2])
+        z0 = float(self.z_suelo_mapa) + 0.5 * res
+        n = np.maximum(np.floor((alto - z0) / res).astype(int), 0)       # cubos por debajo del más alto
+        if not n.sum():
+            return C
+        k = np.repeat(np.arange(len(xy)), n)
+        paso = np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n) + 1
+        R = np.column_stack([xy[k], alto[k] - paso * res])
+        return np.vstack([C, R])
 
     def zonas_apoyo(self, zonas):
         """zonas: [(centro de la pelota, radio horizontal, radio de la pelota)]. Es el sitio por el que
@@ -308,36 +377,105 @@ class Planificador:
         C, Q = self._C, self._C_quitado
         fuera = np.zeros(len(C), bool)
         suelo_C, suelo_Q = np.full(len(C), np.inf), np.full(len(Q), np.inf)
-        for c, rh, rb in zonas:
+        # (17-nov) zona «entera» (la pelota apoyada en algo, o la dejada tumbada): el suelo cubre todo el
+        # disco y vale para mano Y brazo hasta grosor_suelo_zona. Si no (la dejada de pie, en una hoja: la
+        # pelota se suelta en el aire), como antes: solo donde la cámara vio algo y solo para la mano.
+        self._discos = []
+        normales = []
+        for zona in zonas:
+            c, rh, rb = zona[:3]
+            entera = bool(zona[3]) if len(zona) > 3 else True
             c = np.asarray(c, float)
             # hasta un vóxel por encima de la pelota (su parte de arriba cae en el vóxel de encima) +
             # el ruido de la profundidad a esa distancia (crece con la distancia al cuadrado)
             techo = c[2] + float(rb) + self._res + self.ruido_prof(c)
             fondo = c[2] - float(rb) - self.apoyo_grueso - self._res - self.ruido_prof(c)
             z_min = float(c[2] - rb + self.margen_suave)
+            if entera:
+                # la mesa es la ENVOLVENTE (en planta) de lo que la cámara ve a la altura de la pelota
+                # alrededor de ella, buscando algo más lejos que la zona: así se tapa el hueco que deja la
+                # mano (o lo olvidado) pero no se inventa mesa más allá de su borde
+                lejos = float(rh) + self.zona_extra
+                en_m = ((np.linalg.norm(C[:, :2] - c[:2], axis=1) < lejos) & (C[:, 2] < techo) & (C[:, 2] > fondo))
+                en_q = (np.linalg.norm(Q[:, :2] - c[:2], axis=1) < lejos) & (Q[:, 2] > fondo) & (Q[:, 2] < techo)
+                self._discos.append((c[:2].copy(), float(rh), z_min, self.grosor_suelo_zona,
+                                     _envolvente(np.vstack([C[en_m, :2], Q[en_q, :2]]), self._res),
+                                     float(rb) + self._res))
+            else:
+                normales.append((c, rh, rb))
             en = ((np.linalg.norm(C[:, :2] - c[:2], axis=1) < float(rh)) & (C[:, 2] < techo)
                   & (C[:, 2] > fondo))
             fuera |= en
+            if entera:
+                continue                                      # su suelo es el disco entero
             suelo_C[en] = np.minimum(suelo_C[en], z_min)      # si se solapan, el suelo más bajo
             enq = (np.linalg.norm(Q[:, :2] - c[:2], axis=1) < float(rh)) & (Q[:, 2] > fondo)
             suelo_Q[enq] = np.minimum(suelo_Q[enq], z_min)
+        self._zonas_actuales = tuple(zonas)
+        self._version_mundo = getattr(self, "_version_mundo", 0) + 1
+        for z_m, poli in self._superficies:              # (17-nov) mesas del mapa
+            env = _envolvente(poli, 0.0)
+            if env is not None:
+                self._discos.append((poli.mean(0), np.inf, float(z_m) + self.margen_suave,
+                                     self.grosor_suelo_zona, env, 0.0))
+        if self._mesa is not None:
+            # (17-nov) la mesa MEDIDA (plano de la profundidad alrededor del objeto, pelotas.py): es suelo en
+            # toda su envolvente, para mano y brazo, aunque no haya cubos (tapada, olvidada, hueco del mapa)
+            z_m, poli = self._mesa
+            env = _envolvente(np.asarray(poli, float), 0.0)
+            if env is not None:
+                self._discos.append((np.asarray(poli, float).mean(0), np.inf, float(z_m) + self.margen_suave,
+                                     self.grosor_suelo_zona, env, 0.0))
         self._arbol = cKDTree(C[~fuera]) if (~fuera).any() else None
         # el suelo solo está donde la cámara vio algo (la mesa, o la pelota apoyada en ella):
         # donde no hay nada no se inventa una mesa
         # y siempre, justo debajo de cada pelota (lo que ocupa), lo que la sostiene: aunque la cámara no
         # lo vea (la tapa la propia pelota, o se quitó su halo del mapa), los dedos no pasan por debajo
         D = []
-        for c, rh, rb in zonas:
+        for c, rh, rb in normales:
             c = np.asarray(c, float)
             g_ = np.arange(-float(rb), float(rb) + 1e-9, 0.5 * self._res)
             X, Y = np.meshgrid(g_, g_)
             k = X ** 2 + Y ** 2 <= float(rb) ** 2
             D.append(np.column_stack([X[k] + c[0], Y[k] + c[1], np.full(k.sum(), c[2] - rb + self.margen_suave)]))
         D = np.vstack(D) if D else np.zeros((0, 3))
-        S = np.vstack([C[fuera], Q[np.isfinite(suelo_Q)], np.column_stack([D[:, :2], np.zeros(len(D))])])
-        z = np.r_[suelo_C[fuera], suelo_Q[np.isfinite(suelo_Q)], D[:, 2]]
+        con_suelo = fuera & np.isfinite(suelo_C)
+        S = np.vstack([C[con_suelo], Q[np.isfinite(suelo_Q)], np.column_stack([D[:, :2], np.zeros(len(D))])])
+        z = np.r_[suelo_C[con_suelo], suelo_Q[np.isfinite(suelo_Q)], D[:, 2]]
         self._suelo = (cKDTree(S[:, :2]), z) if len(S) else None
         self._arbol_suave = None
+
+    def _bajo_suelo(self, P, solo_discos=False):
+        """¿Algún punto de P (mundo) por debajo del «suelo» de las zonas de apoyo?"""
+        return bool(self._mascara_suelo(P, solo_discos).any())
+
+    def _mascara_suelo(self, P, solo_discos=False):
+        """Máscara de los puntos de P (mundo) que quedan por debajo del «suelo» (dentro de su capa)."""
+        P = np.asarray(P, float)
+        out = np.zeros(len(P), bool)
+        if self._discos:
+            fl, gr = np.full(len(P), np.inf), np.zeros(len(P))
+            for cxy, rh, zs, g, env, rb in self._discos:
+                d = np.linalg.norm(P[:, :2] - cxy, axis=1)
+                en = (d < rh) & (zs < fl)                       # si se solapan, el más bajo
+                if en.any():
+                    sobre_mesa = d[en] < rb                     # justo debajo de la pelota, siempre
+                    if env is not None:
+                        sobre_mesa |= env.find_simplex(P[en, :2]) >= 0
+                    en[np.nonzero(en)[0][~sobre_mesa]] = False
+                fl[en], gr[en] = zs, g
+            en = np.isfinite(fl)
+            out[en] |= (P[en, 2] < fl[en]) & (P[en, 2] > fl[en] - gr[en])
+        if self._suelo is not None and not solo_discos:
+            arbol2d, z_suelo = self._suelo
+            d, i = arbol2d.query(P[:, :2], distance_upper_bound=self._res)
+            sobre = np.isfinite(d)
+            # el «suelo» es una capa (la mesa o lo que sostiene la pelota), no infinito hacia
+            # abajo: muy por debajo (al llevar la pelota a una dejada más baja) no cuenta
+            if sobre.any():
+                zs = z_suelo[i[sobre]]
+                out[sobre] |= (P[sobre, 2] < zs) & (P[sobre, 2] > zs - self.grosor_suelo)
+        return out
 
     def ruido_prof(self, p):
         """Ruido (m) de la profundidad estéreo en el punto p: k · distancia² a la cámara."""
@@ -387,21 +525,28 @@ class Planificador:
         m = self.choque.motivo(q)
         if m:
             return m
-        if self._suelo is not None:
-            arbol2d, z_suelo = self._suelo
+        if self._suelo is not None or self._discos:
             Tb = marcos[5]
-            for pts, que, tol in ((self._mano_pts, "la mano", 0.0),
+            for pts, que, tol in ((self._mano_pts, "la mano", -self.holgura_mesa_mano),
                                   (self._carga, "la pelota que lleva", 2 * self.margen_suave)):   # apoyada: sí toca
                 if pts is None:
                     continue
-                P = pts @ Tb[:3, :3].T + Tb[:3, 3] + np.array([0.0, 0.0, tol])
-                d, i = arbol2d.query(P[:, :2], distance_upper_bound=self._res)
-                sobre = np.isfinite(d)
-                # el «suelo» es una capa (la mesa o lo que sostiene la pelota), no infinito hacia
-                # abajo: muy por debajo (al llevar la pelota a una dejada más baja) no cuenta
-                zs = z_suelo[i[sobre]] if sobre.any() else None
-                if sobre.any() and np.any((P[sobre, 2] < zs) & (P[sobre, 2] > zs - self.grosor_suelo)):
+                if self._bajo_suelo(pts @ Tb[:3, :3].T + Tb[:3, 3] + np.array([0.0, 0.0, tol])):
                     return f"{que} bajaría de la mesa (por debajo de la pelota)"
+            if self._discos:
+                # (17-nov) el brazo tampoco: antes solo se miraba la mano y el antebrazo podía meterse
+                # en la cajonera dentro de la zona de la pelota (ahí los cubos de la mesa no cuentan)
+                for marco, pts, nombre in self._brazo_pts:
+                    T = marcos[marco]
+                    if self._bajo_suelo(pts @ T[:3, :3].T + T[:3, 3], solo_discos=True):
+                        return f"{nombre} se metería en la mesa (por debajo de la pelota)"
+                for cap in self.modelo.capsulas(q, marcos):
+                    if cap.nombre in ("base", "mano") or (self._brazo_pts and cap.nombre in ("brazo", "antebrazo")):
+                        continue
+                    n = max(2, int(math.ceil(np.linalg.norm(cap.b - cap.a) / 0.02)) + 1)
+                    pts = cap.a + np.linspace(0.0, 1.0, n)[:, None] * (cap.b - cap.a) - np.array([0.0, 0.0, cap.r])
+                    if self._bajo_suelo(pts, solo_discos=True):
+                        return f"{NOMBRES.get(cap.nombre, cap.nombre)} se metería en la mesa (por debajo de la pelota)"
         for arbol, margen, m_brazo, donde in (
                 (self._arbol, self.margen_mapa, self.margen_mapa_brazo, "un obstáculo del mapa"),
                 (self._arbol_suave, self.margen_suave, self.margen_suave, "la superficie de apoyo")):
@@ -488,7 +633,60 @@ class Planificador:
             if m:
                 raise ErrorPlan(f"{nombre}: {m}")
             qs.append(np.asarray(q, float))
-        return np.array(qs)
+        qs = np.array(qs)
+        self.comprobar_continuo(qs, nombre)
+        return qs
+
+    def _puntos_holgura(self, q):
+        """Puntos (mundo) de mano, lo que lleva y brazo, y la distancia mínima que cada uno tiene que
+        guardar con los cubos del mapa (la misma que mira motivo())."""
+        marcos = self.c.fk_marcos(np.asarray(q, float))
+        Tb, h = marcos[5], 0.5 * self._res
+        P, U = [], []
+        for pts, u in ((self._mano_pts, self.margen_mapa + h), (self._carga, self.margen_mapa + h)):
+            if pts is not None and len(pts):
+                p = pts[::3] @ Tb[:3, :3].T + Tb[:3, 3]
+                P.append(p); U.append(np.full(len(p), u))
+        for marco, pts, _ in self._brazo_pts:
+            p = pts[::2] @ marcos[marco][:3, :3].T + marcos[marco][:3, 3]
+            P.append(p); U.append(np.full(len(p), self.margen_mapa_malla + h))
+        for cap in self.modelo.capsulas(q, marcos):
+            if cap.nombre == "base" or (cap.nombre == "mano" and self._mano_pts is not None) or \
+                    (self._brazo_pts and cap.nombre in ("brazo", "antebrazo")):
+                continue
+            n = max(2, int(math.ceil(np.linalg.norm(cap.b - cap.a) / 0.03)) + 1)
+            p = cap.a + np.linspace(0.0, 1.0, n)[:, None] * (cap.b - cap.a)
+            P.append(p); U.append(np.full(n, cap.r + self.margen_mapa_brazo + h))
+        return (np.vstack(P), np.concatenate(U)) if P else (np.zeros((0, 3)), np.zeros(0))
+
+    def _holgura(self, q):
+        P, U = self._puntos_holgura(q)
+        if self._arbol is None or not len(P):
+            return np.inf, P
+        d, _ = self._arbol.query(P)
+        return float(np.min(d - U)), P
+
+    def comprobar_continuo(self, qs, nombre="tramo"):
+        """(17-nov) Entre cada dos posturas seguidas de qs (que ya valen): si algún punto se mueve más
+        de lo que le sobra de holgura, se mira la postura de en medio (y así, partiendo en dos, hasta
+        subdiv_max veces). ErrorPlan si algo choca entre medias."""
+        if not self.continuo or self._arbol is None or len(qs) < 2:
+            return
+        hs = [self._holgura(q) for q in qs]
+
+        def entre(qa, qb, ha, hb, prof):
+            delta = float(np.max(np.linalg.norm(hb[1] - ha[1], axis=1))) if len(ha[1]) else 0.0
+            if min(ha[0], hb[0]) >= 0.5 * delta or prof >= self.subdiv_max:
+                return
+            qm = 0.5 * (qa + qb)
+            m = self.motivo(qm)
+            if m:
+                raise ErrorPlan(f"{nombre}: {m} (entre dos posturas del tramo)")
+            hm = self._holgura(qm)
+            entre(qa, qm, ha, hm, prof + 1)
+            entre(qm, qb, hm, hb, prof + 1)
+        for k in range(len(qs) - 1):
+            entre(np.asarray(qs[k], float), np.asarray(qs[k + 1], float), hs[k], hs[k + 1], 0)
 
     def articular(self, q0, q1, nombre="tramo"):
         q0, q1 = np.asarray(q0, float), np.asarray(q1, float)
@@ -498,10 +696,119 @@ class Planificador:
             m = self.motivo(q)
             if m:
                 raise ErrorPlan(f"{nombre}: {m}")
+        self.comprobar_continuo(qs, nombre)
+        return qs
+
+    def _palma(self, q):
+        T = self.c.fk_marcos(np.asarray(q, float))[6]
+        return T[:3, :3] @ OFFSET_PALMA_ORCA + T[:3, 3]
+
+    def tramo_por_alto(self, q0, q1, nombre="tramo"):
+        """(17-nov) De q0 a q1 POR ARRIBA: la palma sube en vertical (orientación fija) hasta una altura
+        que pasa por encima de todo lo del mapa en el pasillo entre las dos, se traslada (articular)
+        y baja en vertical. Así el brazo no barre la mesa en arco, que es lo que pasaba yendo directo."""
+        q0, q1 = np.asarray(q0, float), np.asarray(q1, float)
+        p0, p1 = self._palma(q0), self._palma(q1)
+        z_sitio = max(p0[2], p1[2])
+        # cada punta sube SOLO hasta pasar por encima de lo que hay en el pasillo (no hasta la altura de la
+        # otra punta: subir 40 cm desde encima de la pelota dobla la muñeca contra el antebrazo)
+        z = min(p0[2], p1[2])
+        if self._arbol is not None and len(self._arbol.data):
+            V = self._arbol.data
+            # el pasillo: lo que está (en planta) a menos de alto_pasillo del segmento entre las dos palmas
+            ab = p1[:2] - p0[:2]
+            t = np.clip((V[:, :2] - p0[:2]) @ ab / max(float(ab @ ab), 1e-12), 0.0, 1.0)
+            en = np.linalg.norm(V[:, :2] - (p0[:2] + t[:, None] * ab), axis=1) < self.alto_pasillo
+            if en.any():
+                z = max(z, float(V[en, 2].max()) + 0.5 * self._res + self.alto_margen)
+        if z > z_sitio + self.alto_max:
+            raise ErrorPlan(f"{nombre}: por arriba habría que subir {100 * (z - z_sitio):.0f} cm")
+        a = self.recta(q0, OFFSET_PALMA_ORCA, p0 + [0.0, 0.0, z - p0[2]], f"{nombre} (subir)") \
+            if z - p0[2] > 0.01 else q0[None]
+        c = self.recta(q1, OFFSET_PALMA_ORCA, p1 + [0.0, 0.0, z - p1[2]], f"{nombre} (bajar)") \
+            if z - p1[2] > 0.01 else q1[None]
+        b = self.articular(a[-1], c[-1], nombre)
+        return np.vstack([a, b[1:], c[::-1][1:]])
+
+    def _crear_curobo(self, g):
+        import os
+        try:
+            from skill_shield.autonomo.curobo_fr5.planificador import PlanificadorCuRobo
+            z0 = getattr(self.modelo.entorno, "z_suelo", None)
+            z0 = g.get("SOPORTE_SUELO_Z", -0.975) if z0 is None else z0
+            lim = g.get("AUTONOMO_MAPA_LIMITES") or ((-1.0, 0.6), (-1.6, 0.4), (z0, 0.9))
+            ruta = g.get("AUTONOMO_CUROBO_ROBOT", "curobo_fr5/fr5_orca.yml")
+            if not os.path.isabs(ruta):
+                ruta = os.path.join(os.path.dirname(os.path.abspath(g.get("RUTA_XML", "."))), "..", "..", ruta)
+            return PlanificadorCuRobo(os.path.normpath(ruta), self.modelo.entorno, lim,
+                                      float(g.get("AUTONOMO_MAPA_RES", 0.02)),
+                                      intentos=int(g.get("AUTONOMO_CUROBO_INTENTOS", 4)),
+                                      cuda_graph=bool(g.get("AUTONOMO_CUROBO_CUDA_GRAPH", False)))
+        except Exception as e:
+            global _AVISO_CUROBO
+            if _AVISO_CUROBO != str(e):                   # una vez (no en cada planificador que se cree)
+                _AVISO_CUROBO = str(e)
+                print(f"⚠️  Tarea: cuRobo no disponible ({e}): planifico con el planificador propio.")
+            return None
+
+    def _densificar(self, qs):
+        """Posturas intermedias para que ningún joint salte más de self.paso entre dos seguidas."""
+        out = [np.asarray(qs[0], float)]
+        for a, b in zip(qs[:-1], qs[1:]):
+            n = max(1, int(np.ceil(float(np.max(np.abs(b - a))) / self.paso)))
+            out += [a + (b - a) * (k / n) for k in range(1, n + 1)]
+        return np.array(out)
+
+    def tramo_curobo(self, q0, q1, nombre="tramo"):
+        """(17-nov) El tramo que propone cuRobo, VERIFICADO aquí postura a postura (mano con su postura
+        y su carga, suelo de las mesas, J4…) y entre medias. ErrorPlan si no hay o no vale."""
+        try:
+            self.curobo.actualizar_mundo(self, clave=(id(self), getattr(self, "_version_mundo", 0),
+                                                      self._macizo_hecho, id(self._arbol)))
+            qs = self.curobo.plan(q0, q1)
+        except Exception as e:                           # la GPU nunca debe tumbar el plan
+            print(f"⚠️  Tarea: fallo de cuRobo ({e}): sigo con el planificador propio.")
+            self.curobo = None
+            raise ErrorPlan(f"{nombre}: cuRobo falló")
+        if qs is None:
+            raise ErrorPlan(f"{nombre}: cuRobo no encuentra camino")
+        qs = self._densificar(qs)
+        for q in qs[1:]:
+            m = self.motivo(q)
+            if m:
+                self.curobo_rechazos += 1
+                raise ErrorPlan(f"{nombre}: el camino de cuRobo no pasa las comprobaciones ({m})")
+        self.comprobar_continuo(qs, nombre)
         return qs
 
     def conectar(self, q0, q1, q_via=None, nombre="tramo"):
-        """Articular de q0 a q1; si choca, pasando por q_via; si también, rodeando (paso 8)."""
+        """cuRobo (si está); si no, por arriba (si se puede); si no, articular de q0 a q1; si choca,
+        pasando por q_via; si también, rodeando (paso 8)."""
+        if self.curobo is not None:
+            try:
+                qs = self.tramo_curobo(q0, q1, nombre)
+                self.tramos_curobo += 1
+                return qs
+            except ErrorPlan:
+                pass
+        alto = None
+        if self.por_alto:
+            try:
+                alto = self.tramo_por_alto(q0, q1, nombre)
+            except ErrorPlan:
+                alto = None
+        if alto is not None and self._visto is not None:
+            # (17-nov) por arriba es lo preferido, salvo que pase claramente más por lo que la cámara no ha
+            # visto que el camino directo
+            try:
+                directo = self.articular(q0, q1, nombre)
+                if self.desconocido(alto) > self.desconocido(directo) + 0.10:
+                    return directo
+            except ErrorPlan:
+                pass
+        if alto is not None:
+            self.tramos_por_alto += 1
+            return alto
         try:
             return self.articular(q0, q1, nombre)
         except ErrorPlan as e:
@@ -526,6 +833,10 @@ class Planificador:
         for k in range(1, n + 1):
             if self.motivo(qa + (qb - qa) * (k / n)) is not None:
                 return False
+        try:
+            self.comprobar_continuo(qa + (qb - qa) * np.linspace(0.0, 1.0, n + 1)[:, None])
+        except ErrorPlan:
+            return False
         return True
 
     def rodear(self, qa, qb, t_max):
@@ -634,7 +945,9 @@ class Planificador:
             if m:
                 raise ErrorPlan(f"{nombre}: {m}")
             qs.append(np.asarray(q, float))
-        return np.array(qs)
+        qs = np.array(qs)
+        self.comprobar_continuo(qs, nombre)
+        return qs
 
     def _vueltas(self):
         return [2 * math.pi * k / self.n_vueltas for k in range(self.n_vueltas)]
@@ -807,30 +1120,42 @@ class Planificador:
                     return None
                 return r
 
+            soluciones = []
+            n_max = max(1, self.alternativas if self._visto is not None else 1)
+            t_lim = time.monotonic() + 8.0                  # s como mucho buscando alternativas
+
             def buscar(k, q_actual, elegidas, tramos):
+                if len(soluciones) >= n_max or (soluciones and time.monotonic() > t_lim):
+                    return
                 if k == len(sitios):
                     vuelta = tramo(q_actual, q0, "volver al inicio", mano_vuelta)
-                    return None if vuelta is None else (elegidas, tramos, vuelta)
+                    if vuelta is not None:
+                        soluciones.append((elegidas, tramos, vuelta))
+                    return
                 nombre, opciones = sitios[k][:2]
                 mano = sitios[k][2] if len(sitios[k]) > 2 else None
                 for op in opciones:
+                    if len(soluciones) >= n_max:
+                        return
                     ir = tramo(q_actual, op[0], nombre, mano)
                     if ir is None:
                         continue
-                    r = buscar(k + 1, op[1], elegidas + [op], tramos + [ir])
-                    if r is not None:
-                        return r
-                return None
-            r = buscar(0, q0, [], [])
+                    buscar(k + 1, op[1], elegidas + [op], tramos + [ir])
+            buscar(0, q0, [], [])
             self._permitir_rodeo = False
-            if r is not None:
-                return r
+            if soluciones:
+                # (17-nov) de los planes completos encontrados, el de menor coste (longitud y lo no visto);
+                # sin «lo visto» se queda con el primero, como antes
+                if len(soluciones) == 1:
+                    return soluciones[0]
+                return min(soluciones, key=lambda r_: sum(self.coste_tramo(t) for t in r_[1] + [r_[2]]))
         motivo = fallos.most_common(1)[0][0] if fallos else "?"
         raise ErrorPlan(f"sé llegar a cada sitio, pero no encuentro cómo ir de uno a otro: {motivo}")
 
     def _empezar(self, q0):
         q0 = np.asarray(q0, float)
-        self.inclinaciones, self.rodeos = [], 0
+        self.inclinaciones, self.rodeos, self.tramos_por_alto = [], 0, 0
+        self.tramos_curobo, self.curobo_rechazos = 0, 0
         self._choques = []
         self._rodeo_resto = self.rodeo_total_s
         self._mano_pts, self._carga = self._mano_pts0, None
@@ -853,12 +1178,106 @@ class Planificador:
                 lejos &= ~np.isfinite(d)
             self.quitados_propios = int((~lejos).sum())
             self._C = self._C[lejos]
+        if self.macizo and not self._macizo_hecho:        # (17-nov) después de quitar lo que es el propio brazo
+            self._C = self.rellenar_macizo(self._C)
+            self._macizo_hecho = True
         self.zonas_apoyo(())
+        if self._superficies:
+            # (17-nov) una mesa del mapa bajo la que está AHORA el robot no puede ser maciza ahí (o está mal
+            # medida, o es un estante con hueco debajo): no se usa como suelo en este plan
+            P = self._puntos_robot(q0)
+            quedan = []
+            for z_m, poli in self._superficies:
+                from skill_shield.autonomo.tsdf import dentro_poligono
+                en = dentro_poligono(poli, P[:, :2])
+                debajo = en & (P[:, 2] < z_m + self.margen_suave) & (P[:, 2] > z_m - self.grosor_suelo_zona)
+                if debajo.any():
+                    print(f"ℹ️  Tarea: el robot está ahora debajo de la mesa a z={z_m:.2f} m del mapa: no la uso de suelo.")
+                else:
+                    quedan.append((z_m, poli))
+            if len(quedan) != len(self._superficies):
+                self._superficies = quedan
+                self.zonas_apoyo(())
         self.choque.fijar_inicio(q0)
         m = self.motivo(q0)
         if m:
             raise ErrorPlan(f"la postura actual del robot no pasa las comprobaciones: {m}")
         return q0
+
+    def _puntos_robot(self, q, marcos=None):
+        """Puntos (mundo) de la mano y del brazo en la postura q (para ver qué tapa a la cámara)."""
+        marcos = self.c.fk_marcos(np.asarray(q, float)) if marcos is None else marcos
+        Tb = marcos[5]
+        P = [] if self._mano_pts0 is None else [self._mano_pts0 @ Tb[:3, :3].T + Tb[:3, 3]]
+        for marco, pts, _ in self._brazo_pts:
+            P.append(pts @ marcos[marco][:3, :3].T + marcos[marco][:3, 3])
+        for cap in self.modelo.capsulas(q, marcos):
+            if cap.nombre != "base":
+                P.append(cap.a + np.linspace(0.0, 1.0, 8)[:, None] * (cap.b - cap.a))
+        return np.vstack(P) if P else np.zeros((0, 3))
+
+    def tapa_la_vista(self, q, c, radio=None):
+        """(17-nov) ¿El robot en la postura q está entre la cámara y la zona del objetivo (centro c,
+        radio)? Entonces la cámara no ve la mesa alrededor del objetivo y el mapa tiene un hueco."""
+        if self.T_cam is None:
+            return False
+        radio = self.mirar_radio if radio is None else float(radio)
+        cam, c = self.T_cam[:3, 3], np.asarray(c, float)
+        w = c - cam
+        L = float(np.linalg.norm(w))
+        if L < 1e-6:
+            return False
+        u = w / L
+        V = self._puntos_robot(q) - cam
+        a = V @ u
+        perp = np.linalg.norm(V - a[:, None] * u, axis=1)
+        delante = (a > 0.10) & (a < L - 0.5 * radio)
+        return bool(np.any(delante & (perp < radio * a / L)))
+
+    def plan_mirar(self, q0, c):
+        """(17-nov) Si el brazo le tapa a la cámara el objetivo (centro c), un plan para apartarse a una
+        postura desde la que se ve (AUTONOMO_TAREA_POSTURA_MIRAR_DEG o, si no hay, la primera que
+        sirva moviendo la mano de lado, hacia la cámara o hacia arriba) y quedarse quieto mirando
+        AUTONOMO_TAREA_MIRAR_S. None si no tapa (o si no encuentra adónde apartarse: se avisa)."""
+        q0 = self._empezar(q0)
+        c = np.asarray(c, float)
+        if not self.tapa_la_vista(q0, c):
+            return None
+        qs = None
+        if self.postura_mirar is not None:
+            try:
+                qs = self.conectar(q0, self.postura_mirar, None, "apartarse para mirar")
+                if self.tapa_la_vista(qs[-1], c):
+                    print("⚠️  Tarea: desde AUTONOMO_TAREA_POSTURA_MIRAR_DEG el brazo también tapa el objetivo.")
+                    qs = None
+            except ErrorPlan as e:
+                print(f"⚠️  Tarea: no puedo ir a AUTONOMO_TAREA_POSTURA_MIRAR_DEG ({e}).")
+        if qs is None:
+            p = self._palma(q0)
+            w = c - self.T_cam[:3, 3]
+            hor = _unit(np.array([w[0], w[1], 0.0]))
+            lado = np.cross(hor, [0.0, 0.0, 1.0])
+            diag = [_unit(lado - hor), _unit(-lado - hor)]
+            for k in (0.15, 0.25, 0.35, 0.45):
+                for d in (lado, -lado, -hor, *diag, np.zeros(3)):
+                    dest = p + d * k + np.array([0.0, 0.0, 0.08 + (k if not d.any() else 0.0)])
+                    try:
+                        cand = self.recta(q0, OFFSET_PALMA_ORCA, dest, "apartarse para mirar")
+                    except ErrorPlan:
+                        continue
+                    if not self.tapa_la_vista(cand[-1], c):
+                        qs = cand
+                        break
+                if qs is not None:
+                    break
+        if qs is None:
+            print("⚠️  Tarea: el brazo tapa el objetivo a la cámara y no encuentro adónde apartarlo: "
+                  "planifico con el mapa que hay.")
+            return None
+        plan = Plan(q0, [Fase("Apartarse para que la cámara vea la mesa", qs),
+                         Fase("Mirar la mesa", dur=self.mirar_s)], nombre="apartarse para mirar")
+        plan.replanificar = True
+        return plan
 
     def planificar(self, q0, T_herr, T_uso, T_dejada):
         q0 = self._empezar(q0)
@@ -949,7 +1368,61 @@ class Planificador:
         S = c + r * np.column_stack([np.cos(th) * np.sin(phi), np.sin(th) * np.sin(phi), np.cos(phi)])
         return S @ T_w_mm[:3, :3].T + T_w_mm[:3, 3]
 
-    def planificar_pelota(self, q0, T_pelota, diametro, T_dejada):
+    def poner_visto(self, visto):
+        """(17-nov) Qué cubos ha visto la cámara: dict(res, origen, n, conocido) (mapa.desempaquetar_visto)
+        o None (entonces no hay coste por lo desconocido)."""
+        self._visto = visto if visto and visto.get("conocido") is not None else None
+        # (17-nov) las mesas que ha encontrado el mapa (planos): suelo para mano y brazo, como la medida
+        self._superficies = [(float(z), np.asarray(p, float)) for z, p in ((visto or {}).get("superficies") or [])
+                             if len(p) >= 3]
+        self.zonas_apoyo(self._zonas_actuales)
+
+    def desconocido(self, qs, cada=3):
+        """Fracción (0-1) de los puntos del robot que, a lo largo de qs, caen en cubos que la cámara
+        no ha visto. Lo de fuera de la rejilla no cuenta (no se sabe ni se puede saber)."""
+        v = self._visto
+        if v is None or qs is None or len(qs) == 0:
+            return 0.0
+        n_dentro = n_desc = 0
+        o, res, N, K = np.asarray(v["origen"], float), float(v["res"]), np.asarray(v["n"]), v["conocido"]
+        for q in list(qs[::cada]) + [qs[-1]]:
+            P, _ = self._puntos_holgura(q)
+            idx = np.floor((P - o) / res).astype(int)
+            ok = np.all((idx >= 0) & (idx < N), axis=1)
+            n_dentro += int(ok.sum())
+            n_desc += int((~K[idx[ok, 0], idx[ok, 1], idx[ok, 2]]).sum())
+        return n_desc / n_dentro if n_dentro else 0.0
+
+    def coste_tramo(self, qs):
+        """Longitud del tramo (rad, el joint que más se mueve en cada paso) × (1 + peso · desconocido)."""
+        if qs is None or len(qs) < 2:
+            return 0.0
+        L = float(np.sum(np.max(np.abs(np.diff(qs, axis=0)), axis=1)))
+        return L * (1.0 + self.peso_desconocido * self.desconocido(qs))
+
+    def poner_mesa(self, apoyo_z, apoyo_poligono):
+        """(17-nov) La mesa medida con un plano (altura y envolvente en planta) o None."""
+        self._mesa = (None if apoyo_z is None or not apoyo_poligono or len(apoyo_poligono) < 3
+                      else (float(apoyo_z), [list(map(float, v)) for v in apoyo_poligono]))
+
+    def apoyar(self, T_pelota, diametro, apoyo_z):
+        """(17-nov) La pelota está APOYADA en la mesa: si se ha medido la altura de la mesa (plano
+        ajustado a la profundidad alrededor de la pelota, pelotas.py) y cuadra, su centro está a un radio
+        por encima. Es más fiable que la altura que da el estéreo en la propia pelota (sus bordes)."""
+        T = np.array(T_pelota, float)
+        self._apoyo_ok = False
+        if apoyo_z is None:
+            return T
+        r = float(diametro) / 2.0
+        dz = float(apoyo_z) + r - T[2, 3]
+        if abs(dz) <= self.apoyo_tol:
+            T[2, 3] += dz
+            self._apoyo_ok = True
+        else:
+            print(f"⚠️  Tarea: la mesa medida está {100 * dz:+.1f} cm de donde debería apoyar la pelota: no la uso.")
+        return T
+
+    def planificar_pelota(self, q0, T_pelota, diametro, T_dejada, apoyo_z=None, apoyo_poligono=None):
         """Coger una pelota, apretarla un poco y dejarla en el punto de dejada. Se prueban, por
         orden, varias formas de cogerla y, para cada una, de llegar:
           · rodeándola con la mano (la palma pegada a la pelota) y, si no se puede,
@@ -960,6 +1433,8 @@ class Planificador:
         Cada tramo se comprueba con la mano en la postura que tiene en ese momento (abierta al ir
         y acercarse; cerrada y con la pelota al retirarse, llevarla y dejarla), y alrededor de la
         pelota y del sitio de dejada la mesa se trata aparte (zonas_apoyo)."""
+        T_pelota = self.apoyar(T_pelota, diametro, apoyo_z)
+        self.poner_mesa(apoyo_z if self._apoyo_ok else None, apoyo_poligono)
         todos = {"pinza": ("en pinza", 0.0), "rodeándola": ("rodeándola", 0.0),
                  "con los dedos": ("con los dedos", self.pel_dedos)}
         modos = []
@@ -1058,7 +1533,7 @@ class Planificador:
         c_d = Tm_d[:3, 3] + (n_d * (r + 0.03) if self.dejar_de_pie else np.array([0.0, 0.0, r + 0.01]))
         T_p, T_d = self._marco_arriba(c), self._marco_arriba(c_d)
         # (la pelota se suelta 1 cm por encima del marcador de dejada: su «suelo» es el marcador)
-        self.zonas_apoyo([(c, r + self.zona_apoyo, r), (c_d, r + self.zona_apoyo, r + 0.01)])
+        self.zonas_apoyo([(c, r + self.zona_apoyo, r), (c_d, r + self.zona_apoyo, r + 0.01, not self.dejar_de_pie)])
         if pinza is not None:
             abierta, cerrada = ("pinza_abierta", None), ("pinza_contacto", self._pelota_en_mano(r, centro=punto))
         else:
@@ -1152,7 +1627,7 @@ class Planificador:
         centro = np.asarray(c_nueva, float) + a * pz["d_palma"]
         r = pz["r"]                                        # la zona de agarre, donde está ahora la pelota
         self.zonas_apoyo([(np.asarray(c_nueva, float), r + self.zona_apoyo, r),
-                          (pz["c_dejada"], r + self.zona_apoyo, r + 0.01)])
+                          (pz["c_dejada"], r + self.zona_apoyo, r + 0.01, not self.dejar_de_pie)])
         with self.con_mano(*fb.mano_chk):
             qs = self.recta(fb.qs[0], punto, centro, "bajar a la pelota")
         with self.con_mano(*fs.mano_chk):
@@ -1174,7 +1649,7 @@ class Planificador:
         if det.get("tipo") == "pelota":
             caja = det.get("caja")
             diam = float(det.get("diametro_m") or (2.0 * float(caja[0]) if caja else 0.07))
-            return self._previa_pelota(q0, T, diam)
+            return self._previa_pelota(q0, T, diam, det.get("apoyo_z"), det.get("apoyo_poligono"))
         q0 = self._empezar(q0)
         ops = [(q, q, qs, inc) for q, qs, inc in self.opciones_palma(T, q0, "la herramienta")]
         (h,), (ir,), _vuelta = self._combinar(q0, [("ir a la herramienta", ops)])
@@ -1182,8 +1657,10 @@ class Planificador:
         return Plan(q0, [Fase("Abrir la mano", mano="abierta"), Fase("Ir a la herramienta", ir)],
                     nombre="llevar la mano a la herramienta")
 
-    def _previa_pelota(self, q0, T_pelota, diametro):
+    def _previa_pelota(self, q0, T_pelota, diametro, apoyo_z=None, apoyo_poligono=None):
         """Como planificar_pelota (mismas formas de cogerla, en el mismo orden), hasta encima."""
+        T_pelota = self.apoyar(T_pelota, diametro, apoyo_z)
+        self.poner_mesa(apoyo_z if self._apoyo_ok else None, apoyo_poligono)
         todos = {"pinza": ("en pinza", 0.0), "rodeándola": ("rodeándola", 0.0),
                  "con los dedos": ("con los dedos", self.pel_dedos)}
         modos = []
@@ -1479,6 +1956,26 @@ class ManoActiva:
 ESTADOS = ("libre", "planificando", "lista", "ejecutando", "pausada", "terminada", "error")
 
 
+_AVISO_CUROBO = None
+
+
+def _envolvente(P2, res):
+    """Triangulación (scipy Delaunay) de la envolvente convexa de los puntos 2D P2, un poco
+    ampliada (medio cubo), o None si no hay bastantes."""
+    P2 = np.asarray(P2, float).reshape(-1, 2)
+    if len(P2) < 3:
+        return None
+    from scipy.spatial import Delaunay
+    m = P2.mean(0)
+    v = P2 - m
+    n = np.linalg.norm(v, axis=1, keepdims=True)
+    P2 = P2 + v / np.maximum(n, 1e-9) * (0.5 * res)
+    try:
+        return Delaunay(P2)
+    except Exception:                                   # todos en línea
+        return None
+
+
 def _postura_cfg(cfg, clave, defecto):
     v = cfg.get(clave)
     return {int(k): float(x) for k, x in (v if v is not None else defecto).items()}
@@ -1510,6 +2007,7 @@ class Tarea:
         self.desvio_max = math.radians(float(_g(self.cfg, "AUTONOMO_TAREA_DESVIO_MAX_DEG", 8.0)))
         self.excluir_r = float(_g(self.cfg, "AUTONOMO_TAREA_EXCLUIR_RADIO", 0.15))
         self.usar_mapa = bool(_g(self.cfg, "AUTONOMO_TAREA_USAR_MAPA", True))
+        self.mirar = bool(_g(self.cfg, "AUTONOMO_TAREA_MIRAR", True))
         self._fabrica_plan = fabrica_planificador
         self._fabrica_mano = fabrica_mano
         self._planificador = None
@@ -1553,7 +2051,7 @@ class Tarea:
     def _puede_planificar(self):
         return self.estado in ("libre", "lista", "terminada", "error", "pausada")
 
-    def _pedir_plan(self, ctx, volver):
+    def _pedir_plan(self, ctx, volver, mirar=True):
         if not self._puede_planificar():
             return
         if self.estado == "pausada":
@@ -1593,8 +2091,15 @@ class Tarea:
                          excluir=[(np.asarray(h["T_mundo"], float)[:3, 3],
                                    float(h.get("diametro_m") or 0.07) / 2 + 0.03 if h.get("tipo") == "pelota"
                                    else self.excluir_r) for h in sitios],
-                         diametro=float(herr.get("diametro_m") or 0.07) if pelota else None)
+                         diametro=float(herr.get("diametro_m") or 0.07) if pelota else None,
+                         # (17-nov) altura de la mesa medida con un plano alrededor de la pelota (pelotas.py)
+                         apoyo_z=herr.get("apoyo_z") if pelota else None,
+                         apoyo_poligono=herr.get("apoyo_poligono") if pelota else None,
+                         # (17-nov) si el brazo tapa el objetivo, primero apartarse y mirar (no en simulacro:
+                         # ahí el robot real no se mueve y la cámara seguiría viendo lo mismo)
+                         mirar=bool(mirar and not self.simulacro and self.mirar))
         datos["mapa"] = ctx.get("mapa") if self.usar_mapa else None
+        datos["visto"] = ctx.get("visto") if self.usar_mapa else None
         self.estado, self.texto = "planificando", "Planificando…"
         self.plan, self.ejec, self._resultado = None, None, None
         self._auto = volver
@@ -1612,13 +2117,23 @@ class Tarea:
             pl = self._planificador
             res, centros = d["mapa"] if d.get("mapa") else (0.02, None)
             n_vox = pl.poner_mapa(centros, res, d.get("excluir", ()))
-            if d["volver"]:
+            if hasattr(pl, "poner_visto"):
+                pl.poner_visto(d.get("visto"))
+            plan = (pl.plan_mirar(d["q"], d["T"][0][:3, 3])
+                    if d.get("mirar") and not d["volver"] and hasattr(pl, "plan_mirar") else None)
+            if plan is not None:
+                pass                                    # primero apartarse; al acabar se vuelve a planificar
+            elif d["volver"]:
                 plan = pl.plan_volver(d["q"], d["q_inicio"])
             elif d.get("pelota"):
-                plan = pl.planificar_pelota(d["q"], d["T"][0], d["diametro"], d["T"][1])
+                kw = ({"apoyo_z": d["apoyo_z"], "apoyo_poligono": d.get("apoyo_poligono")}
+                      if d.get("apoyo_z") is not None else {})
+                plan = pl.planificar_pelota(d["q"], d["T"][0], d["diametro"], d["T"][1], **kw)
             else:
                 plan = pl.planificar(d["q"], *d["T"])
             res = ("ok", plan, time.monotonic() - t0, n_vox)
+            if _g(self.cfg, "AUTONOMO_TAREA_GUARDAR_PLANES", True):    # (17-nov) para revisar un plan raro
+                self._guardar_fallo(d, "", plan=plan)
         except ErrorPlan as e:
             res = ("error", str(e) + self._guardar_fallo(d, str(e)), time.monotonic() - t0, 0)
         except Exception as e:                          # fallo de programa: que se vea
@@ -1628,25 +2143,41 @@ class Tarea:
         if d["gen"] == self._gen:                       # si entretanto se canceló o se pidió otro, no vale
             self._resultado = res
 
-    def _guardar_fallo(self, d, error):
+    def _guardar_fallo(self, d, error, plan=None):
         """Guarda lo que se usó para planificar (pose, sitios, mapa) en diagnosticos/, para poder
-        reproducir el fallo fuera del robot. Devuelve el texto a añadir al mensaje."""
-        if not _g(self.cfg, "AUTONOMO_TAREA_GUARDAR_FALLOS", True):
+        reproducir el fallo fuera del robot. Devuelve el texto a añadir al mensaje.
+        plan (17-nov): un plan que SÍ ha salido → plan_ok_*.npz, con sus posturas (se guardan los
+        AUTONOMO_TAREA_PLANES_GUARDADOS últimos), para revisar uno que no convence."""
+        if plan is None and not _g(self.cfg, "AUTONOMO_TAREA_GUARDAR_FALLOS", True):
             return ""
         try:
             import json
             import os
             carpeta = os.path.join(self.raiz, "diagnosticos")
             os.makedirs(carpeta, exist_ok=True)
-            ruta = os.path.join(carpeta, time.strftime("plan_fallido_%Y%m%d_%H%M%S.npz"))
+            ruta = os.path.join(carpeta, time.strftime(("plan_ok" if plan is not None else "plan_fallido")
+                                                       + "_%Y%m%d_%H%M%S.npz"))
             res, centros = d["mapa"] if d.get("mapa") else (0.02, None)
+            extra = {}
+            if plan is not None:
+                fs = [f for f in plan.fases if f.qs is not None]
+                extra = dict(plan_qs=np.vstack([f.qs for f in fs]) if fs else np.zeros((0, 6)),
+                             plan_n=np.array([len(f.qs) for f in fs], int),
+                             plan_fases=np.array([f.nombre for f in fs]))
             np.savez_compressed(
                 ruta, q=d["q"], T=np.array(d.get("T", []), float).reshape(-1, 4, 4),
                 q_inicio=d.get("q_inicio", np.full(6, np.nan)),
                 mapa=np.zeros((0, 3)) if centros is None else np.asarray(centros, float), res=float(res),
                 excluir=np.array([[*np.asarray(c, float), r] for c, r in d.get("excluir", ())]).reshape(-1, 4),
                 info=json.dumps(dict(error=error, nombres=d.get("nombres"), pelota=bool(d.get("pelota")),
-                                     diametro=d.get("diametro"), volver=bool(d.get("volver")))))
+                                     diametro=d.get("diametro"), volver=bool(d.get("volver")))), **extra)
+            if plan is not None:
+                import glob
+                viejos = sorted(glob.glob(os.path.join(carpeta, "plan_ok_*.npz")))
+                for v in viejos[:-int(_g(self.cfg, "AUTONOMO_TAREA_PLANES_GUARDADOS", 10))]:
+                    os.remove(v)
+                print(f"💾 Tarea: plan guardado en {ruta}")
+                return ""
             print(f"💾 Tarea: datos del plan fallido en {ruta}")
             return f" (guardado en diagnosticos/{os.path.basename(ruta)})"
         except Exception as e:
@@ -1719,16 +2250,25 @@ class Tarea:
             self._resultado = None
             if r == "ok":
                 self.plan = x
-                if x.nombre != "volver al inicio":
+                apartarse = bool(getattr(x, "replanificar", False))
+                if x.nombre != "volver al inicio" and not apartarse:
                     self._q_inicio = x.q0.copy()
                 dur = Ejecutor(x, self.posturas, self.vel, self.acel).duracion
                 self.estado = "lista"
+                if apartarse:
+                    self.texto = (f"El brazo le tapa a la cámara la mesa alrededor del objetivo: primero me aparto "
+                                  f"para mirar (unos {dur:.0f} s) y después planifico la tarea con el mapa al día. "
+                                  "Pulsa «Ejecutar».")
+                    print(f"🗺️  Tarea: {self.texto}")
+                    return None
                 inc = [i for i in (getattr(self._planificador, "inclinaciones", None) or []) if i]
                 self.texto = (f"Plan listo: {len(x.fases)} tramos, unos {dur:.0f} s "
                               f"(calculado en {seg:.1f} s, {n_vox} cubos del mapa)"
                               + (f"; llega de lado, hasta {max(inc):.0f}° de la perpendicular" if inc else "")
                               + (f"; rodea obstáculos en {nr} tramo{'s' if nr > 1 else ''}"
                                  if (nr := getattr(self._planificador, "rodeos", 0)) else "")
+                              + (f"; cuRobo (GPU) en {nc} tramo{'s' if nc > 1 else ''}"
+                                 if (nc := getattr(self._planificador, "tramos_curobo", 0)) else "")
                               + (f"; la coge {self._planificador.modo_pelota}"
                                  if getattr(self._planificador, "modo_pelota", None) and x.pelota is not None else "")
                               + ("; el punto de dejada está de pie: la soltará delante del marcador"
@@ -1798,6 +2338,21 @@ class Tarea:
             self.texto = "Pedal suelto: en pausa" + (f" · {f.nombre}" if f is not None else "")
         if self.mano_activa is not None and self.mano_activa.lista:
             self.mano_activa.enviar(self.ejec.mano())
+        if self.ejec.terminado and getattr(self.plan, "replanificar", False):
+            # (17-nov) ya se ha apartado y ha mirado: ahora sí, el plan de la tarea con el mapa al día
+            self._parar_fr5()
+            q = self.ejec.q()
+            self.ejec, self.plan = None, None
+            self.estado, self.texto = "terminada", "Ya veo la mesa: planificando la tarea…"
+            try:
+                ctx = contexto() if callable(contexto) else contexto
+            except Exception:
+                ctx = None
+            if ctx:
+                self._pedir_plan(ctx, volver=False, mirar=False)
+            else:
+                self.texto = "Ya veo la mesa: pulsa «Planificar»."
+            return q if self.simulacro else None
         if self.ejec.terminado:
             self._parar_fr5()
             nombre = self.plan.nombre
@@ -1846,7 +2401,7 @@ class Tarea:
         h = next((h for h in pelotas if h.get("id") == self._pelota_id), None)
         if h is None:                                   # perdió el seguimiento: la más cercana
             h = min(pelotas, key=lambda h: np.linalg.norm(np.asarray(h["T_mundo"])[:3, 3] - pz["c"]))
-        c2 = np.asarray(h["T_mundo"], float)[:3, 3]
+        c2 = self._planificador.apoyar(h["T_mundo"], 2 * pz["r"], h.get("apoyo_z"))[:3, 3]
         n = float(np.linalg.norm(c2 - pz["c"]))
         if n < self.afinar_min:
             print(f"🎯 Tarea: afinado: la pelota está donde se planificó ({n * 100:.1f} cm).")

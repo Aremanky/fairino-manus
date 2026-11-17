@@ -117,7 +117,8 @@ def test_cubos_pegados_al_robot_no_cuentan(cadena):
     lejos = np.array([0.6, -0.9, 0.5])
     pl.poner_mapa(np.vstack([codo + [0.0, 0.0, 0.07], lejos]), 0.02)
     pl._empezar(Q0)
-    assert pl.quitados_propios == 1 and len(pl._C) == 1 and np.allclose(pl._C[0], lejos)
+    # (17-nov) lo que queda se rellena hacia abajo (macizo): solo la columna del cubo lejano
+    assert pl.quitados_propios == 1 and np.allclose(pl._C[:, :2], lejos[:2]) and np.isclose(pl._C[:, 2].max(), lejos[2])
 
 
 # ── la tarea entera con el planificador de verdad ────────────────────────────────────────────
@@ -308,6 +309,8 @@ def test_debajo_de_la_pelota_siempre_hay_suelo(cadena):
     pl.poner_mapa(None, 0.02)
     c, r = np.array([0.35, -0.45, -0.15]), 0.035
     pl.zonas_apoyo([(c, r + pl.zona_apoyo, r)])
-    arbol, z = pl._suelo
-    d, i = arbol.query(c[:2])
-    assert d < 0.011 and np.isclose(z[i], c[2] - r + pl.margen_suave)
+    z_suelo = c[2] - r + pl.margen_suave
+    assert pl._bajo_suelo(np.array([[c[0], c[1], z_suelo - 0.01]]))          # justo debajo: no
+    assert not pl._bajo_suelo(np.array([[c[0], c[1], z_suelo + 0.01]]))      # encima: sí
+    # (17-nov) sin mesa vista alrededor, no se inventa: a 15 cm de la pelota no hay suelo
+    assert not pl._bajo_suelo(np.array([[c[0] + 0.15, c[1], z_suelo - 0.05]]))

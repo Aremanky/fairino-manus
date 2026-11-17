@@ -39,6 +39,7 @@ def _parsear():
     ap.add_argument("--canal-qbrazo", default=None, help="pose real del brazo (para quitarlo del mapa)")
     ap.add_argument("--canal-mapa", default=None, help="mapa de obstáculos (None = no calcularlo)")
     ap.add_argument("--canal-mando", default=None, help="mandos de la web (borrar mapa…)")
+    ap.add_argument("--canal-visto", default=None, help="qué ha visto la cámara (para el planificador)")
     ap.add_argument("--canal-herramientas", default=None, help="herramientas detectadas (None = no detectar)")
     ap.add_argument("--grabar", type=int, default=0, metavar="N",
                     help="guardar N pares color+profundidad en diagnosticos/escena_*.npz y salir "
@@ -117,7 +118,8 @@ def main():
         constructor = ConstructorMapa(cfg, os.path.dirname(os.path.abspath(cfg.__file__)),
                                       Canal.esperar(args.canal_qbrazo) if args.canal_qbrazo else None,
                                       Canal.esperar(args.canal_mapa),
-                                      Canal.esperar(args.canal_mando) if args.canal_mando else None)
+                                      Canal.esperar(args.canal_mando) if args.canal_mando else None,
+                                      Canal.esperar(args.canal_visto) if args.canal_visto else None)
         print(f"🧱 [autónomo] Mapa de obstáculos: rejilla {tuple(int(v) for v in constructor.mapa.n)} de "
               f"{constructor.mapa.res * 100:.0f} cm")
     detector, canal_herr, canal_mando_h = None, None, None

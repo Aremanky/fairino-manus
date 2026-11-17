@@ -102,11 +102,106 @@ def candidatas(img_bgr, prof_mm, K, cat, min_area=60, min_redondez=0.6):
     return out
 
 
+def apoyo_bajo(prof_mm, K, T_mundo_cam, u, v, r_px, centro_cam, diam, rng=None,
+               anillo=(1.6, 4.5), banda=0.06, tol=0.008, n_min=40, inclinacion_max_deg=15.0,
+               mesa_m=None, mesa_tol=0.012):
+    """(17-nov) Altura (z del mundo) de la superficie en la que está APOYADA la pelota: plano casi
+    horizontal ajustado (RANSAC) a la profundidad de un anillo alrededor de la pelota en la imagen,
+    a la altura de su parte de abajo (± banda). None si no hay bastante mesa a la vista (la tapa la
+    mano, la pelota está en el aire…). Sirve igual para cualquier objeto apoyado (herramientas).
+    mesa_m (17-nov): además, HASTA DÓNDE llega la mesa: los píxeles de una ventana de ese radio (m)
+    alrededor de la pelota que caen en el plano → su envolvente en planta. Devuelve entonces
+    (z, [[x, y], …] vértices de la envolvente o None)."""
+    if prof_mm is None or T_mundo_cam is None:
+        return None
+    h, w = prof_mm.shape[:2]
+    r0, r1 = anillo[0] * r_px, anillo[1] * r_px
+    x0, x1 = max(int(u - r1), 0), min(int(u + r1) + 1, w)
+    y0, y1 = max(int(v - r1), 0), min(int(v + r1) + 1, h)
+    if x1 - x0 < 3 or y1 - y0 < 3:
+        return None
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    d2 = (xx - u) ** 2 + (yy - v) ** 2
+    z = prof_mm[y0:y1, x0:x1].astype(np.float32) * 0.001
+    ok = (d2 >= r0 * r0) & (d2 <= r1 * r1) & (z > 0)
+    if ok.sum() < n_min:
+        return None
+    zz = z[ok]
+    P = np.column_stack([(xx[ok] - K[0, 2]) / K[0, 0] * zz, (yy[ok] - K[1, 2]) / K[1, 1] * zz, zz])
+    P = P @ T_mundo_cam[:3, :3].T + T_mundo_cam[:3, 3]
+    c = T_mundo_cam[:3, :3] @ np.asarray(centro_cam, float) + T_mundo_cam[:3, 3]
+    zb = c[2] - diam / 2.0
+    P = P[np.abs(P[:, 2] - zb) < banda]
+    if len(P) < n_min:
+        return None
+    rng = np.random.default_rng(0) if rng is None else rng
+    if len(P) > 3000:
+        P = P[rng.choice(len(P), 3000, replace=False)]
+    cos_max = math.cos(math.radians(inclinacion_max_deg))
+    mejor = None
+    for _ in range(60):
+        A, B, C = P[rng.choice(len(P), 3, replace=False)]
+        n = np.cross(B - A, C - A)
+        nn = np.linalg.norm(n)
+        if nn < 1e-9 or abs(n[2]) / nn < cos_max:
+            continue
+        n /= nn
+        inl = np.abs((P - A) @ n) < tol
+        if mejor is None or inl.sum() > mejor.sum():
+            mejor = inl
+    if mejor is None or mejor.sum() < n_min:
+        return None
+    Q = P[mejor]                                          # ajuste fino: z = a·x + b·y + c
+    M = np.column_stack([Q[:, 0], Q[:, 1], np.ones(len(Q))])
+    a, b, c0 = np.linalg.lstsq(M, Q[:, 2], rcond=None)[0]
+    z_apoyo = float(a * c[0] + b * c[1] + c0)
+    if mesa_m is None:
+        return z_apoyo
+    return z_apoyo, _mesa_en_plano(prof_mm, K, T_mundo_cam, u, v, centro_cam, (a, b, c0), mesa_m, mesa_tol)
+
+
+def _mesa_en_plano(prof_mm, K, T_mundo_cam, u, v, centro_cam, plano, radio_m, tol, paso=3, n_min=60):
+    """Envolvente en planta (vértices [[x, y], …]) de lo que cae en el plano z = a·x + b·y + c dentro
+    de una ventana de radio_m alrededor de la pelota, o None."""
+    h, w = prof_mm.shape[:2]
+    zc = max(float(np.asarray(centro_cam, float)[2]), 0.2)
+    r_px = radio_m * 0.5 * (K[0, 0] + K[1, 1]) / zc
+    x0, x1 = max(int(u - r_px), 0), min(int(u + r_px) + 1, w)
+    y0, y1 = max(int(v - r_px), 0), min(int(v + r_px) + 1, h)
+    if x1 - x0 < 3 or y1 - y0 < 3:
+        return None
+    yy, xx = np.mgrid[y0:y1:paso, x0:x1:paso]
+    z = prof_mm[y0:y1:paso, x0:x1:paso].astype(np.float32) * 0.001
+    ok = z > 0
+    if ok.sum() < n_min:
+        return None
+    zz = z[ok]
+    P = np.column_stack([(xx[ok] - K[0, 2]) / K[0, 0] * zz, (yy[ok] - K[1, 2]) / K[1, 1] * zz, zz])
+    P = P @ T_mundo_cam[:3, :3].T + T_mundo_cam[:3, 3]
+    a, b, c0 = plano
+    c = T_mundo_cam[:3, :3] @ np.asarray(centro_cam, float) + T_mundo_cam[:3, 3]
+    en = (np.abs(P[:, 2] - (a * P[:, 0] + b * P[:, 1] + c0)) < tol) & \
+         (np.linalg.norm(P[:, :2] - c[:2], axis=1) < radio_m)
+    if en.sum() < n_min:
+        return None
+    try:
+        from scipy.spatial import ConvexHull
+        Q = P[en, :2]
+        return Q[ConvexHull(Q).vertices].round(4).tolist()
+    except Exception:
+        return None
+
+
 class _Pista:
     def __init__(self, id_, e, p, diam, ahora):
         self.id, self.e, self.p, self.diam = id_, e, p.copy(), diam
         self.n, self.t = 1, ahora
         self.hist = [p.copy()]
+        self.apoyos = []                     # (17-nov) alturas de la mesa medidas (las últimas)
+        self.mesa = None                     # (17-nov) envolvente en planta de la mesa (la última)
+
+    def apoyo(self):
+        return float(np.median(self.apoyos)) if len(self.apoyos) >= 3 else None
 
     def nueva(self, p, diam, ahora, alfa=0.4):
         self.p = (1 - alfa) * self.p + alfa * p
@@ -130,6 +225,8 @@ class DetectorPelotas(ConCorreccion):
         self.n_estable = int(g.get("AUTONOMO_PELOTAS_N_ESTABLE", n_estable))
         self.olvido_s = float(g.get("AUTONOMO_PELOTAS_OLVIDO_S", olvido_s))
         self.salto_m = float(salto_m)
+        self.medir_apoyo = bool(g.get("AUTONOMO_PELOTAS_MEDIR_APOYO", True))
+        self.mesa_m = float(g.get("AUTONOMO_PELOTAS_MESA_RADIO", 0.35))   # m alrededor donde se mide la mesa
         self.pistas = {}
         self._sig = ID_BASE
         self.T_mundo_cam, self._mtime, self._t_calib = None, None, 0.0
@@ -156,7 +253,7 @@ class DetectorPelotas(ConCorreccion):
         self._recargar(time.monotonic())
         self.ultimas = candidatas(img_bgr, prof_mm, K, self.cat)
         usadas = set()
-        for e, p, diam, _ in sorted(self.ultimas, key=lambda c: c[1][2]):
+        for e, p, diam, uvr in sorted(self.ultimas, key=lambda c: c[1][2]):
             libres = [s for i, s in self.pistas.items() if s.e is e and i not in usadas
                       and ahora - s.t <= self.olvido_s]
             s = min(libres, key=lambda s: np.linalg.norm(s.p - p), default=None)
@@ -167,6 +264,16 @@ class DetectorPelotas(ConCorreccion):
                 self.pistas[self._sig] = s
                 self._sig += 1
             usadas.add(s.id)
+            if self.medir_apoyo:
+                try:
+                    r_ = apoyo_bajo(prof_mm, K, self.T_mundo_cam, *uvr, p, diam, mesa_m=self.mesa_m)
+                except Exception:
+                    r_ = None
+                if r_ is not None:
+                    z, poli = r_
+                    s.apoyos = (s.apoyos + [z])[-15:]
+                    if poli is not None:
+                        s.mesa = poli
         for i in [i for i, s in self.pistas.items() if ahora - s.t > 3 * self.olvido_s]:
             del self.pistas[i]
 
@@ -202,7 +309,10 @@ class DetectorPelotas(ConCorreccion):
                             distancia_m=round(float(np.linalg.norm(s.p)), 3), diametro_m=round(s.diam, 3),
                             temblor_mm=None if s.temblor_mm() is None else round(s.temblor_mm(), 1),
                             T_cam=np.round(T, 5).tolist(), T_mundo=None if Tm is None else np.round(Tm, 5).tolist(),
-                            caja=[r, r, r], color=list(s.e["color_gemelo"])))
+                            caja=[r, r, r], color=list(s.e["color_gemelo"]),
+                            apoyo_z=None if s.apoyo() is None or self.T_mundo_cam is None else round(s.apoyo(), 4),
+                            apoyo_poligono=s.mesa if s.apoyo() is not None and self.T_mundo_cam is not None
+                            else None))
         return out
 
     def caja_mundo(self, id_):

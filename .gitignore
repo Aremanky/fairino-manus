@@ -253,3 +253,6 @@ diagnosticos/*.npz
 # Contraseña de la web del modo autónomo: config.py la lee de aquí (o de SKILL_SHIELD_WEB_CLAVE).
 # NUNCA al repo: git rm --cached clave_web.txt (y cambiadla: sigue en el historial)
 clave_web.txt
+
+# cuRobo (instalar_curobo.sh)
+externos/

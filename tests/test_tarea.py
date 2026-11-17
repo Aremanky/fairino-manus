@@ -537,12 +537,14 @@ def test_pelota_encima_de_una_mesa_del_mapa(cadena, pl, bxy):
         plan = pl.planificar_pelota(Q0, _plano(bola), 2 * r, _plano(dej))
         nombres = [f.nombre for f in plan.fases]
         fb = plan.fases[nombres.index("Bajar a la pelota")]
-        # la última postura (con la mano cerrada y la pelota) sigue sin tocar la mesa
-        with pl.con_mano("pelota_cerrada", pl._pelota_en_mano(r)):
+        # la última postura (con la mano como la lleva el plan al subir: cerrada y con la pelota) sigue sin
+        # tocar la mesa, y TODA la mano (el pulgar también, 17-nov) le deja la holgura pedida
+        fs = plan.fases[nombres.index("Subir con la pelota")]
+        with pl.con_mano(*fs.mano_chk):
             assert pl.motivo(fb.qs[-1]) is None
             Tb = cadena.fk_marcos(fb.qs[-1])[5]
             P = pl._mano_pts @ Tb[:3, :3].T + Tb[:3, 3]
-            assert P[:, 2].min() > zt                                   # nada de la mano bajo la mesa
+            assert P[:, 2].min() > zt + pl.holgura_mesa_mano - 0.002
     finally:
         pl.poner_mapa(None, 0.02)
 
@@ -624,3 +626,215 @@ def test_plan_pelota_en_pinza_la_coge_entre_las_yemas(cadena, pl):
     assert np.dot(y["pulgar"] - BOLA, y["indice"] - BOLA) < 0                 # por lados opuestos
     ej = TA.Ejecutor(plan, {"abierta": {}}, 1.0, 2.0)                         # usa las posturas del plan
     assert "pinza_cerrada" in ej.posturas
+
+
+# ── (17-nov) ir por arriba, apartarse para mirar y la mesa medida ─────────────────────────────
+def _cajonera(zt=-0.25, X=(0.10, 0.60), Y=(-0.75, -0.30), z0=-0.95, res=0.02):
+    """Lo que ve la cámara de una cajonera maciza: su tapa y sus lados (por dentro, nada)."""
+    xs, ys = np.arange(X[0], X[1], res) + res / 2, np.arange(Y[0], Y[1], res) + res / 2
+    zs = np.arange(z0, zt, res) + res / 2
+    tapa = np.array([[x, y, zt - res / 2] for x in xs for y in ys])
+    lados = [[x, y, z] for z in zs for x in xs for y in (ys[0], ys[-1])] + \
+            [[x, y, z] for z in zs for y in ys for x in (xs[0], xs[-1])]
+    return np.vstack([tapa, lados])
+
+
+def _dentro_cajonera(P, zt=-0.25, X=(0.10, 0.60), Y=(-0.75, -0.30), h=0.005):
+    return (P[:, 0] > X[0] + h) & (P[:, 0] < X[1] - h) & (P[:, 1] > Y[0] + h) & (P[:, 1] < Y[1] - h) & (P[:, 2] < zt - h)
+
+
+@pytest.mark.parametrize("hueco", [0.0, 0.25])
+def test_plan_de_la_pelota_no_mete_el_brazo_en_la_cajonera(cadena, hueco):
+    """Caso del 17-nov: la mano empezaba cerca de la mesa y, al «Ir encima de la pelota», el antebrazo
+    se metía en la cajonera (dentro de la zona de la pelota la mesa no contaba, y por dentro estaba
+    hueca), más aún con el hueco que dejaba la mano en el mapa. Ahora: suelo también para el brazo,
+    mesa maciza, y los tramos van por arriba."""
+    pl = TA.Planificador(cadena, G)
+    zt, r = -0.25, 0.035
+    bola, dej = np.array([0.35, -0.45, zt + r]), np.array([0.20, -0.62, zt + 0.002])
+    S = _cajonera()
+    S = S[np.linalg.norm(S[:, :2] - bola[:2], axis=1) > hueco] if hueco else S
+    rng = np.random.default_rng(1)
+    hechos = 0
+    while hechos < 4:
+        q = Q0 + rng.normal(0, 0.5, 6)
+        T = cadena.fk_marcos(q)[6]
+        palma = T[:3, :3] @ OFFSET_PALMA_ORCA + T[:3, 3]
+        if not (zt + 0.04 < palma[2] < zt + 0.25 and np.linalg.norm(palma[:2] - bola[:2]) < 0.35):
+            continue
+        pl.poner_mapa(S, 0.02, [(bola, r + 0.03), (dej, 0.15)])
+        if pl.motivo(q) is not None or _dentro_cajonera(pl._puntos_robot(q)).any():
+            continue
+        hechos += 1
+        plan = pl.planificar_pelota(q, _plano(bola), 2 * r, _plano(dej))
+        for f in plan.fases:
+            if f.qs is None:
+                continue
+            clave = f.mano_chk[0]
+            mano = pl._nube_postura(clave) if clave else pl._mano_pts0
+            for qq in f.qs:
+                m = cadena.fk_marcos(qq)
+                P = [mano @ m[5][:3, :3].T + m[5][:3, 3]] + [p @ m[k][:3, :3].T + m[k][:3, 3] for k, p, _ in pl._brazo_pts]
+                assert not _dentro_cajonera(np.vstack(P)).any(), f"{f.nombre} se mete en la cajonera"
+        assert pl.tramos_por_alto > 0
+    pl.poner_mapa(None, 0.02)
+
+
+def test_tramo_por_alto_sube_por_encima_de_lo_que_hay(cadena, pl):
+    zt = -0.25
+    pl.poner_mapa(_cajonera(zt), 0.02)
+    pl._empezar(Q0)
+    rng = np.random.default_rng(2)
+    qs = []
+    while len(qs) < 2:
+        q = Q0 + rng.normal(0, 0.4, 6)
+        p = pl._palma(q)
+        if zt + 0.05 < p[2] < zt + 0.15 and pl.motivo(q) is None and not _dentro_cajonera(pl._puntos_robot(q)).any():
+            if not qs or np.linalg.norm(p[:2] - pl._palma(qs[0])[:2]) > 0.15:
+                qs.append(q)
+    try:
+        tramo = pl.tramo_por_alto(qs[0], qs[1])
+    except TA.ErrorPlan:
+        pytest.skip("estas dos posturas no tienen tramo por arriba")
+    finally:
+        pl.poner_mapa(None, 0.02)
+    z = np.array([pl._palma(q)[2] for q in tramo])
+    assert z.max() >= zt + pl.alto_margen - 0.011            # pasa por encima de la tapa + el margen
+    assert np.allclose(tramo[0], qs[0]) and np.allclose(tramo[-1], qs[1])
+
+
+def test_si_el_brazo_tapa_la_pelota_se_aparta_mira_y_vuelve_a_planificar():
+    fr5 = FR5Falso()
+    llamadas = []
+
+    class PlanMirar(PlanFalso):
+        def plan_mirar(self, q0, c):
+            llamadas.append("mirar")
+            if len(llamadas) > 1:
+                raise AssertionError("solo se aparta una vez")
+            qs = q0 + np.radians([0, 0, 0, 0, 0, 10]) * np.linspace(0, 1, 10)[:, None]
+            p = TA.Plan(q0, [TA.Fase("Apartarse", qs), TA.Fase("Mirar la mesa", dur=0.2)], nombre="apartarse para mirar")
+            p.replanificar = True
+            return p
+
+        def planificar_pelota(self, q0, T, d, Td, apoyo_z=None, **kw):
+            llamadas.append(("pelota", apoyo_z))
+            return TA.Plan(q0, _plano_pelota_falso().fases, nombre="coger, apretar y dejar la pelota")
+    t = TA.Tarea(dict(G, AUTONOMO_TAREA_MOVER_MANO=False), ".", fr5, simulacro=False, fabrica_planificador=PlanMirar)
+    herr = [dict(h, apoyo_z=-0.04) if h["id"] == 100 else h for h in HERR_PELOTA]
+    ctx = lambda: dict(q_real=fr5.q, herramientas=herr, objetivo_id=100, mapa=None)
+    t.orden({"tarea": dict(accion="planificar", id="m1")}, ctx)
+    _esperar_plan(t, fr5)
+    assert t.estado == "lista" and "me aparto" in t.texto and t.plan.nombre == "apartarse para mirar"
+    t.orden({"tarea": dict(accion="ejecutar", id="m2")}, ctx)
+    for _ in range(600):
+        t.paso(1 / 60, fr5.q, True, ctx)
+        if t.estado == "planificando":
+            break
+    assert t.estado == "planificando"                         # al acabar de mirar, planifica la tarea solo
+    _esperar_plan(t, fr5)
+    assert t.estado == "lista" and t.plan.nombre.endswith("pelota")   # y espera a «Ejecutar» (no arranca solo)
+    assert llamadas == ["mirar", ("pelota", -0.04)]
+
+
+def test_la_mesa_medida_pone_la_pelota_apoyada(pl):
+    T = _plano((0.3, -0.5, -0.20))
+    assert pl.apoyar(T, 0.07, -0.25)[2, 3] == pytest.approx(-0.215)     # 1,5 cm más abajo: apoyada en la mesa
+    assert pl.apoyar(T, 0.07, -0.40)[2, 3] == pytest.approx(-0.20)      # no cuadra (15 cm): no se usa
+    assert pl.apoyar(T, 0.07, None)[2, 3] == pytest.approx(-0.20)
+
+
+def test_caso_real_17nov_el_pulgar_no_toca_la_mesa(cadena):
+    """Plan real del 17-nov (diagnosticos/plan_ok_20261117_104644.npz): en la bajada en pinza el pulgar
+    quedaba a ~1 cm de la mesa estimada y en el robot la tocaba. Ahora toda la mano le deja la holgura
+    pedida y los tramos van por arriba."""
+    from skill_shield.autonomo import calibracion as C
+    d = np.load(os.path.join(RAIZ, "tests", "datos", "plan_pelota_pulgar_17nov.npz"))
+    pl = TA.Planificador(cadena, G, C.cargar(os.path.join(RAIZ, "camara_robot.json"))["T_mundo_cam"])
+    pl.poner_mapa(d["mapa"], float(d["res"]), [(e[:3], e[3]) for e in d["excluir"]])
+    plan = pl.planificar_pelota(d["q"], d["T"][0], 0.07, d["T"][1])
+    b = d["T"][0][:3, 3]
+    z_mesa = b[2] - 0.035
+    for f in plan.fases:
+        if f.qs is None or not f.nombre.startswith(("Bajar a la pelota", "Subir con la pelota")):
+            continue
+        clave, _ = f.mano_chk
+        for q in f.qs:
+            Tb = cadena.fk_marcos(q)[5]
+            P = pl._nube_postura(clave) @ Tb[:3, :3].T + Tb[:3, 3]
+            sobre = np.linalg.norm(P[:, :2] - b[:2], axis=1) < 0.30
+            assert P[sobre, 2].min() > z_mesa + pl.holgura_mesa_mano - 0.002, f.nombre
+    assert pl.tramos_por_alto >= 1
+
+
+def test_comprobacion_continua_ve_lo_que_hay_entre_dos_posturas(cadena):
+    """(17-nov) Un cubo justo donde pasa la mano ENTRE dos posturas válidas: la comprobación por
+    posturas sueltas no lo ve; la continua, sí."""
+    pl = TA.Planificador(cadena, G)
+    rng = np.random.default_rng(5)
+    for _ in range(300):
+        qa = Q0 + rng.normal(0, 0.3, 6)
+        qb = qa + np.radians([14.0, 0, 0, 0, 0, 0])
+        qm = 0.5 * (qa + qb)
+        pl.poner_mapa(np.array([pl._palma(qm)]), 0.02)
+        pl.min_grupo = 1
+        if pl.motivo(qa) is None and pl.motivo(qb) is None and pl.motivo(qm) is not None:
+            break
+    else:
+        pytest.skip("no encuentro un caso así")
+    pl.continuo = False
+    pl.comprobar_continuo(np.array([qa, qb]))                 # sin continua: no se entera
+    pl.continuo = True
+    with pytest.raises(TA.ErrorPlan, match="entre dos posturas"):
+        pl.comprobar_continuo(np.array([qa, qb]))
+    pl.poner_mapa(None, 0.02)
+
+
+def test_lo_no_visto_cuenta_como_coste(cadena, pl):
+    from skill_shield.autonomo.mapa import MapaOcupacion, empaquetar_visto, desempaquetar_visto
+    m = MapaOcupacion(((-1.0, 0.6), (-1.6, 0.4), (-0.975, 0.9)), 0.02)
+    v = desempaquetar_visto(empaquetar_visto(m))               # recién creado: nada visto
+    assert v["n"] == tuple(m.n) and not v["conocido"].any()
+    qs = Q0 + np.radians([10, 0, 0, 0, 0, 0]) * np.linspace(0, 1, 6)[:, None]
+    pl.poner_mapa(None, 0.02)
+    pl.poner_visto(v)
+    assert pl.desconocido(qs) == pytest.approx(1.0)
+    c_desc = pl.coste_tramo(qs)
+    v["conocido"][:] = True
+    assert pl.desconocido(qs) == 0.0 and pl.coste_tramo(qs) < c_desc
+    pl.poner_visto(None)
+    assert pl.desconocido(qs) == 0.0
+
+
+def test_la_mesa_medida_es_suelo_en_toda_su_extension(pl):
+    pl.poner_mapa(None, 0.02)
+    pl.poner_mesa(-0.25, [[0.0, -0.8], [0.6, -0.8], [0.6, -0.4], [0.0, -0.4]])
+    pl.zonas_apoyo(())
+    assert pl._bajo_suelo(np.array([[0.30, -0.60, -0.27]]), solo_discos=True)        # dentro y debajo: no
+    assert not pl._bajo_suelo(np.array([[0.30, -0.60, -0.20]]), solo_discos=True)    # encima: sí
+    assert not pl._bajo_suelo(np.array([[0.80, -0.60, -0.27]]), solo_discos=True)    # fuera de la mesa: sí
+    pl.poner_mapa(None, 0.02)
+
+
+def test_las_mesas_del_mapa_son_suelo_y_no_estorban_si_el_robot_esta_debajo(cadena):
+    """(17-nov) Las mesas que encuentra el mapa (planos) son suelo para mano y brazo; pero si el robot
+    está AHORA debajo de una (mal medida, o un estante), esa no se usa."""
+    from skill_shield.autonomo.mapa import MapaOcupacion, desempaquetar_visto, empaquetar_visto
+    pl = TA.Planificador(cadena, G)
+    m = MapaOcupacion(((-1.0, 0.6), (-1.6, 0.4), (-0.975, 0.9)), 0.02)
+    v = desempaquetar_visto(empaquetar_visto(m))
+    v["conocido"][:] = True
+    mesa = np.array([[0.0, -0.8], [0.6, -0.8], [0.6, -0.4], [0.0, -0.4]])
+    v["superficies"] = [(-0.25, mesa)]
+    pl.poner_mapa(None, 0.02)
+    pl.poner_visto(v)
+    assert pl._bajo_suelo(np.array([[0.3, -0.6, -0.30]]), solo_discos=True)
+    # el robot, con la mano debajo de una «mesa» a z más alta que la palma: esa mesa no se usa
+    p = pl._palma(Q0)
+    estante = np.array([[p[0] - 0.2, p[1] - 0.2], [p[0] + 0.2, p[1] - 0.2], [p[0] + 0.2, p[1] + 0.2], [p[0] - 0.2, p[1] + 0.2]])
+    v["superficies"] = [(-0.25, mesa), (float(p[2]) + 0.05, estante)]
+    pl.poner_visto(v)
+    pl._empezar(Q0)                                           # no da error: el estante se descarta
+    assert len(pl._superficies) == 1 and pl._superficies[0][0] == pytest.approx(-0.25)
+    pl.poner_visto(None)
+    pl.poner_mapa(None, 0.02)

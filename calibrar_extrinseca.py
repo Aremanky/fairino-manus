@@ -61,13 +61,100 @@ def angulo_vision(T):
     return float(np.degrees(np.arccos(np.clip(abs(n @ v), 0, 1))))
 
 
+def filtrar_marcadores(m_corners, m_ids, board, holgura=2.0):
+    """(17-nov) Quita los FALSOS POSITIVOS antes de buscar las esquinas ChArUco.
+
+    Con marcadores pequeños (minMarkerPerimeterRate bajo) y DICT_4X4 (pocos bits), en una escena
+    con cajoneras, listones, pantallas... salen 1-3 «marcadores» falsos por imagen, con un ID al azar
+    entre 0 y 49. Si el ID no es del tablero da igual, pero si coincide con uno del tablero (≈20 %
+    de las veces con el 5x4) ese ID sale REPETIDO y el CharucoDetector de OpenCV ≥ 4.9
+    (CharucoParameters.checkMarkers, activo por defecto) da el tablero entero por falso:
+    0 esquinas aunque se vean todos los marcadores → la detección «parpadea».
+
+    Se queda con los IDs del tablero; de cada ID repetido, el más cercano al centro del grupo; y
+    descarta los que estén más lejos del centro de lo que permite el tamaño del tablero.
+    Devuelve (corners, ids, n_descartados)."""
+    if m_ids is None or len(m_ids) == 0:
+        return m_corners, m_ids, 0
+    ids_tab = set(int(i) for i in np.asarray(board.getIds()).ravel())
+    cs = [np.asarray(c, np.float32).reshape(4, 2) for c in m_corners]
+    ids = [int(i) for i in np.asarray(m_ids).ravel()]
+    sel = [k for k, i in enumerate(ids) if i in ids_tab]
+    if not sel:
+        return (), None, len(ids)
+    centros = np.array([cs[k].mean(0) for k in sel])
+    lados = np.array([np.mean(np.linalg.norm(cs[k] - np.roll(cs[k], 1, axis=0), axis=1)) for k in sel])
+    centro, lado = np.median(centros, axis=0), float(np.median(lados))
+    d = np.linalg.norm(centros - centro, axis=1)
+    # radio del tablero medido en «lados de marcador» (sale de su propia geometría)
+    obj = [np.asarray(o).reshape(-1, 3)[:, :2] for o in board.getObjPoints()]
+    oc = np.array([o.mean(0) for o in obj])
+    lado_obj = float(np.linalg.norm(obj[0][1] - obj[0][0]))
+    radio = float(np.max(np.linalg.norm(oc - oc.mean(0), axis=1))) / max(lado_obj, 1e-9)
+    mejor = {}
+    for j, k in enumerate(sel):
+        if d[j] > holgura * radio * lado + 2 * lado:
+            continue
+        if ids[k] not in mejor or d[j] < mejor[ids[k]][0]:
+            mejor[ids[k]] = (d[j], k)
+    quedan = sorted(k for _, k in mejor.values())
+    if not quedan:
+        return (), None, len(ids)
+    return (tuple(cs[k].reshape(1, 4, 2) for k in quedan),
+            np.array([[ids[k]] for k in quedan], np.int32), len(ids) - len(quedan))
+
+
+_DETECTORES_ARUCO = {}
+
+
+def detectar_tablero(detector, board, gris):
+    """detectBoard, pero detectando y filtrando antes los marcadores (filtrar_marcadores).
+    Devuelve (corners, ids, m_corners, m_ids, n_descartados)."""
+    ad = _DETECTORES_ARUCO.get(id(detector))
+    if ad is None:
+        ad = _DETECTORES_ARUCO[id(detector)] = cv2.aruco.ArucoDetector(
+            board.getDictionary(), detector.getDetectorParameters(), detector.getRefineParameters())
+    mc, mi, rech = ad.detectMarkers(gris)
+    mc, mi, n_desc = filtrar_marcadores(mc, mi, board)
+    if mi is None or len(mi) == 0:
+        return None, None, mc, mi, n_desc
+    if getattr(detector.getCharucoParameters(), "tryRefineMarkers", False):
+        try:                                   # recupera marcadores que no salieron a la primera
+            mc, mi, rech, _ = ad.refineDetectedMarkers(gris, board, mc, mi, rech)
+            mc, mi, n2 = filtrar_marcadores(mc, mi, board)
+            n_desc += n2
+        except cv2.error:
+            pass
+    corners, ids, mc, mi, n2 = tablero_de_marcadores(detector, gris, mc, mi)
+    return corners, ids, mc, mi, n_desc + n2
+
+
+def tablero_de_marcadores(detector, gris, mc, mi):
+    """Esquinas ChArUco a partir de marcadores ya filtrados. Devuelve (corners, ids, mc, mi, n_quitados)."""
+    n_desc = 0
+    corners, ids, _, _ = detector.detectBoard(gris, markerCorners=mc, markerIds=mi)
+    # Si aun así OpenCV rechaza el tablero (un falso con ID del tablero justo encima o al lado),
+    # se prueba quitando el marcador más alejado del centro, hasta 2 veces.
+    for _ in range(2):
+        if ids is not None and len(ids) or len(mi) < 5:
+            break
+        cen = np.array([np.asarray(c).reshape(4, 2).mean(0) for c in mc])
+        quita = int(np.argmax(np.linalg.norm(cen - np.median(cen, axis=0), axis=1)))
+        mc = tuple(c for k, c in enumerate(mc) if k != quita)
+        mi = np.delete(mi, quita, axis=0)
+        n_desc += 1
+        corners, ids, _, _ = detector.detectBoard(gris, markerCorners=mc, markerIds=mi)
+    return corners, ids, mc, mi, n_desc
+
+
 def pose_tablero(detector, board, gris, K, dist, min_esquinas=6, max_reproj_px=1.5):
     """T (4x4) cámara←tablero con solvePnP sobre las esquinas ChArUco, o (None, motivo)."""
-    corners, ids, m_corners, m_ids = detector.detectBoard(gris)
+    corners, ids, m_corners, m_ids, n_desc = detectar_tablero(detector, board, gris)
     n_marc = 0 if m_ids is None else len(m_ids)
     n_esq = 0 if ids is None else len(ids)
     if corners is None or ids is None or n_esq < min_esquinas:
-        return None, f"marcadores {n_marc} | esquinas {n_esq}/{min_esquinas}", corners, ids
+        desc = f" (+{n_desc} falsos)" if n_desc else ""
+        return None, f"marcadores {n_marc}{desc} | esquinas {n_esq}/{min_esquinas}", corners, ids
     obj = board.getChessboardCorners()[ids.flatten()].astype(np.float64)
     img = corners.reshape(-1, 2).astype(np.float64)
     ok, rvec, tvec = cv2.solvePnP(obj, img, K, dist, flags=cv2.SOLVEPNP_ITERATIVE)

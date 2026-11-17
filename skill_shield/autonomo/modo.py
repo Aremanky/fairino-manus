@@ -50,6 +50,7 @@ CANAL_SIM = "skill_autonomo_sim"
 CANAL_SIMCAM = "skill_autonomo_simcam"
 CANAL_QBRAZO = "skill_autonomo_qbrazo"
 CANAL_MAPA = "skill_autonomo_mapa"
+CANAL_VISTO = "skill_autonomo_visto"     # (17-nov) qué ha visto la cámara (bits por cubo)
 CANAL_HERRAMIENTAS = "skill_autonomo_herramientas"
 
 
@@ -205,6 +206,7 @@ def ejecutar(cfg):
     canal_qbrazo = Canal(CANAL_QBRAZO, capacidad=16 << 10, crear=True) if con_mapa else None
     canal_mapa = Canal(CANAL_MAPA, capacidad=16 + 12 * int(cfg.get("AUTONOMO_MAPA_MAX_DIBUJO", 6000)),
                        crear=True) if con_mapa else None
+    canal_visto = Canal(CANAL_VISTO, capacidad=2 << 20, crear=True) if con_mapa else None
     con_herr = bool(cfg.get("AUTONOMO_HERRAMIENTAS"))
     canal_herr = Canal(CANAL_HERRAMIENTAS, capacidad=64 << 10, crear=True) if con_herr else None
 
@@ -218,7 +220,7 @@ def ejecutar(cfg):
     if cfg.get("AUTONOMO_CAM_VENTANA", False):
         cmd_cam.append("--ventana")
     if con_mapa:
-        cmd_cam += ["--canal-qbrazo", CANAL_QBRAZO, "--canal-mapa", CANAL_MAPA]
+        cmd_cam += ["--canal-qbrazo", CANAL_QBRAZO, "--canal-mapa", CANAL_MAPA, "--canal-visto", CANAL_VISTO]
     if con_herr:
         cmd_cam += ["--canal-herramientas", CANAL_HERRAMIENTAS]
     if con_mapa or con_herr:
@@ -405,7 +407,13 @@ def ejecutar(cfg):
                     if mp is not None and len(mp[1]) >= int(cfg.get("AUTONOMO_MAPA_MAX_DIBUJO", 6000)):
                         print("⚠️  Tarea: el mapa tiene más cubos de los que se publican "
                               "(AUTONOMO_MAPA_MAX_DIBUJO): se planifica con una muestra.")
-                    return dict(q_real=q, herramientas=lista, objetivo_id=(mando or {}).get("objetivo_id"), mapa=mp)
+                    visto = None
+                    if canal_visto is not None:
+                        from skill_shield.autonomo.mapa import desempaquetar_visto
+                        b_v, t_v = canal_visto.leer()
+                        visto = desempaquetar_visto(b_v) if b_v and t_v and time.time() - t_v < 3.0 else None
+                    return dict(q_real=q, herramientas=lista, objetivo_id=(mando or {}).get("objetivo_id"), mapa=mp,
+                                visto=visto)
                 tarea.orden(mando, _contexto)
                 q_tarea_sim = tarea.paso(dt_vuelta, q, control.web_viva and control.pedal_pisado, _contexto)
             robot_listo = fr5 is not None and fr5.conectado
@@ -464,7 +472,7 @@ def ejecutar(cfg):
             except Exception:
                 pass
         for c in (canal_img, canal_info, canal_estado, canal_mando, canal_sim, canal_simcam, canal_qpos,
-                  canal_qbrazo, canal_mapa, canal_herr):
+                  canal_qbrazo, canal_mapa, canal_herr, canal_visto):
             if c is not None:
                 c.cerrar()
     return 0
