@@ -431,7 +431,7 @@ def posturas_explorar(q0, colisiones, limites, v_max_deg=15.0):
 
 def planificar_posturas(q0, cadena, colisiones, T_mundo_cam, T_brida_tablero, K, ancho, alto, P,
                         n=20, candidatas=4000, amplitud_deg=(30, 20, 25, 45, 45, 70), v_max_deg=15.0,
-                        semilla=0, limites=None):
+                        semilla=0, limites=None, distancia=(0.25, 1.6)):
     """Posturas para la calibración definitiva. Devuelve (lista de dicts {q, capturar}, info).
     Las de capturar=False son pasos intermedios (volver a la postura de inicio).
     limites: (6, 2) rad con el rango en el que el robot puede llegar de verdad (los límites que
@@ -449,7 +449,7 @@ def planificar_posturas(q0, cadena, colisiones, T_mundo_cam, T_brida_tablero, K,
             rechazos["limites"] += 1
             continue
         Tct = T_cam_mundo @ cadena.fk_marcos(q)[5] @ T_brida_tablero
-        if not tablero_en_imagen(Tct, K, ancho, alto, P)[0]:
+        if not tablero_en_imagen(Tct, K, ancho, alto, P, z_min=distancia[0], z_max=distancia[1])[0]:
             rechazos["imagen"] += 1
             continue
         if not colisiones.libre(q):

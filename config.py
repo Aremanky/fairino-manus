@@ -1488,18 +1488,38 @@ AUTONOMO_TAREA_MANO_PELOTA_APRETAR = {0: 0.0, 1: -0.15, 2: 1.00, 3: 0.90, 4: -0.
 # cuadro 20 mm, marcador 12,5 mm. Sus marcadores son los ids 0-16 del diccionario 4x4: por eso las
 # herramientas usan ids a partir del 20, y el detector de herramientas ignora los del tablero.
 # Si se cambia de tablero, poned aquí sus medidas REALES (con regla o pie de rey).
-CALIB_ROBOT_TABLERO = dict(cuadros=(7, 5), lado=0.0375, marcador=0.0275, diccionario="DICT_4X4_50")
+# (16-nov) Tablero PEQUEÑO, del tamaño de la palma: 5x4 cuadros de 25 mm (dibujo de 12,5 x 10 cm).
+# Generarlo: python calibrar_camara_robot.py --generar-tablero → imprimir a 300 ppp al 100 % (sin
+# «ajustar a página»), medir un cuadro con calibre y poner aquí lo medido. Pegado PLANO en algo rígido.
+# El de antes (folio A4): dict(cuadros=(7, 5), lado=0.0375, marcador=0.0275, diccionario="DICT_4X4_50")
+CALIB_ROBOT_TABLERO = dict(cuadros=(5, 4), lado=0.023, marcador=0.0165, diccionario="DICT_4X4_50")   # medido en el impreso (16-nov)
+CALIB_ROBOT_FOTOS     = 10                      # imágenes promediadas en cada postura (con el pequeño, más)
+# Cámara durante la calibración (calibrar_camara_robot.py):
+CALIB_CAM_ESCALA   = (1, 2)       # reducción del ISP: (1, 2) = 2028x1520 (los cuadros pequeños salen con 1,5x
+                                  # más píxeles); (1, 3) = 1352x1014 como antes. Necesita USB3
+CALIB_CAM_FPS      = 10           # el robot está quieto al capturar: pocos fps, menos USB
+CALIB_CAM_ENFOQUE  = "calibrado"  # lente fija donde se midieron los intrínsecos de fábrica · 0-255 · None = auto
+CALIB_CAM_EXPOSICION = None       # None = automática · (µs, ISO), p. ej. (8000, 400), si el tablero brilla o parpadea
+CALIB_CAM_NITIDEZ  = None         # 0-4 (None = la de la cámara)
+CALIB_CAM_RUIDO    = None         # reducción de ruido de luminancia 0-4 (None = la de la cámara); 0-1 = bordes más finos
 CALIB_ROBOT_ARCHIVO   = "camara_robot.json"     # resultado (T_mundo_cam, en el marco del MJCF)
 CALIB_ROBOT_POSTURAS  = "calib_posturas.json"   # posturas enseñadas (joints): se reutilizan siempre
 CALIB_ROBOT_MUESTRAS  = "calib_muestras.json"   # datos brutos de la última calibración (--recalcular)
 CALIB_ROBOT_MIN_MUESTRAS = 15
 CALIB_ROBOT_ERROR_MAX_MM = 5.0                  # criterio de la hoja de ruta
-CALIB_ROBOT_VEL_MAX_DEG_S = 10.0                # tope del FR5 al ir solo a las posturas (con pedal)
-CALIB_ROBOT_ESPERA_S  = 1.0                     # espera en cada postura antes de capturar
+CALIB_ROBOT_VEL_MAX_DEG_S = 7.0                 # tope del FR5 al ir solo a las posturas (con pedal; más lento = tiembla menos)
+CALIB_ROBOT_ESPERA_S  = 2.0                     # espera en cada postura antes de capturar
+# (16-nov) Además, se captura solo con el tablero QUIETO EN LA IMAGEN: la mano y el tablero siguen
+# oscilando un rato aunque los joints ya estén quietos. Si tras TEMBLOR_ESPERA_S sigue temblando, se
+# captura igual y se avisa (en el resultado sale «TEMBLABA» en esa muestra).
+CALIB_ROBOT_TEMBLOR_PX = 0.35                   # px que pueden moverse las esquinas de una imagen a la siguiente
+CALIB_ROBOT_QUIETO_IMAGENES = 5                 # imágenes quietas seguidas antes de empezar a capturar
+CALIB_ROBOT_TEMBLOR_ESPERA_S = 8.0
 CALIB_ROBOT_VERIFICAR_N = 4                     # posturas que usa --verificar
 # Calibración automática (--auto): el programa elige las posturas comprobando choques con el modelo
 # de colisión de la teleoperación (soporte, suelo y TELEOP_FR5_OBSTACULOS: ¡que la mesa esté bien!)
-CALIB_AUTO_POSTURAS   = 20                      # posturas de medida (además de las ~10 de explorar)
+CALIB_AUTO_POSTURAS   = 30                      # posturas de medida (además de las ~10 de explorar; 30 con el tablero pequeño)
+CALIB_AUTO_DIST_M     = (0.30, 1.00)            # el tablero entre estas distancias de la cámara (con el pequeño, no más lejos de 1 m)
 # (12-nov) Si en la calibración la OrcaHand fuera montada girada respecto al GEMELO, este ángulo
 # (alrededor del eje de la brida) gira su modelo en las comprobaciones de choque de la calibración.
 # Con la mano ya bien montada (como el gemelo), 0. Las posturas guardadas cuando la mano estaba al
@@ -1531,7 +1551,7 @@ CALIB_MANO_SALIENTES  = 0.04                    # cuánto sobresale de la mano l
 #                                                 (objetivo mano ↔ robot = HOLGURA + SALIENTES). ¡Medidlo!
 CALIB_MANO_ACERCAR_MAX = 0.01                   # cuánto puede cerrarse un hueco respecto a la postura de inicio
 CALIB_TABLERO_HOLGURA = 0.04                    # hueco objetivo tablero ↔ robot (mínimo absoluto: 1,5 cm)
-CALIB_TABLERO_MARGEN  = 0.025                   # placa/papel que sobresale alrededor del dibujo del tablero
+CALIB_TABLERO_MARGEN  = 0.015                   # placa/papel que sobresale alrededor del dibujo del tablero
 CALIB_ENTORNO_HOLGURA = 0.05                    # hueco objetivo de mano y tablero con soporte, cabeza, cajas y suelo
 #                                                 (mínimo absoluto: 3 cm)
 CALIB_MARGEN_LIMITES_DEG = 1.0                  # las posturas se piden a ≥ 1° de lo que fr5_servo deja pasar

@@ -45,6 +45,11 @@ def crear_tablero(cuadros=(7, 5), lado=0.04, marcador=0.03, diccionario="DICT_4X
     dp.perspectiveRemovePixelPerCell = 8
     dp.polygonalApproxAccuracyRate = 0.05
     cp = cv2.aruco.CharucoParameters()
+    # (16-nov) Con la disposición del tablero se buscan otra vez los marcadores que no salieron a la
+    # primera (refineDetectedMarkers): con marcadores pequeños o de canto recupera bastantes y, con
+    # ellos, más esquinas. (OpenCV ≥ 4.8; en versiones anteriores no existe y no pasa nada.)
+    if hasattr(cp, "tryRefineMarkers"):
+        cp.tryRefineMarkers = True
     return board, cv2.aruco.CharucoDetector(board, cp, dp)
 
 
@@ -210,13 +215,16 @@ def emparejar_por_tiempo(buf_a, buf_b, max_dt=0.02):
 
 # ═════════════ parte con cámaras ═════════════
 
-def _pipeline_charuco_hd(fps=15):
+def _pipeline_charuco_hd(fps=15, escala=None, control=False):
     """
     Pipeline mínimo SOLO de color para el ChArUco, sacando la imagen completa del ISP
     (1352x1014 con CAM_FOV_COMPLETO, 1920x1080 si no). Mismo sensor y mismo modo que
     camara_oak.py → mismo sistema de coordenadas de cámara, así que la extrínseca vale
     igual para el preview de 640x480 que usa Skill_Shield_Nivel_6.py.
     Sin estéreo ni profundidad (no hacen falta aquí) para dejar el USB a la imagen HD.
+    escala (16-nov, solo con CAM_FOV_COMPLETO): reducción del ISP, (1, 3) por defecto → 1352x1014;
+    (1, 2) → 2028x1520: tablero pequeño más lejos (necesita USB3; con fps bajos sobra).
+    control: añade la entrada "control_hd" (enfoque, exposición… con dai.CameraControl).
     """
     import depthai as dai
     import config as _cfg
@@ -226,13 +234,17 @@ def _pipeline_charuco_hd(fps=15):
     cam.setInterleaved(False)
     if getattr(_cfg, "CAM_FOV_COMPLETO", False):
         cam.setResolution(dai.ColorCameraProperties.SensorResolution.THE_12_MP)
-        cam.setIspScale(1, 3)
+        cam.setIspScale(*(tuple(escala) if escala else (1, 3)))
     else:
         cam.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
     cam.setFps(fps)
     xo = p.create(dai.node.XLinkOut)
     xo.setStreamName("color_hd")
     cam.isp.link(xo.input)
+    if control:
+        xi = p.create(dai.node.XLinkIn)
+        xi.setStreamName("control_hd")
+        xi.out.link(cam.inputControl)
     w, h = cam.getIspSize()
     return p, int(w), int(h)
 

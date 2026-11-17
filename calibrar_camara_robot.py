@@ -97,7 +97,14 @@ SIN_AVANCE_S = float(getattr(cfg, "CALIB_SIN_AVANCE_S", 5.0))   # armado y parad
 MARGEN_TRAYECTO = 0.006         # m de manga al comprobar un trayecto desde la postura REAL, antes de moverse
 MARGEN_VIGILANCIA = 0.012       # m de manga a la postura REAL mientras se mueve (va algo por detrás de la pedida)
 TUBO_DEG = 3.0                  # ° que la postura REAL puede separarse del trayecto comprobado sin volver a comprobarlo
-FOTOS_POR_MUESTRA = 5           # se promedia la pose del tablero en 5 imágenes seguidas
+FOTOS_POR_MUESTRA = int(getattr(cfg, "CALIB_ROBOT_FOTOS", 5))   # se promedia la pose del tablero en N imágenes seguidas
+DISTANCIA = tuple(getattr(cfg, "CALIB_AUTO_DIST_M", (0.25, 1.6)))  # tablero a esta distancia de la cámara (m) al planificar
+# (16-nov) el robot tiembla al pararse y la mano + el tablero siguen oscilando un rato aunque los joints
+# ya digan «quieto»: se captura solo cuando el TABLERO está quieto EN LA IMAGEN (sus esquinas se mueven
+# menos de TEMBLOR_PX de una imagen a la siguiente durante QUIETO_IMAGENES seguidas)
+TEMBLOR_PX = float(getattr(cfg, "CALIB_ROBOT_TEMBLOR_PX", 0.35))
+QUIETO_IMAGENES = int(getattr(cfg, "CALIB_ROBOT_QUIETO_IMAGENES", 5))
+TEMBLOR_ESPERA_MAX_S = float(getattr(cfg, "CALIB_ROBOT_TEMBLOR_ESPERA_S", 8.0))
 QUIETO_DEG = 0.05               # el robot cuenta como quieto si en 0,6 s se mueve menos que esto
 LLEGADA_DEG = 0.3               # postura alcanzada
 
@@ -133,9 +140,16 @@ def generar_tablero():
     img = board.generateImage((cuadros[0] * px + 2 * margen, cuadros[1] * px + 2 * margen),
                               marginSize=margen)
     salida = os.path.join(RAIZ, "tablero_calib_robot.png")
-    cv2.imwrite(salida, img)
+    try:                                   # (16-nov) con los 300 ppp dentro del PNG: al 100 % sale a su tamaño
+        from PIL import Image
+        Image.fromarray(img).save(salida, dpi=(300, 300))
+    except Exception:
+        cv2.imwrite(salida, img)
+    mm = lambda n: n * 25.4 / 300
     print(f"Guardado {salida} ({cuadros[0]}x{cuadros[1]} cuadros de {lado * 1000:.0f} mm, "
-          f"diccionario {TABLERO['diccionario']}).\nImprímelo a 300 ppp al 100 % (sin «ajustar a página»), "
+          f"diccionario {TABLERO['diccionario']}): dibujo de {cuadros[0] * lado * 1000:.0f} x "
+          f"{cuadros[1] * lado * 1000:.0f} mm, hoja de {mm(img.shape[1]):.0f} x {mm(img.shape[0]):.0f} mm con el borde blanco."
+          f"\nImprímelo a 300 ppp al 100 % (sin «ajustar a página»), "
           f"COMPRUEBA con una regla que cada cuadrado mide {lado * 1000:.0f} mm y móntalo plano y rígido "
           f"en la brida/mano (pieza impresa). Si mide otra cosa, pon el valor real en CALIB_ROBOT_TABLERO.")
 
@@ -218,6 +232,13 @@ def modo_girar_posturas(grados):
     return True
 
 
+def _escalar_traslacion(T, k):
+    """T (4x4) con la traslación multiplicada por k (un tablero k veces mayor se ve k veces más lejos)."""
+    T = np.array(T, float)
+    T[:3, 3] *= k
+    return T.tolist()
+
+
 def calcular_y_guardar(muestras, cadena, info_cam):
     """Calibra con las muestras (FK recalculada desde q), enseña el resultado y lo guarda."""
     P = C.puntos_tablero(TABLERO["cuadros"], TABLERO["lado"])
@@ -227,7 +248,10 @@ def calcular_y_guardar(muestras, cadena, info_cam):
     res, usadas = C.descartar_peores(Tb, Tc, P, umbral_mm=max(8.0, 1.6 * ERROR_MAX))
     print("\n── Resultado ──────────────────────────────────────────")
     for k, i in enumerate(usadas):
-        print(f"   muestra {i + 1:2d}: {res['errores_mm'][k]:5.2f} mm")
+        m = muestras[i]
+        extra = (f"   (dispersión {m['dispersion_mm']:.1f} mm{', TEMBLABA' if m.get('temblor') else ''})"
+                 if "dispersion_mm" in m else "")
+        print(f"   muestra {i + 1:2d}: {res['errores_mm'][k]:5.2f} mm{extra}")
     descartadas = sorted(set(range(len(muestras))) - set(usadas))
     if descartadas:
         print(f"   descartadas por error alto: {[i + 1 for i in descartadas]}")
@@ -270,14 +294,54 @@ def abrir_camara():
                                                  listar_camaras, mxid_de)
     mxid = getattr(cfg, "AUTONOMO_CAM_MXID", None)
     print(f"📷 OAK-D disponibles: {listar_camaras()}")
-    pipeline, w, h = _pipeline_charuco_hd()
+    # (16-nov) más resolución (tablero pequeño), enfoque fijo y, si se quiere, exposición fija
+    pipeline, w, h = _pipeline_charuco_hd(fps=int(getattr(cfg, "CALIB_CAM_FPS", 15)),
+                                          escala=getattr(cfg, "CALIB_CAM_ESCALA", None), control=True)
     dev = abrir_dispositivo(pipeline, mxid)
     comprobar_usb(dev, "cabeza")
     K, dist = intrinsecos_color(dev, w, h)
     q = dev.getOutputQueue("color_hd", maxSize=2, blocking=False)
+    ajustar_camara(dev)
     info = dict(mxid=mxid_de(dev), K=K, dist=np.asarray(dist).ravel(), ancho=w, alto=h)
     print(f"📷 Cámara de cabeza {info['mxid']}: {w}x{h}, fx={K[0, 0]:.0f} fy={K[1, 1]:.0f} px")
     return dev, q, info
+
+
+def ajustar_camara(dev):
+    """Enfoque, exposición, nitidez y ruido de la cámara para calibrar (CALIB_CAM_* de config.py).
+    ENFOQUE = "calibrado": la posición de la lente con la que se midieron en fábrica los intrínsecos
+    que se usan (con el autoenfoque la lente se mueve, la focal cambia un poco y el tablero «mide»
+    otra cosa); un número 0-255 = esa posición; None = autoenfoque. Nunca para la calibración: si la
+    cámara no lo admite (foco fijo), lo dice y sigue."""
+    import depthai as dai
+    enfoque = getattr(cfg, "CALIB_CAM_ENFOQUE", "calibrado")
+    expo = getattr(cfg, "CALIB_CAM_EXPOSICION", None)
+    nitidez, ruido = getattr(cfg, "CALIB_CAM_NITIDEZ", None), getattr(cfg, "CALIB_CAM_RUIDO", None)
+    hecho = []
+    try:
+        ctrl = dai.CameraControl()
+        if enfoque is not None:
+            lp = (dev.readCalibration().getLensPosition(dai.CameraBoardSocket.CAM_A)
+                  if enfoque == "calibrado" else int(enfoque))
+            if enfoque == "calibrado" and not lp:
+                print("ℹ️  La cámara no guarda posición de lente (¿foco fijo?): se deja el enfoque como está.")
+            else:
+                ctrl.setManualFocus(int(lp))
+                hecho.append(f"enfoque fijo {int(lp)}")
+        if expo is not None:
+            ctrl.setManualExposure(int(expo[0]), int(expo[1]))
+            hecho.append(f"exposición {int(expo[0])} µs ISO {int(expo[1])}")
+        if nitidez is not None:
+            ctrl.setSharpness(int(nitidez))
+            hecho.append(f"nitidez {int(nitidez)}")
+        if ruido is not None:
+            ctrl.setLumaDenoise(int(ruido))
+            hecho.append(f"reducción de ruido {int(ruido)}")
+        if hecho:
+            dev.getInputQueue("control_hd").send(ctrl)
+            print("📷 Cámara para calibrar: " + ", ".join(hecho))
+    except Exception as e:
+        print(f"⚠️  No se pudieron ajustar enfoque/exposición de la cámara ({e}): sigo con los automáticos.")
 
 
 def arrancar_fr5(mover):
@@ -374,7 +438,7 @@ def planificar_medida(cadena, q0, T_mundo_cam, T_brida_tablero, K, ancho, alto):
     P = C.puntos_tablero(TABLERO["cuadros"], TABLERO["lado"])
     plan, info = C.planificar_posturas(q0, cadena, col, T_mundo_cam, T_brida_tablero, K, ancho, alto, P,
                                        n=N_AUTO, amplitud_deg=AMPLITUD, v_max_deg=VEL_MAX,
-                                       limites=limites_articulares(cadena))
+                                       limites=limites_articulares(cadena), distancia=DISTANCIA)
     return plan, info, col
 
 
@@ -450,7 +514,8 @@ class Sesion:
         self.P = C.puntos_tablero(TABLERO["cuadros"], TABLERO["lado"])
         self.ventana = "Calibracion camara-robot"
         cv2.namedWindow(self.ventana, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.ventana, int(self.info["ancho"] * 0.75), int(self.info["alto"] * 0.75))
+        _f = min(0.75, 1400.0 / float(self.info["ancho"]))   # (16-nov) a 2028x1520 no cabe en pantalla
+        cv2.resizeWindow(self.ventana, int(self.info["ancho"] * _f), int(self.info["alto"] * _f))
         self.mano_recta = abrir_mano_recta()             # (12-nov) la mano con par, recta, sujetando el tablero
 
     def _estado_inicial(self):
@@ -466,6 +531,7 @@ class Sesion:
         self._trayecto = None                            # posturas del trayecto comprobado que se está recorriendo
         self.q = None
         self.T_ct, self.txt_tab = None, ""
+        self.mov_px, self._esq_ant = None, None      # (16-nov) cuánto se ha movido el tablero en la imagen
         self.mensaje, self.t_mensaje = "", 0.0
         self.mano_recta = None
 
@@ -590,6 +656,9 @@ class Sesion:
         img = pkt.getCvFrame()
         gris = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         self.T_ct, self.txt_tab, corners, ids = self._pose_tablero(self.det, self.board, gris, self.K, self.dist)
+        self.mov_px = self._movimiento(corners, ids)
+        if self.mov_px is not None:
+            self.txt_tab += f"  |  mov {self.mov_px:.2f}px"
         if corners is not None and ids is not None and len(ids):
             try:                                          # solo es el dibujo: que nunca pare la calibración
                 cv2.aruco.drawDetectedCornersCharuco(img, corners, ids, (0, 255, 0))
@@ -605,14 +674,30 @@ class Sesion:
             "tablero: " + self.txt_tab]
         if self.mensaje and time.monotonic() - self.t_mensaje < 4:
             lineas.append(self.mensaje)
-        y = 34
+        k = max(1.0, img.shape[1] / 1352.0)              # (16-nov) letra legible también a 2028x1520
+        y = int(34 * k)
         for i, l in enumerate(lineas):
             color = (0, 200, 255) if (self.mensaje and l == self.mensaje) else (255, 255, 255)
-            cv2.putText(img, l, (16, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 4, cv2.LINE_AA)
-            cv2.putText(img, l, (16, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
-            y += 32
+            cv2.putText(img, l, (16, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8 * k, (0, 0, 0), int(4 * k), cv2.LINE_AA)
+            cv2.putText(img, l, (16, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8 * k, color, int(2 * k), cv2.LINE_AA)
+            y += int(32 * k)
         cv2.imshow(self.ventana, img)
         return True
+
+    def _movimiento(self, corners, ids):
+        """Mediana (px) de lo que se han movido las esquinas del tablero desde la imagen anterior
+        (solo las que salen en las dos), o None si no hay con qué comparar."""
+        if corners is None or ids is None or len(ids) == 0:
+            self._esq_ant = None
+            return None
+        act = {int(i): c for i, c in zip(np.asarray(ids).ravel(), np.asarray(corners).reshape(-1, 2))}
+        ant, self._esq_ant = self._esq_ant, act
+        if not ant:
+            return None
+        comunes = [k for k in act if k in ant]
+        if len(comunes) < 4:
+            return None
+        return float(np.median([np.linalg.norm(act[k] - ant[k]) for k in comunes]))
 
     @property
     def listo(self):
@@ -624,21 +709,44 @@ class Sesion:
         fotos, q = [], None
         t0 = time.monotonic()
         self.motivo_captura = ""
+        quietas, temblor, movs = 0, False, []
         while len(fotos) < FOTOS_POR_MUESTRA:
-            _, nueva = self.vuelta(objetivo, hud=list(hud) + ["capturando..."])
+            _, nueva = self.vuelta(objetivo, hud=list(hud) + ["capturando..." if quietas >= QUIETO_IMAGENES
+                                                              else "esperando a que el tablero deje de temblar..."])
             if not nueva:
                 continue
             if not self.listo:
-                if time.monotonic() - t0 > 3.0:
+                if time.monotonic() - t0 > 3.0 + (TEMBLOR_ESPERA_MAX_S if movs else 0.0):
                     # (12-nov) por qué: para saber qué arreglar (tablero, luz, robot que no se para…)
                     self.motivo_captura = ("el robot no se queda quieto" if self.q is not None and
                                            not self.robot.quieto else "tablero: " + (self.txt_tab or "no se ve"))
                     return None
+                quietas, fotos = 0, []
+                continue
+            # (16-nov) el tablero tiene que estar quieto EN LA IMAGEN; si se mueve, se empieza otra vez.
+            # Si tras TEMBLOR_ESPERA_MAX_S sigue temblando, se captura igual y se avisa (no se pierde la postura).
+            m = self.mov_px
+            if m is not None:
+                movs.append(m)
+            esperando = time.monotonic() - t0 < TEMBLOR_ESPERA_MAX_S
+            if (m is None or m > TEMBLOR_PX) and esperando:
+                quietas, fotos = 0, []
+                continue
+            if m is not None and m > TEMBLOR_PX:
+                temblor = True
+            quietas += 1
+            if quietas <= QUIETO_IMAGENES and esperando:
                 continue
             fotos.append(self.T_ct)
             q = self.q
+        if temblor:
+            print(f"   ⚠️  el tablero seguía temblando ({np.median(movs[-FOTOS_POR_MUESTRA:]):.2f} px entre imágenes): "
+                  "esta muestra será peor")
+        Ts = np.array([T[:3, 3] for T in fotos])
+        dispersion_mm = float(np.max(np.linalg.norm(Ts - Ts.mean(0), axis=1)) * 1000)
         return dict(q=[float(v) for v in q], T_cam_tablero=C.promediar(fotos).tolist(),
-                    tablero=self.txt_tab, t=time.time())
+                    tablero=self.txt_tab, t=time.time(), temblor=bool(temblor),
+                    dispersion_mm=round(dispersion_mm, 2), espera_s=round(time.monotonic() - t0, 1))
 
     def ir_a(self, q_obj, hud=()):
         """Lleva el robot a q_obj (solo con el pedal) y espera a que esté quieto allí.
@@ -1009,6 +1117,8 @@ def main():
     g.add_argument("--repetir", action="store_true", help="el robot repite solo las posturas guardadas (con pedal)")
     g.add_argument("--verificar", action="store_true", help="comprueba la calibración guardada")
     g.add_argument("--recalcular", action="store_true", help="recalcula con calib_muestras.json")
+    ap.add_argument("--ajustar-lado", action="store_true",
+                    help="con --recalcular: usa el tamaño del cuadro que mide el robot (no cambia config.py)")
     g.add_argument("--girar-posturas", type=float, metavar="GRADOS", default=None,
                    help="la mano se ha montado girada GRADOS en la brida: adapta las posturas guardadas")
     ap.add_argument("--aqui", action="store_true", help="con --verificar: en la postura actual, sin mover el robot")
@@ -1022,9 +1132,32 @@ def main():
         if not d or len(d.get("muestras", [])) < 3:
             sys.exit(f"✗ No hay suficientes muestras en {MUESTRAS}")
         i = d["intrinsecos"]
-        _, ok = calcular_y_guardar(d["muestras"], cargar_cadena(getattr(cfg, "RUTA_XML", None)),
+        cadena = cargar_cadena(getattr(cfg, "RUTA_XML", None))
+        muestras = d["muestras"]
+        # (16-nov) las poses del tablero se midieron con el lado de ENTONCES: si en config pone otro, se
+        # reescalan (con solvePnP, la traslación es proporcional al tamaño del tablero; el giro no cambia)
+        lado_usado = float((d.get("tablero") or {}).get("lado", TABLERO["lado"]))
+        if args.ajustar_lado:
+            Tb = [cadena.fk_marcos(np.array(m["q"]))[5] for m in muestras]
+            Tc = [np.array(m["T_cam_tablero"]) for m in muestras]
+            escala = C.estimar_escala(Tb, Tc)
+            TABLERO["lado"] = lado_usado * escala
+            TABLERO["marcador"] = float(TABLERO["marcador"]) * TABLERO["lado"] / float(cfg.CALIB_ROBOT_TABLERO["lado"])
+            print(f"📏 Según el robot, el cuadro mide {TABLERO['lado'] * 1000:.2f} mm (se midió con "
+                  f"{lado_usado * 1000:.2f} mm). Recalculo con ese tamaño.")
+        if abs(float(TABLERO["lado"]) - lado_usado) > 1e-7:
+            k = float(TABLERO["lado"]) / lado_usado
+            muestras = [dict(m, T_cam_tablero=_escalar_traslacion(m["T_cam_tablero"], k)) for m in muestras]
+            if not args.ajustar_lado:
+                print(f"📏 Las muestras se tomaron con lado = {lado_usado * 1000:.2f} mm y config dice "
+                      f"{TABLERO['lado'] * 1000:.2f} mm: reescaladas.")
+        _, ok = calcular_y_guardar(muestras, cadena,
                                    dict(mxid=d.get("mxid"), K=np.array(i["K"]), dist=np.array(i["dist"]),
                                         ancho=i["ancho"], alto=i["alto"]))
+        if args.ajustar_lado:
+            print(f"👉 Si con el calibre el cuadro mide de verdad ≈ {TABLERO['lado'] * 1000:.1f} mm, pon en config.py "
+                  f"lado={TABLERO['lado']:.4f}, marcador={TABLERO['marcador']:.4f} (si no, la diferencia es de la "
+                  "cámara —enfoque/intrínsecos— y no del tablero: no lo cambies).")
         return 0 if ok else 1
     if args.girar_posturas is not None:
         return 0 if modo_girar_posturas(args.girar_posturas) else 1
