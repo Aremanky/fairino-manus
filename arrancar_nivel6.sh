@@ -13,6 +13,7 @@ echo "El entorno virtual no existe"
 echo "⚙️ Configurando el entorno virtual y descargando dependencias..."
 python3.12 -m venv venv_nivel6
 ./venv_nivel6/bin/pip install -r requirements.txt
+bash instalar_curobo.sh
 echo "✅ Entorno listo."
 fi
 

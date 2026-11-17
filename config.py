@@ -1464,7 +1464,9 @@ AUTONOMO_TAREA_PELOTA_DEDOS_EXTRA = 0.035         # m más lejos la palma «con 
 AUTONOMO_TAREA_PELOTA_APOYO_GRUESO = 0.06         # m bajo la pelota que aún son «la mesa con ruido»
 # ── (17-nov) camino hasta el objeto: pensado para escalar a herramientas (el agarre, luego, entrenado) ──
 # Mesa: la cámara solo ve la superficie de las cosas; por debajo de lo visto, macizo hasta el suelo.
-AUTONOMO_TAREA_MAPA_MACIZO = True
+AUTONOMO_TAREA_MAPA_MACIZO = False     # (tarde) NO: volvía columnas hasta el suelo el ruido suelto y era lento
+AUTONOMO_TAREA_MESA_HASTA_SUELO = True # lo macizo son las MESAS detectadas como plano (de su tapa al suelo)
+AUTONOMO_TAREA_MAPA_GRUPO_MIN = 12     # grupos de cubos sueltos más pequeños que esto: ruido, no cuentan
 # Zona de la pelota: el «suelo» cubre la mesa que se ve alrededor (también el hueco que deja la mano) y
 # vale para la mano Y el brazo hasta esta profundidad (antes solo la mano: el antebrazo se metía en la cajonera)
 AUTONOMO_TAREA_PELOTA_GROSOR_SUELO_ZONA = 0.30
@@ -1477,7 +1479,7 @@ AUTONOMO_TAREA_CONTINUO = True
 AUTONOMO_TAREA_SUBDIV_MAX = 4          # veces que se puede partir en dos un paso (2° → 0,125°)
 # Lo que la cámara no ha visto cuenta como COSTE (no se prohíbe): se prefiere el camino que menos pasa por ahí
 AUTONOMO_TAREA_PESO_DESCONOCIDO = 2.0  # 0 = no se tiene en cuenta
-AUTONOMO_TAREA_ALTERNATIVAS = 3        # planes completos que se comparan (como mucho 8 s más buscando)
+AUTONOMO_TAREA_ALTERNATIVAS = 1        # planes completos que se comparan (1 = el primero; más = más lento)
 # De un sitio a otro POR ARRIBA: sube en vertical, se traslada y baja (si no se puede, como antes)
 AUTONOMO_TAREA_POR_ALTO = True
 AUTONOMO_TAREA_ALTO_MARGEN = 0.10      # m por encima de lo más alto que haya en el pasillo entre los dos sitios

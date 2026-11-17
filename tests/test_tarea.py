@@ -666,7 +666,9 @@ def test_plan_de_la_pelota_no_mete_el_brazo_en_la_cajonera(cadena, hueco):
         if pl.motivo(q) is not None or _dentro_cajonera(pl._puntos_robot(q)).any():
             continue
         hechos += 1
-        plan = pl.planificar_pelota(q, _plano(bola), 2 * r, _plano(dej))
+        # la mesa medida (plano de la profundidad, como la da pelotas.py): maciza hasta el suelo
+        plan = pl.planificar_pelota(q, _plano(bola), 2 * r, _plano(dej), apoyo_z=zt,
+                                    apoyo_poligono=[[0.10, -0.75], [0.60, -0.75], [0.60, -0.30], [0.10, -0.30]])
         for f in plan.fases:
             if f.qs is None:
                 continue

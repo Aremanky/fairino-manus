@@ -112,13 +112,13 @@ def test_mapa_deja_libre_por_donde_pasa_el_robot():
 
 def test_cubos_pegados_al_robot_no_cuentan(cadena):
     pl = TA.Planificador(cadena, G)
+    pl.grupo_min = 1                       # (17-nov) aquí los cubos sueltos son a propósito: sin filtro de ruido
     marcos = cadena.fk_marcos(Q0)
     codo = marcos[2][:3, 3]
     lejos = np.array([0.6, -0.9, 0.5])
     pl.poner_mapa(np.vstack([codo + [0.0, 0.0, 0.07], lejos]), 0.02)
     pl._empezar(Q0)
-    # (17-nov) lo que queda se rellena hacia abajo (macizo): solo la columna del cubo lejano
-    assert pl.quitados_propios == 1 and np.allclose(pl._C[:, :2], lejos[:2]) and np.isclose(pl._C[:, 2].max(), lejos[2])
+    assert pl.quitados_propios == 1 and len(pl._C) == 1 and np.allclose(pl._C[0], lejos)
 
 
 # ── la tarea entera con el planificador de verdad ────────────────────────────────────────────

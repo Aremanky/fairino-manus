@@ -262,7 +262,7 @@ class Planificador:
         # (17-nov) lo que la cámara NO ha visto cuenta como coste: de dos caminos válidos, el que menos pasa
         # por ahí (no se prohíbe: no sabemos qué hay, pero mejor no meter la mano)
         self.peso_desconocido = float(_g(g, "AUTONOMO_TAREA_PESO_DESCONOCIDO", 2.0))
-        self.alternativas = int(_g(g, "AUTONOMO_TAREA_ALTERNATIVAS", 3))      # planes completos que se comparan
+        self.alternativas = int(_g(g, "AUTONOMO_TAREA_ALTERNATIVAS", 1))      # planes completos que se comparan (1 = el primero)
         self._visto = None
         # (17-nov) cuRobo (GPU): propone los tramos articulares; los de aquí los verifican
         self.curobo, self.tramos_curobo, self.curobo_rechazos = None, 0, 0
@@ -275,7 +275,12 @@ class Planificador:
         self.zona_extra = float(_g(g, "AUTONOMO_TAREA_PELOTA_ZONA_MESA_EXTRA", 0.15))   # dónde se busca la mesa
         # (17-nov) la cámara solo ve la SUPERFICIE de las cosas (la tapa y el frente de la cajonera): lo que
         # hay debajo de cada cubo ocupado, hasta el suelo, se trata como macizo
-        self.macizo = bool(_g(g, "AUTONOMO_TAREA_MAPA_MACIZO", True))
+        # (17-nov, tarde) desactivado por defecto: convertía cualquier grupo de cubos suelto (ruido flotando a
+        # 70 cm) en una columna hasta el suelo, y además triplicaba el tiempo de planificar. Lo macizo ahora son
+        # las MESAS detectadas como plano (AUTONOMO_TAREA_MESA_HASTA_SUELO)
+        self.macizo = bool(_g(g, "AUTONOMO_TAREA_MAPA_MACIZO", False))
+        self.mesa_hasta_suelo = bool(_g(g, "AUTONOMO_TAREA_MESA_HASTA_SUELO", True))
+        self.grupo_min = int(_g(g, "AUTONOMO_TAREA_MAPA_GRUPO_MIN", 12))   # grupos de cubos más pequeños: ruido
         ent = getattr(self.modelo, "entorno", None)
         self.z_suelo_mapa = getattr(ent, "z_suelo", None)
         if self.z_suelo_mapa is None:
@@ -326,7 +331,8 @@ class Planificador:
     # ── mapa ──
     def poner_mapa(self, centros, res, excluir=()):
         """centros: vóxeles ocupados (N x 3). excluir: [(centro, radio)] que no cuentan."""
-        C = np.asarray(centros if centros is not None else [], float).reshape(-1, 3)
+        C = self._sin_grupos_sueltos(np.asarray(centros if centros is not None else [], float).reshape(-1, 3),
+                                     float(res or 0.02))
         quitado = []
         for c, r in excluir:
             dentro = np.linalg.norm(C - np.asarray(c, float), axis=1) <= float(r)
@@ -339,6 +345,20 @@ class Planificador:
         self._mesa = None                         # (17-nov) la mesa medida (z, envolvente): la pone el plan
         self.zonas_apoyo(())
         return len(C)
+
+    def _sin_grupos_sueltos(self, C, res):
+        """(17-nov) Quita los grupos de cubos (vecinos en 26 direcciones) de menos de grupo_min cubos: ruido
+        del estéreo flotando. Lo que está apoyado en algo (en la mesa, en una caja) va unido a su grupo."""
+        if self.grupo_min <= 1 or len(C) < 2:
+            return C
+        from scipy.ndimage import label
+        idx = np.round((C - C.min(0)) / res).astype(int)
+        g = np.zeros(tuple(idx.max(0) + 1), bool)
+        g[tuple(idx.T)] = True
+        etq, _ = label(g, structure=np.ones((3, 3, 3), bool))
+        e = etq[tuple(idx.T)]
+        tam = np.bincount(e)
+        return C[tam[e] >= self.grupo_min]
 
     def rellenar_macizo(self, C):
         """(17-nov) Cada columna de cubos ocupados se rellena desde su cubo más alto hasta el suelo: la
@@ -417,7 +437,7 @@ class Planificador:
             env = _envolvente(poli, 0.0)
             if env is not None:
                 self._discos.append((poli.mean(0), np.inf, float(z_m) + self.margen_suave,
-                                     self.grosor_suelo_zona, env, 0.0))
+                                     self._grosor_mesa(z_m), env, 0.0))
         if self._mesa is not None:
             # (17-nov) la mesa MEDIDA (plano de la profundidad alrededor del objeto, pelotas.py): es suelo en
             # toda su envolvente, para mano y brazo, aunque no haya cubos (tapada, olvidada, hueco del mapa)
@@ -425,7 +445,7 @@ class Planificador:
             env = _envolvente(np.asarray(poli, float), 0.0)
             if env is not None:
                 self._discos.append((np.asarray(poli, float).mean(0), np.inf, float(z_m) + self.margen_suave,
-                                     self.grosor_suelo_zona, env, 0.0))
+                                     self._grosor_mesa(z_m), env, 0.0))
         self._arbol = cKDTree(C[~fuera]) if (~fuera).any() else None
         # el suelo solo está donde la cámara vio algo (la mesa, o la pelota apoyada en ella):
         # donde no hay nada no se inventa una mesa
@@ -444,6 +464,13 @@ class Planificador:
         z = np.r_[suelo_C[con_suelo], suelo_Q[np.isfinite(suelo_Q)], D[:, 2]]
         self._suelo = (cKDTree(S[:, :2]), z) if len(S) else None
         self._arbol_suave = None
+
+    def _grosor_mesa(self, z_m):
+        """Una mesa detectada como plano es maciza hasta el suelo (una cajonera, un mueble); si no, la capa
+        de siempre."""
+        if self.mesa_hasta_suelo and self.z_suelo_mapa is not None:
+            return max(float(z_m) - float(self.z_suelo_mapa), self.grosor_suelo_zona)
+        return self.grosor_suelo_zona
 
     def _bajo_suelo(self, P, solo_discos=False):
         """¿Algún punto de P (mundo) por debajo del «suelo» de las zonas de apoyo?"""

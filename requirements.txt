@@ -35,3 +35,4 @@ matplotlib                    # solo skill_shield/teleop_fr5/simulador.py --plot
 pytest==7.4.4
 
 # Sistema (no van por pip): sudo apt install zenity python3.12-tk
+curobo
