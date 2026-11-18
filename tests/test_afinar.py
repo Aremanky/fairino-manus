@@ -15,6 +15,7 @@ Pruebas del 12-nov (coger la pelota de verdad donde está), sin robot, sin cáma
 import json
 import os
 import sys
+import time
 
 import numpy as np
 import pytest
@@ -174,6 +175,8 @@ def _hasta_afinar(cadena, mover):
         t.paso(1 / 60, fr5.q, True, ctx)
         if t.estado == "error" or t.ejec.i > i_b:
             break
+        if t.afinando:                                  # (18-nov) el afinado va en su hilo: el robot espera
+            time.sleep(0.002)
     return t, i_b
 
 
@@ -249,6 +252,8 @@ def test_afinar_sin_verla_recoloca_con_la_correccion_de_ahora(cadena, monkeypatc
         t.paso(1 / 60, fr5.q, True, ctx)
         if t.estado == "error" or t.ejec.i > i_b:
             break
+        if t.afinando:                                  # (18-nov) el afinado va en su hilo: el robot espera
+            time.sleep(0.002)
     assert t.estado != "error", t.texto
     assert np.allclose(t.plan.pelota["c"], BOLA + [0.02, -0.025, 0.01])  # recolocada (la roja lejana no cuenta)
     assert t.afinado_recolocado_cm == pytest.approx(100 * np.linalg.norm([0.02, -0.025, 0.01]), abs=0.05)

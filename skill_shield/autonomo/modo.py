@@ -52,6 +52,7 @@ CANAL_QBRAZO = "skill_autonomo_qbrazo"
 CANAL_MAPA = "skill_autonomo_mapa"
 CANAL_VISTO = "skill_autonomo_visto"     # (17-nov) qué ha visto la cámara (bits por cubo)
 CANAL_HERRAMIENTAS = "skill_autonomo_herramientas"
+CANAL_CONGELAR = "skill_autonomo_congelar"   # (18-nov) hay tarea → la cámara no aplica la autocorrección
 
 
 def estado_calibracion(raiz, cfg):
@@ -188,6 +189,13 @@ def ejecutar(cfg):
         # 13-nov: si el FR5 se apaga (o no está encendido al arrancar), fr5_servo se reconecta
         # solo cuando vuelve, como la OrcaHand y los táctiles. Nunca se arma solo.
         c["FR5_RECONECTAR"] = bool(cfg.get("AUTONOMO_FR5_RECONECTAR", True))
+        # (18-nov) ServoJ por UDP en este modo (menos latencia y menos tirones que XML-RPC cada 8 ms); si la
+        # controladora no lo acepta, fr5_servo vuelve solo a XML-RPC (_LlamadaServoJ)
+        if cfg.get("AUTONOMO_FR5_CMD_TYPE") is not None:
+            c["FR5_CMD_TYPE"] = int(cfg["AUTONOMO_FR5_CMD_TYPE"])
+        if not simulacro and cfg.get("FR5_CARGA_CDM_MM") is None:
+            print("ℹ️  FR5_CARGA_CDM_MM sin poner: se queda el centro de masas que tenga la controladora (fr5_servo lo "
+                  "enseña al conectar). Para medirlo con el robot: python diagnosticos/identificar_carga.py")
         fr5 = FR5Servo.desde_config(c)
         if not fr5.iniciar():
             print("   Sin conexión con el FR5: el gemelo enseñará el brazo en reposo"
@@ -209,6 +217,7 @@ def ejecutar(cfg):
     canal_visto = Canal(CANAL_VISTO, capacidad=2 << 20, crear=True) if con_mapa else None
     con_herr = bool(cfg.get("AUTONOMO_HERRAMIENTAS"))
     canal_herr = Canal(CANAL_HERRAMIENTAS, capacidad=64 << 10, crear=True) if con_herr else None
+    canal_congelar = Canal(CANAL_CONGELAR, capacidad=256, crear=True) if con_mapa else None
 
     # ── 3. Procesos de cámara y web ──
     py_vision = cfg.get("AUTONOMO_PYTHON_PERCEPCION") or sys.executable
@@ -220,7 +229,8 @@ def ejecutar(cfg):
     if cfg.get("AUTONOMO_CAM_VENTANA", False):
         cmd_cam.append("--ventana")
     if con_mapa:
-        cmd_cam += ["--canal-qbrazo", CANAL_QBRAZO, "--canal-mapa", CANAL_MAPA, "--canal-visto", CANAL_VISTO]
+        cmd_cam += ["--canal-qbrazo", CANAL_QBRAZO, "--canal-mapa", CANAL_MAPA, "--canal-visto", CANAL_VISTO,
+                    "--canal-congelar", CANAL_CONGELAR]
     if con_herr:
         cmd_cam += ["--canal-herramientas", CANAL_HERRAMIENTAS]
     if con_mapa or con_herr:
@@ -344,6 +354,7 @@ def ejecutar(cfg):
         print("✅ Modo autónomo en marcha. " + ("Cierra la ventana de MuJoCo o pulsa" if con_ventana else "Pulsa")
               + " Ctrl+C para salir.")
         q_tarea_sim, t_ant = None, time.monotonic()
+        t_congelar = 0.0
         while visor is None or visor.is_running():
             t0 = time.monotonic()
             dt_vuelta, t_ant = min(t0 - t_ant, 0.1), t0
@@ -441,6 +452,10 @@ def ejecutar(cfg):
                                 visto=visto, T_mundo_cam=T_mundo_cam)
                 tarea.orden(mando, _contexto)
                 q_tarea_sim = tarea.paso(dt_vuelta, q, control.web_viva and control.pedal_pisado, _contexto)
+            if canal_congelar is not None and t0 - t_congelar >= 0.2:
+                t_congelar = t0                         # (18-nov) con tarea en marcha: autocorrección congelada
+                canal_congelar.escribir(json.dumps(dict(
+                    congelar=bool(tarea is not None and getattr(tarea, "congelar_autocalib", False)))).encode())
             robot_listo = fr5 is not None and fr5.conectado
             permitido = control.movimiento_permitido(robot_listo)
             if permitido != permitido_antes:
@@ -488,7 +503,7 @@ def ejecutar(cfg):
             except Exception:
                 pass
         for c in (canal_img, canal_info, canal_estado, canal_mando, canal_sim, canal_simcam, canal_qpos,
-                  canal_qbrazo, canal_mapa, canal_herr, canal_visto):
+                  canal_qbrazo, canal_mapa, canal_herr, canal_visto, canal_congelar):
             if c is not None:
                 c.cerrar()
     return 0

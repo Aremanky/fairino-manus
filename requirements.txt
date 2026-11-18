@@ -36,3 +36,5 @@ pytest==7.4.4
 
 # Sistema (no van por pip): sudo apt install zenity python3.12-tk
 curobo
+# (18-nov) opcional: tramos articulares del modo autónomo con TOPP-RA (bash instalar_toppra.sh)
+# toppra

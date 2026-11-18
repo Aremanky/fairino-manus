@@ -94,13 +94,15 @@ def desconocido_en(visto, P):
     return out
 
 
-def mundo_del_planificador(pl, limites, res=None, desconocido_dist=None):
+def mundo_del_planificador(pl, limites, res=None, desconocido_dist=None, margen=0.0):
     """ESDF (nx, ny, nz), centro y medidas de la rejilla para el estado ACTUAL del planificador
     `pl` (tarea.Planificador): sus cubos (sin lo excluido ni lo de las zonas) y su suelo.
     desconocido_dist (17-nov): en lo que la cámara NO ha visto (pl._visto) la distancia se rebaja a este
     valor (algo más que la esfera más gruesa del robot): cuRobo no lo trata como choque —el camino sigue
     siendo posible— pero, con una distancia de activación mayor, su optimizador lo PENALIZA y prefiere
-    caminos por lo que sí se ha visto."""
+    caminos por lo que sí se ha visto.
+    margen (18-nov): se resta de la distancia (= inflar el robot contra el mapa y las mesas) con el mismo margen
+    que usan las comprobaciones del proyecto. Las mesas del mundo simple (pl._losas) entran como ocupado."""
     res = float(res or pl._res)
     origen, n = rejilla(limites, res)
     occ = ocupacion(pl._arbol.data if pl._arbol is not None else np.zeros((0, 3)), origen, n, res)
@@ -108,7 +110,10 @@ def mundo_del_planificador(pl, limites, res=None, desconocido_dist=None):
     if pl._suelo is not None or pl._discos:
         C = centros_rejilla(origen, n, res)
         occ |= pl._mascara_suelo(C).reshape(tuple(n))
-    sdf = esdf(occ, res)
+    if getattr(pl, "_losas", None):
+        C = centros_rejilla(origen, n, res) if C is None else C
+        occ |= pl._mascara_losas(C, 0.0).reshape(tuple(n))
+    sdf = esdf(occ, res) - np.float32(margen)
     if desconocido_dist is not None and getattr(pl, "_visto", None):
         C = centros_rejilla(origen, n, res) if C is None else C
         desc = desconocido_en(pl._visto, C).reshape(tuple(n)) & ~occ

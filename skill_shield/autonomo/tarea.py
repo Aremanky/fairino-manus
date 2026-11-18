@@ -48,11 +48,16 @@ vez que se pisa el pedal tras «Ejecutar» (orca_core la lleva entonces a su pos
 import math
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 
 import numpy as np
 
 from skill_shield.teleop_fr5.cinematica import OFFSET_PALMA_ORCA, T_de
+# Ejecutor (tiempos de cada tramo, cierre con los táctiles) y ManoActiva: en ejecucion.py (18-nov).
+# Se importan aquí también para que el código de fuera (agarre_asistido, calibración, pruebas) siga igual.
+from skill_shield.autonomo.ejecucion import (DEDOS_CTRL, Ejecutor, ManoActiva, _minjerk, _trapecio,  # noqa: F401
+                                             tiempos_crucero)
+from skill_shield.autonomo import mundo_tarea as MT
 
 # Postura de la mano por defecto (índices de ctrl 0..16 de la mano, rad, convención del sim;
 # lo no indicado = 0). Abierta = la de reposo (POSICION_STANDBY); agarre = puño de fuerza, como
@@ -111,8 +116,11 @@ def _tipo_razon(m):
         return "la muñeca tendría que doblarse más de lo que permiten sus límites (J4-J6)"
     if m.startswith(("J1", "J2", "J3")):
         return "el brazo tendría que salirse de sus límites (J1-J3)"
-    if "bajaría de la mesa" in m:
+    if "bajaría de la mesa" in m or "la mano tocaría la mesa" in m:
         return "la mano bajaría más que la pelota (se metería en la mesa)"
+    if "tocaría la mesa" in m:
+        return ("la pelota que lleva se metería en la mesa" if m.startswith("la pelota")
+                else "el brazo tocaría la mesa")
     if "mapa" in m or "apoyo" in m:
         return ("la mano tocaría la mesa u otro obstáculo que ve la cámara" if m.startswith(("la mano", "la pelota"))
                 else "el brazo tocaría un obstáculo que ve la cámara")
@@ -186,9 +194,14 @@ class Planificador:
         self.c = cadena
         g = dict(cfg)
         self.modelo = modelo or modelo_colision(cadena, g, T_mundo_cam)
+        # (18-nov) huecos de la mano FIJOS para la tarea (choque_mano.desde_config_tarea); con
+        # AUTONOMO_TAREA_HUECOS_DESDE_INICIO = True, las reglas de la calibración (hueco que no se cierra
+        # respecto a la postura de inicio), como antes
+        self.huecos_desde_inicio = bool(_g(g, "AUTONOMO_TAREA_HUECOS_DESDE_INICIO", False))
         if choque is None:
-            from skill_shield.autonomo.choque_mano import desde_config
-            choque = desde_config(cadena, g, entorno=self.modelo.entorno)
+            from skill_shield.autonomo.choque_mano import desde_config, desde_config_tarea
+            choque = (desde_config(cadena, g, entorno=self.modelo.entorno) if self.huecos_desde_inicio
+                      else desde_config_tarea(cadena, g, entorno=self.modelo.entorno))
         self.choque = choque
         p = dict(PARAMETROS_POR_DEFECTO)
         p.update({k: g[k] for k in p if g.get(k) is not None})
@@ -214,6 +227,7 @@ class Planificador:
         self.n_azimut = int(_g(g, "AUTONOMO_TAREA_DIRECCIONES", 8))
         self.inclinaciones = []                   # inclinación usada en cada sitio del último plan
         self.n_opciones = int(_g(g, "AUTONOMO_TAREA_OPCIONES", 3))     # formas de llegar a cada sitio
+        self.n_opciones_gpu = int(_g(g, "AUTONOMO_TAREA_OPCIONES_GPU", 8))   # (18-nov) con cuRobo (goalset), más
         self.n_probar = 8                          # candidatas que se prueban por inclinación
         self._arbol, self._res = None, 0.02
         # la mano contra el mapa: con los puntos de sus mallas (marco de wrist3), no con su cápsula
@@ -272,10 +286,15 @@ class Planificador:
         self._md, self._md_arbol, self._libre_cache, self._libre_ctx = None, None, {}, None
         self.lote_aciertos = self.lote_dudas = 0
         self.lote_tam = max(1, int(_g(g, "AUTONOMO_TAREA_COMPROBAR_LOTE_TAM", 24)))
-        # (17-nov) cuRobo (GPU): propone los tramos articulares; los de aquí los verifican
+        # (17-nov) cuRobo (GPU): propone los tramos articulares; los de aquí los verifican.
+        # (18-nov) se crea al FINAL de __init__ (necesita la pinza para meter la pelota cogida en sus esferas)
         self.curobo, self.tramos_curobo, self.curobo_rechazos = None, 0, 0
-        if str(_g(g, "AUTONOMO_TAREA_PLANIFICADOR", "propio")).lower() == "curobo":
-            self.curobo = self._crear_curobo(g)
+        # (18-nov) fallos de la GPU: ya no la apagan para toda la sesión; se avisa y se reintenta en el siguiente plan
+        self._curobo_pausado, self.curobo_fallos = None, 0
+        self._lote_pausado, self.lote_fallos = None, 0
+        self.gpu_fallos_max = int(_g(g, "AUTONOMO_TAREA_GPU_FALLOS_MAX", 3))
+        self.avisos = []                          # avisos del último plan (se enseñan en la web)
+        self.rrt_con_curobo = bool(_g(g, "AUTONOMO_TAREA_RRT_CON_CUROBO", False))
         self._discos = []                         # [(centro xy, radio, z del suelo, grosor, envolvente, r pelota)]
         self._mesa = None                         # (17-nov) (z, vértices xy) de la mesa medida con un plano
         self._superficies = []                    # (17-nov) mesas del mapa [(z, vértices xy)]
@@ -347,7 +366,38 @@ class Planificador:
         self._superficies_vivas = []
         self.apoyo_fijo_tol = float(_g(g, "AUTONOMO_ESCENA_FIJA_APOYO_TOL", 0.05))
         self._z_fijo_usado = None
+        # (18-nov) MUNDO SIMPLE (mundo_tarea.py): mesas = losas (escena fija, planos del mapa, mesa medida),
+        # el resto = cubos del mapa sin la capa de la mesa, y tres márgenes. "completo" = como antes.
+        self.mundo_simple = str(_g(g, "AUTONOMO_TAREA_MUNDO", "simple")).lower() == "simple"
+        self._losas = []
+        self.holgura_mesa_brazo = float(_g(g, "AUTONOMO_TAREA_HOLGURA_MESA_BRAZO", 0.02))
+        self.quitados_mesa = 0
+        if self.mundo_simple:
+            mb = float(_g(g, "AUTONOMO_TAREA_MARGEN_BRAZO", 0.02))
+            self.margen_mapa_brazo = self.margen_mapa_malla = mb
+        # (18-nov) la pelota se coloca deslizándola por el RAYO de la cámara hasta apoyarla en la mesa
+        self.pelota_por_rayo = bool(_g(g, "AUTONOMO_TAREA_PELOTA_POR_RAYO", True))
+        self._T_cam_medida = None                  # cámara→mundo con la que se midió la pelota (o T_cam)
+        # (18-nov) al elegir la postura de encima de la pelota, que el brazo NO le tape la pelota a la cámara
+        # (ahí se para a afinar): coste por la parte tapada y, por encima de TAPADA_MAX, al final de la lista
+        self.peso_tapada = float(_g(g, "AUTONOMO_TAREA_PESO_TAPADA", 2.0))
+        self.tapada_max = float(_g(g, "AUTONOMO_TAREA_TAPADA_MAX_PLAN", 0.25))
+        self._mirar_obj = None                     # (centro, radio) del objeto que hay que ver al afinar
+        # (18-nov) pinza: si la punta de los dedos baja por debajo del punto de pinza más de lo que deja la
+        # holgura con la mesa, se coge la pelota algo por encima de su centro (hasta esta fracción del radio)
+        self.pinza_elevar_max = float(_g(g, "AUTONOMO_TAREA_PINZA_ELEVAR_MAX_FRAC", 0.35))
+        self.lote_ik = max(16, int(_g(g, "AUTONOMO_TAREA_LOTE_IK", 512)))
+        # (18-nov) tramos rectos a velocidad CARTESIANA de la palma (m/s), más despacio en la llegada
+        self.vel_cart = float(_g(g, "AUTONOMO_TAREA_VEL_CART_M_S", 0.05))
+        self.lento_m = float(_g(g, "AUTONOMO_TAREA_LLEGADA_LENTA_M", 0.03))
+        self.vel_lenta = float(_g(g, "AUTONOMO_TAREA_VEL_LLEGADA_M_S", 0.02))
+        # (18-nov) cierre de la mano con los TÁCTILES (cada dedo hasta que toca) y bajada vigilada
+        self.cierre_tactil = bool(_g(g, "AUTONOMO_TAREA_CIERRE_TACTIL", True))
+        self.cierre_n = float(_g(g, "AUTONOMO_TAREA_CIERRE_TACTIL_N", 0.2))
+        self.cierre_s = float(_g(g, "AUTONOMO_TAREA_CIERRE_TACTIL_S", 2.5))
         self._cargar_fijo()
+        if str(_g(g, "AUTONOMO_TAREA_PLANIFICADOR", "propio")).lower() == "curobo":
+            self.curobo = self._crear_curobo(g)
 
     def _cargar_fijo(self):
         """(17-nov) Recarga la escena fija si ha cambiado (otro escaneo, o el archivo editado a mano)."""
@@ -356,7 +406,8 @@ class Planificador:
             return
         self._fijo_version = (self.escena.version, self._res)
         from skill_shield.autonomo.escena_fija import superficie
-        P = superficie(self.escena.cajas, self._res)
+        # (18-nov) mundo simple: las cajas fijas son LOSAS (sus tapas, macizas hacia abajo), no cubos
+        P = np.zeros((0, 3)) if self.mundo_simple else superficie(self.escena.cajas, self._res)
         V = np.asarray(self.escena.voxeles, float).reshape(-1, 3)
         self._fijo_pts = np.vstack([P, V]) if len(V) else P
         self._tapas_fijas = [(float(z), np.asarray(p, float)) for z, p in self.escena.tapas()]
@@ -432,6 +483,34 @@ class Planificador:
         return np.vstack([C, R])
 
     def zonas_apoyo(self, zonas):
+        """(18-nov) Con el mundo simple: mesas = losas y, de los cubos del mapa, fuera la capa de la mesa.
+        Solo las zonas (pelota o dejada) que NO están apoyadas en ninguna losa conocida se tratan como
+        antes (_zonas_apoyo_completo). Con AUTONOMO_TAREA_MUNDO = "completo", todo como antes."""
+        if not self.mundo_simple:
+            self._losas = []
+            return self._zonas_apoyo_completo(zonas)
+        losas = MT.losas_de(list(self._superficies) + ([self._mesa] if self._mesa is not None else []),
+                            lambda z: z - self._grosor_mesa(z))
+        sueltas = []
+        for zona in zonas:
+            c, rb = np.asarray(zona[0], float), float(zona[2])
+            if MT.losa_bajo(losas, c - [0.0, 0.0, rb], self.apoyo_tol) is None:
+                sueltas.append(zona)              # no se sabe en qué está apoyada: como antes
+        self._zonas_apoyo_completo(sueltas, con_superficies=False)
+        self._zonas_actuales = tuple(zonas)
+        self._losas = losas
+        self.quitados_mesa = 0
+        if losas and self._arbol is not None:
+            from scipy.spatial import cKDTree
+            C = self._arbol.data
+            # la capa: lo que la cámara ve de la propia mesa sale hasta 1 cubo + el ruido del estéreo por encima
+            capa = (self._res + self.k_ruido * np.sum((C - self.T_cam[:3, 3]) ** 2, axis=1)
+                    if self.T_cam is not None else 2 * self._res)
+            C2, self.quitados_mesa = MT.quitar_capa_mesa(C, losas, capa, self._res)
+            if self.quitados_mesa:
+                self._arbol = cKDTree(C2) if len(C2) else None
+
+    def _zonas_apoyo_completo(self, zonas, con_superficies=True):
         """zonas: [(centro de la pelota, radio horizontal, radio de la pelota)]. Es el sitio por el que
         TIENE que pasar la mano para cogerla (o dejarla): alrededor de la pelota y por debajo de
         su parte de arriba. Ahí solo puede haber la pelota y la mesa en la que está, y es justo
@@ -483,12 +562,12 @@ class Planificador:
             suelo_Q[enq] = np.minimum(suelo_Q[enq], z_min)
         self._zonas_actuales = tuple(zonas)
         self._version_mundo = getattr(self, "_version_mundo", 0) + 1
-        for z_m, poli in self._superficies:              # (17-nov) mesas del mapa
+        for z_m, poli in (self._superficies if con_superficies else ()):   # (17-nov) mesas del mapa
             env = _envolvente(poli, 0.0)
             if env is not None:
                 self._discos.append((poli.mean(0), np.inf, float(z_m) + self.margen_suave,
                                      self._grosor_mesa(z_m), env, 0.0))
-        if self._mesa is not None:
+        if self._mesa is not None and con_superficies:
             # (17-nov) la mesa MEDIDA (plano de la profundidad alrededor del objeto, pelotas.py): es suelo en
             # toda su envolvente, para mano y brazo, aunque no haya cubos (tapada, olvidada, hueco del mapa)
             z_m, poli = self._mesa
@@ -599,8 +678,12 @@ class Planificador:
         except Exception as e:                           # la GPU nunca debe tumbar el plan
             if self._lote_torch is None:
                 raise
-            print(f"⚠️  Tarea: comprobación en la GPU falló ({e}): sigo con numpy.")
+            self.lote_fallos += 1
+            self._lote_pausado = (self._lote_torch, self._lote_dev)
             self._lote_torch = self._lote_dev = None
+            txt = f"la comprobación en la GPU falló ({e}): este plan va con numpy"
+            print(f"⚠️  Tarea: {txt} (fallo {self.lote_fallos}/{self.gpu_fallos_max}).")
+            self.avisos.append(txt)
             lm, lc = calcular(None, None)
         if len(self._libre_cache) > 200000:
             self._libre_cache = {}
@@ -729,6 +812,10 @@ class Planificador:
         m = None if self._choque_libre(q, marcos) else self.choque.motivo(q)
         if m:
             return m
+        if self._losas:                                  # (18-nov) mundo simple: mesas = losas
+            m = self._motivo_losas(q, marcos)
+            if m:
+                return m
         if self._suelo is not None or self._discos:
             Tb = marcos[5]
             for pts, que, tol in ((self._mano_pts, "la mano", -self.holgura_mesa_mano),
@@ -791,6 +878,31 @@ class Planificador:
                     return f"{NOMBRES.get(cap.nombre, cap.nombre)} toca {donde}"
         return None
 
+    def _motivo_losas(self, q, marcos):
+        """(18-nov) Mano, lo que lleva y brazo contra las mesas (losas), cada uno con su holgura."""
+        Tb = marcos[5]
+        for pts, que, h in ((self._mano_pts, "la mano", self.holgura_mesa_mano),
+                            (self._carga, "la pelota que lleva", -2 * self.margen_suave)):   # apoyada: sí toca
+            if pts is not None and len(pts) and \
+                    MT.mascara_losas(self._losas, pts @ Tb[:3, :3].T + Tb[:3, 3], h).any():
+                return f"{que} tocaría la mesa (holgura {100 * max(h, 0.0):.0f} cm)"
+        for marco, pts, nombre in self._brazo_pts:
+            T = marcos[marco]
+            if MT.mascara_losas(self._losas, pts @ T[:3, :3].T + T[:3, 3], self.holgura_mesa_brazo).any():
+                return f"{nombre} tocaría la mesa"
+        for cap in self.modelo.capsulas(q, marcos):
+            if cap.nombre in ("base", "mano") or (self._brazo_pts and cap.nombre in ("brazo", "antebrazo")):
+                continue
+            n = max(2, int(math.ceil(np.linalg.norm(cap.b - cap.a) / 0.02)) + 1)
+            pts = cap.a + np.linspace(0.0, 1.0, n)[:, None] * (cap.b - cap.a)
+            if MT.mascara_losas(self._losas, pts, cap.r + self.holgura_mesa_brazo).any():
+                return f"{NOMBRES.get(cap.nombre, cap.nombre)} tocaría la mesa"
+        return None
+
+    def _mascara_losas(self, P, holgura=0.0):
+        """Para cuRobo (mundo.py): puntos dentro de alguna mesa."""
+        return MT.mascara_losas(self._losas, P, holgura)
+
     # ── IK ──
     def _coste(self, q, q_ref):
         return float(np.sum(PESOS_IK * np.abs(np.asarray(q) - np.asarray(q_ref))))
@@ -811,6 +923,36 @@ class Planificador:
                 razones[_tipo_razon(m)] += 1
         if not sols and razones is not None:
             razones["el brazo no llega"] += 1
+        return out
+
+    def ik_lote(self, poses, q_ref, n=2, razones=None):
+        """(18-nov) ik() de muchas poses a la vez: primero TODAS las soluciones de la IK analítica, se
+        descartan las que se salen de los límites (sin calcular nada más) y las demás se comprueban contra
+        el mapa y la mano↔brazo EN LOTE (GPU si hay, comprobador_lote) antes de mirar una a una con motivo(),
+        que ya encuentra el resultado hecho. Mismo resultado que llamar a ik() con cada pose."""
+        sols = [sorted(self.c.ik_analitica(T, q_ref, incluir_fuera_de_limites=True),
+                       key=lambda q: self._coste(q, q_ref)) for T in poses]
+        planas = [np.asarray(q, float) for ss in sols for q in ss]
+        if planas:
+            Q = np.array(planas)
+            dentro = np.all((Q >= self.lo) & (Q <= self.hi), axis=1)
+            Q = Q[dentro]
+            for k0 in range(0, len(Q), self.lote_ik):
+                self.prefiltrar(Q[k0:k0 + self.lote_ik])
+        out = []
+        for ss in sols:
+            val = []
+            for q in ss:
+                m = self.motivo(q)
+                if m is None:
+                    val.append(np.asarray(q, float))
+                    if len(val) >= n:
+                        break
+                elif razones is not None:
+                    razones[_tipo_razon(m)] += 1
+            if not ss and razones is not None:
+                razones["el brazo no llega"] += 1
+            out.append(val)
         return out
 
     def _ik_cercana(self, T_tool, q_prev):
@@ -959,8 +1101,16 @@ class Planificador:
             ruta = g.get("AUTONOMO_CUROBO_ROBOT", "curobo_fr5/fr5_orca.yml")
             if not os.path.isabs(ruta):
                 ruta = os.path.join(os.path.dirname(os.path.abspath(g.get("RUTA_XML", "."))), "..", "..", ruta)
+            # (18-nov) cuRobo con la MISMA geometría y márgenes que las comprobaciones de aquí: el mundo
+            # inflado con el margen del brazo, las esferas de la mano con lo que le falta hasta el de la mano,
+            # y la pelota cogida como esferas de mano_mount. Así lo que propone casi siempre pasa motivo().
             return PlanificadorCuRobo(os.path.normpath(ruta), self.modelo.entorno, lim,
                                       float(g.get("AUTONOMO_MAPA_RES", 0.02)),
+                                      margen_entorno=self.margen_mapa_malla,
+                                      margen_mundo=self.margen_mapa_malla,
+                                      margen_mano_extra=max(0.0, self.margen_mapa - self.margen_mapa_malla),
+                                      esferas_mano=self._esferas_carga(g),
+                                      max_goalset=int(g.get("AUTONOMO_CUROBO_MAX_GOALSET", 16)),
                                       intentos=int(g.get("AUTONOMO_CUROBO_INTENTOS", 4)),
                                       semillas=int(g.get("AUTONOMO_CUROBO_SEMILLAS", 8)),
                                       desconocido_extra=g.get("AUTONOMO_CUROBO_DESCONOCIDO_EXTRA", 0.02),
@@ -968,10 +1118,68 @@ class Planificador:
                                       cuda_graph=bool(g.get("AUTONOMO_CUROBO_CUDA_GRAPH", False)))
         except Exception as e:
             global _AVISO_CUROBO
+            self._curobo_no_disponible = str(e)          # (18-nov) se dice en la web en cada plan
             if _AVISO_CUROBO != str(e):                   # una vez (no en cada planificador que se cree)
                 _AVISO_CUROBO = str(e)
                 print(f"⚠️  Tarea: cuRobo no disponible ({e}): planifico con el planificador propio.")
             return None
+
+    def _esferas_carga(self, g):
+        """(18-nov) [(centro en mano_mount, radio)] de la pelota cogida en cada forma de cogerla que está
+        activa (AUTONOMO_TAREA_PELOTA_MODOS), para añadirla a las esferas de la mano de cuRobo."""
+        r = 0.5 * float(_g(g, "AUTONOMO_CUROBO_PELOTA_DIAMETRO", 0.07))
+        out = []
+        for m in self.pel_modos:
+            try:
+                if m == "pinza":
+                    pz = self.pinza(2 * r)
+                    if pz is not None:
+                        out.append((np.asarray(pz["punto"], float), r))
+                elif m in ("rodeándola", "con los dedos"):
+                    extra = self.pel_dedos if m == "con los dedos" else 0.0
+                    out.append((OFFSET_PALMA_ORCA + np.array([-(r + self.pel_holgura + extra), 0.0, 0.0]), r))
+            except Exception as e:
+                print(f"⚠️  Tarea: no puedo poner la pelota cogida en cuRobo ({m}: {e}).")
+        return out
+
+    def _goalset(self, q0, opciones, nombre, mano=None):
+        """(18-nov) cuRobo elige en la GPU, de una vez, la mejor de las opciones de un sitio (su pose de la mano) y el
+        camino desde q0 (plan_goalset). Se acepta solo si acaba en la MISMA postura que la opción (cuRobo podría
+        llegar a la misma pose con otra configuración del brazo, y la bajada está calculada desde la de la opción)
+        y si el camino pasa todas las comprobaciones de aquí. (índice, posturas) o None."""
+        cu = self.curobo
+        if cu is None or not hasattr(cu, "plan_goalset") or len(opciones) < 2:
+            return None
+        Ts = [self.c.fk_marcos(np.asarray(op[0], float))[6] for op in opciones]
+        try:
+            with self.con_mano(*(mano or (None, None))):
+                cu.actualizar_mundo(self, clave=(id(self), getattr(self, "_version_mundo", 0), self._macizo_hecho,
+                                                 id(self._arbol), id(self._visto)))
+                r = cu.plan_goalset(q0, Ts)
+                if r is None:
+                    return None
+                idx, qs = r
+                q_op = np.asarray(opciones[idx][0], float)
+                if float(np.max(np.abs(qs[-1] - q_op))) > math.radians(3.0):
+                    self.curobo_rechazos += 1
+                    return None                          # otra configuración del brazo: no empalma con la bajada
+                qs = np.vstack([qs[:-1], q_op[None]])
+                qs = self._densificar(qs)
+                for q in qs[1:]:
+                    m = self.motivo(q)
+                    if m:
+                        self.curobo_rechazos += 1
+                        return None
+                self.comprobar_continuo(qs, nombre)
+        except ErrorPlan:
+            self.curobo_rechazos += 1
+            return None
+        except Exception as e:                           # la GPU nunca debe tumbar el plan
+            self._pausar_curobo(e)
+            return None
+        self.tramos_curobo += 1
+        self.goalsets_curobo = getattr(self, "goalsets_curobo", 0) + 1
+        return idx, qs
 
     def _densificar(self, qs):
         """Posturas intermedias para que ningún joint salte más de self.paso entre dos seguidas."""
@@ -989,8 +1197,7 @@ class Planificador:
                                                       self._macizo_hecho, id(self._arbol), id(self._visto)))
             qs = self.curobo.plan(q0, q1)
         except Exception as e:                           # la GPU nunca debe tumbar el plan
-            print(f"⚠️  Tarea: fallo de cuRobo ({e}): sigo con el planificador propio.")
-            self.curobo = None
+            self._pausar_curobo(e)
             raise ErrorPlan(f"{nombre}: cuRobo falló")
         if qs is None:
             raise ErrorPlan(f"{nombre}: cuRobo no encuentra camino")
@@ -1041,6 +1248,9 @@ class Planificador:
                 except ErrorPlan:
                     pass
             if not (self.rodeo and self._permitir_rodeo) or self._rodeo_resto <= 0:
+                raise e
+            if self.curobo is not None and not self.rrt_con_curobo:
+                # (18-nov) con cuRobo en la GPU, el RRT en CPU (6-25 s) no aporta: cuRobo ya ha buscado rodeos
                 raise e
             qs = self.rodear(q0, q1, min(self.rodeo_s, self._rodeo_resto))
             if qs is None:
@@ -1197,16 +1407,20 @@ class Planificador:
         razones, fallos = Counter(), Counter()
         opciones = []
         grupos = self._direcciones(T_m[:3, 2])
+        n_op = self.n_opciones_gpu if (self.curobo is not None and hasattr(self.curobo, "plan_goalset")) \
+            else self.n_opciones
         if todas:
             # todas las inclinaciones a la vez (pelotas, 12-nov): la mejor es la que menos mueve el
-            # brazo, con un poco de preferencia por llegar derecho; de arriba, de lado o como sea
+            # brazo, con un poco de preferencia por llegar derecho; de arriba, de lado o como sea.
+            # (18-nov) todas las IK en lote; y, si hay que afinar con la cámara al llegar, coste por la
+            # parte del objeto que el brazo le tape (por encima de tapada_max, al final de la lista)
+            claves = [(inc, a, ang) for inc, dirs in grupos for a in dirs for ang in self._vueltas()]
             cands = []
-            for inc, dirs in grupos:
-                for a in dirs:
-                    for ang in self._vueltas():
-                        for q_l in self.ik(T_pose(a, ang), q_ref, 2, razones):
-                            cands.append((self._coste(q_l, q_ref) + self.pref_derecho * math.radians(inc),
-                                          q_l, a, inc))
+            for (inc, a, ang), qls in zip(claves, self.ik_lote([T_pose(a, ang) for inc, a, ang in claves],
+                                                                 q_ref, 2, razones)):
+                for q_l in qls:
+                    cands.append((self._coste(q_l, q_ref) + self.pref_derecho * math.radians(inc)
+                                  + self._coste_tapada(q_l), q_l, a, inc))
             cands.sort(key=lambda c: c[0])
             probados = 0
             for _, q_l, a, inc in cands:
@@ -1220,15 +1434,15 @@ class Planificador:
                 except ErrorPlan as e:
                     fallos[str(e)] += 1
                     continue
-                if len(opciones) >= self.n_opciones:
+                if len(opciones) >= n_op:
                     break
             return opciones, (razones, fallos)
         for g_i, (inc, dirs) in enumerate(grupos):
             cands = []
-            for a in dirs:
-                for ang in self._vueltas():
-                    for q_l in self.ik(T_pose(a, ang), q_ref, 2, razones):
-                        cands.append((self._coste(q_l, q_ref), q_l, a))
+            claves = [(a, ang) for a in dirs for ang in self._vueltas()]
+            for (a, ang), qls in zip(claves, self.ik_lote([T_pose(a, ang) for a, ang in claves], q_ref, 2, razones)):
+                for q_l in qls:
+                    cands.append((self._coste(q_l, q_ref) + self._coste_tapada(q_l), q_l, a))
             cands.sort(key=lambda c: c[0])
             probados = 0
             for _, q_l, a in cands:
@@ -1242,11 +1456,21 @@ class Planificador:
                 except ErrorPlan as e:
                     fallos[str(e)] += 1
                     continue
-                if len(opciones) >= self.n_opciones:
+                if len(opciones) >= n_op:
                     return opciones, (razones, fallos)
             if opciones and g_i + 1 < len(grupos) and inc > 0:
                 return opciones, (razones, fallos)        # ya hay: no hace falta inclinarse más
         return opciones, (razones, fallos)
+
+    def _coste_tapada(self, q):
+        """(18-nov) Coste de que el brazo, en la postura q, le tape a la cámara el objeto que hay que mirar
+        (self._mirar_obj): peso_tapada × parte tapada; si pasa de tapada_max, se va al final de la lista."""
+        if self._mirar_obj is None or self.T_cam is None or self.peso_tapada <= 0:
+            return 0.0
+        f = self.fraccion_tapada(q, *self._mirar_obj)
+        if f is None:
+            return 0.0
+        return self.peso_tapada * f + (100.0 if f > self.tapada_max else 0.0)
 
     def _no_encuentro(self, que, info):
         razones, fallos = info
@@ -1359,6 +1583,13 @@ class Planificador:
                     return
                 nombre, opciones = sitios[k][:2]
                 mano = sitios[k][2] if len(sitios[k]) > 2 else None
+                # (18-nov) con cuRobo: primero UNA llamada a la GPU con todas las opciones del sitio a la vez
+                # (goalset): elige la mejor y su camino; esa opción se prueba la primera
+                g = self._goalset(q_actual, opciones, nombre, mano) if not soluciones else None
+                if g is not None:
+                    idx, qs_g = g
+                    cache[(q_actual.tobytes(), np.asarray(opciones[idx][0], float).tobytes(), nombre)] = qs_g
+                    opciones = [opciones[idx]] + [o for i_, o in enumerate(opciones) if i_ != idx]
                 for op in opciones:
                     if len(soluciones) >= n_max:
                         return
@@ -1380,8 +1611,10 @@ class Planificador:
     def _empezar(self, q0):
         q0 = np.asarray(q0, float)
         self.inclinaciones, self.rodeos, self.tramos_por_alto = [], 0, 0
-        self.tramos_curobo, self.curobo_rechazos = 0, 0
+        self.tramos_curobo, self.curobo_rechazos, self.goalsets_curobo = 0, 0, 0
         self._choques = []
+        self.avisos = []
+        self._reactivar_gpu()
         self._rodeo_resto = self.rodeo_total_s
         self._mano_pts, self._carga = self._mano_pts0, None
         # donde está ahora el robot no puede haber nada: si quedan cubos ahí (el brazo visto con
@@ -1423,11 +1656,36 @@ class Planificador:
             if len(quedan) != len(self._superficies):
                 self._superficies = quedan
                 self.zonas_apoyo(())
-        self.choque.fijar_inicio(q0)
+        if self.huecos_desde_inicio:
+            self.choque.fijar_inicio(q0)
         m = self.motivo(q0)
         if m:
             raise ErrorPlan(f"la postura actual del robot no pasa las comprobaciones: {m}")
         return q0
+
+    # ── (18-nov) la GPU: un fallo ya no la apaga para toda la sesión ──
+    def _reactivar_gpu(self):
+        """Al empezar cada plan: si cuRobo o la comprobación en lote se pausaron por un fallo, se vuelven a
+        probar (hasta gpu_fallos_max fallos; después se quedan apagados y la web lo dice)."""
+        if getattr(self, "_curobo_no_disponible", None):
+            self.avisos.append(f"cuRobo no disponible ({self._curobo_no_disponible}): planifico en la CPU")
+        if self.curobo is None and self._curobo_pausado is not None:
+            if self.curobo_fallos < self.gpu_fallos_max:
+                self.curobo, self._curobo_pausado = self._curobo_pausado, None
+            else:
+                self.avisos.append(f"cuRobo apagado tras {self.curobo_fallos} fallos (planifico en la CPU)")
+        if self._lote_torch is None and self._lote_pausado is not None:
+            if self.lote_fallos < self.gpu_fallos_max:
+                (self._lote_torch, self._lote_dev), self._lote_pausado = self._lote_pausado, None
+            else:
+                self.avisos.append(f"comprobación en la GPU apagada tras {self.lote_fallos} fallos (va en la CPU)")
+
+    def _pausar_curobo(self, e):
+        self.curobo_fallos += 1
+        self._curobo_pausado, self.curobo = self.curobo, None
+        txt = f"cuRobo falló ({e}): este plan va con el planificador propio"
+        print(f"⚠️  Tarea: {txt} (fallo {self.curobo_fallos}/{self.gpu_fallos_max}).")
+        self.avisos.append(txt)
 
     def _puntos_robot(self, q, marcos=None):
         """Puntos (mundo) de la mano y del brazo en la postura q (para ver qué tapa a la cámara)."""
@@ -1523,6 +1781,9 @@ class Planificador:
                  Fase("Abrir la mano (dejar)", mano="abierta"),
                  Fase("Retirarse", d[2][::-1]),
                  Fase("Volver al inicio", vuelta)]
+        for f in fases:                                   # (18-nov) tramos rectos a velocidad de la palma
+            if f.qs is not None and f.nombre.startswith(("Acercar", "Retirarse", "Alejar")):
+                self._recta_lenta(f, llegada=f.nombre.startswith("Acercar"))
         return Plan(q0, fases)
 
     def _marco_arriba(self, p):
@@ -1666,10 +1927,14 @@ class Planificador:
         self._mesa = (None if apoyo_z is None or not apoyo_poligono or len(apoyo_poligono) < 3
                       else (float(apoyo_z), [list(map(float, v)) for v in apoyo_poligono]))
 
-    def apoyar(self, T_pelota, diametro, apoyo_z):
+    def apoyar(self, T_pelota, diametro, apoyo_z, T_mundo_cam=None):
         """(17-nov) La pelota está APOYADA en la mesa: si se ha medido la altura de la mesa (plano
         ajustado a la profundidad alrededor de la pelota, pelotas.py) y cuadra, su centro está a un radio
-        por encima. Es más fiable que la altura que da el estéreo en la propia pelota (sus bordes)."""
+        por encima. Es más fiable que la altura que da el estéreo en la propia pelota (sus bordes).
+        (18-nov) Se DESLIZA por el rayo de la cámara (no en vertical): el error del estéreo va a lo largo del
+        rayo y, con la cámara mirando casi en horizontal, es sobre todo horizontal («la mano baja más lejos»).
+        Subirla o bajarla dejaba ese error entero. T_mundo_cam: la cámara con la que se midió (por defecto, la
+        de la última medida o la de la calibración)."""
         T = np.array(T_pelota, float)
         self._apoyo_ok = False
         r = float(diametro) / 2.0
@@ -1686,13 +1951,32 @@ class Planificador:
             return T
         dz = float(apoyo_z) + r - T[2, 3]
         if abs(dz) <= (max(self.apoyo_tol, self.apoyo_fijo_tol) if z_fijo is not None else self.apoyo_tol):
-            T[2, 3] += dz
+            c = self.por_rayo(T[:3, 3], float(apoyo_z) + r, T_mundo_cam)
+            T[:3, 3] = c if c is not None else T[:3, 3] + [0.0, 0.0, dz]
             self._apoyo_ok = True
         else:
             print(f"⚠️  Tarea: la mesa medida está {100 * dz:+.1f} cm de donde debería apoyar la pelota: no la uso.")
         return T
 
-    def planificar_pelota(self, q0, T_pelota, diametro, T_dejada, apoyo_z=None, apoyo_poligono=None):
+    def por_rayo(self, c, z, T_mundo_cam=None, max_desliz=0.12):
+        """(18-nov) El punto del rayo cámara→c que está a la altura z (o None: sin cámara, rayo casi
+        horizontal o haría falta deslizarlo más de max_desliz)."""
+        if not self.pelota_por_rayo:
+            return None
+        Tc = T_mundo_cam if T_mundo_cam is not None else (
+            self._T_cam_medida if self._T_cam_medida is not None else self.T_cam)
+        if Tc is None:
+            return None
+        o, c = np.asarray(Tc, float)[:3, 3], np.asarray(c, float)
+        d = c - o
+        n = float(np.linalg.norm(d))
+        if n < 1e-6 or abs(d[2]) / n < 0.1:               # casi horizontal: deslizar amplifica el error
+            return None
+        p = o + d * ((float(z) - o[2]) / d[2])
+        return p if float(np.linalg.norm(p - c)) <= max_desliz else None
+
+    def planificar_pelota(self, q0, T_pelota, diametro, T_dejada, apoyo_z=None, apoyo_poligono=None,
+                          T_mundo_cam=None):
         """Coger una pelota, apretarla un poco y dejarla en el punto de dejada. Se prueban, por
         orden, varias formas de cogerla y, para cada una, de llegar:
           · rodeándola con la mano (la palma pegada a la pelota) y, si no se puede,
@@ -1703,6 +1987,7 @@ class Planificador:
         Cada tramo se comprueba con la mano en la postura que tiene en ese momento (abierta al ir
         y acercarse; cerrada y con la pelota al retirarse, llevarla y dejarla), y alrededor de la
         pelota y del sitio de dejada la mesa se trata aparte (zonas_apoyo)."""
+        self._T_cam_medida = None if T_mundo_cam is None else np.asarray(T_mundo_cam, float)
         T_pelota = self.apoyar(T_pelota, diametro, apoyo_z)
         self.poner_mesa(apoyo_z if self._apoyo_ok and self._z_fijo_usado is None else None, apoyo_poligono)
         todos = {"pinza": ("en pinza", 0.0), "rodeándola": ("rodeándola", 0.0),
@@ -1828,13 +2113,16 @@ class Planificador:
         T_p, T_d = self._marco_arriba(c), self._marco_arriba(c_d)
         # (la pelota se suelta 1 cm por encima del marcador de dejada: su «suelo» es el marcador)
         self.zonas_apoyo([(c, r + self.zona_apoyo, r), (c_d, r + self.zona_apoyo, r + 0.01, not self.dejar_de_pie)])
+        elevar = self._elevar_pinza(pinza, r) if pinza is not None else 0.0
+        subir = np.array([0.0, 0.0, elevar])
         if pinza is not None:
-            abierta, cerrada = ("pinza_abierta", None), ("pinza_contacto", self._pelota_en_mano(r, centro=punto))
+            abierta, cerrada = ("pinza_abierta", None), ("pinza_contacto",
+                                                          self._pelota_en_mano(r, centro=self._bola_en_pinza(pinza, elevar)))
         else:
             abierta, cerrada = ("pelota_abierta", None), ("pelota_cerrada", self._pelota_en_mano(r, extra))
 
         def coger(q_l, a):
-            centro = c + _unit(a) * d_palma
+            centro = c + _unit(a) * d_palma + subir
             with self.con_mano(*abierta):
                 qs = self.recta(q_l, punto, centro, "bajar a la pelota")
             with self.con_mano(*cerrada):                # al subir ya la lleva
@@ -1845,7 +2133,7 @@ class Planificador:
             return qs
 
         def dejar(q_l, a):
-            centro = c_d + _unit(a) * d_palma
+            centro = c_d + _unit(a) * d_palma + subir
             with self.con_mano(*cerrada):
                 qs = self.recta(q_l, punto, centro, "bajar a dejarla")
             with self.con_mano(*abierta):                # ya la ha soltado
@@ -1854,12 +2142,17 @@ class Planificador:
                     if m:
                         raise ErrorPlan(f"subir tras dejarla: {m}")
             return qs
-        with self.con_mano(*abierta):
-            ops_p, info = self._opciones(T_p, q0, self._pose_pelota(T_p, d_palma + self.pel_subida, punto, pinza),
-                                         coger, todas=True)
+        # (18-nov) encima de la pelota se para a afinar con la cámara: que el brazo no se la tape
+        self._mirar_obj = (c, r) if self.afinar_s > 0 else None
+        try:
+            with self.con_mano(*abierta):
+                ops_p, info = self._opciones(T_p, q0, self._pose_pelota(T_p, d_palma + self.pel_subida, punto, pinza),
+                                             coger, todas=True)
+        finally:
+            self._mirar_obj = None
         if not ops_p:
             raise self._con_aviso(str(self._no_encuentro("llegar a la pelota (ni desde arriba ni de lado)", info))
-                                  + self._que_estorba(c, r), c)
+                                  + self._que_estorba(c, r) + self._aviso_pinza(), c)
         inc_coger, self.inc_max = self.inc_max, self.pel_inc_max   # (17-nov) «desde arriba» es para COGERLA; para
         try:                                                       # soltarla (ya la lleva) vale cualquier inclinación
             with self.con_mano(*cerrada):
@@ -1890,13 +2183,27 @@ class Planificador:
             Fase("Ir al punto de dejada", ir_d),
             Fase("Bajar a dejarla" if not self.dejar_de_pie else "Bajar delante del marcador", d[2]),
             Fase("Subir", d[2][::-1]), Fase("Volver al inicio", vuelta))
+        # (18-nov) los tramos rectos, a velocidad de la palma; las llegadas, despacio en los últimos cm
+        for f in (f_bajar, f_dejar):
+            self._recta_lenta(f, llegada=True)
+        for f in (f_subir, f_alejar):
+            self._recta_lenta(f, llegada=False)
+        f_bajar.vigilar_tactil = True            # (18-nov) si un dedo toca algo al bajar: parar y reintentar
         # parada encima de la pelota para afinar con la cámara (12-nov): con el brazo quieto y la
         # mano al lado de la pelota, la cámara corrige la calibración con el brazo y vuelve a medir
         # la pelota; si se ha movido, se rehace la bajada (Tarea._afinar)
         afinar = [Fase("Afinar con la cámara", dur=self.afinar_s, comprobar="afinar")] if self.afinar_s > 0 else []
+        f_cerrar = Fase("Cerrar la mano", mano=k_ce)
+        if self.cierre_tactil:
+            # (18-nov) con táctiles: cada dedo se cierra hasta que su yema nota la pelota (como mucho hasta
+            # k_max) y desde ahí se aprieta y se afloja; sin táctiles, a la postura del modelo (como antes)
+            k_max = "pinza_max" if pinza is not None else k_ap
+            ap = self.pinza_apriete if pinza is not None else (0.0, 0.15)
+            f_cerrar.cierre_tactil = dict(destino=k_max, apretar=k_ap, aflojar=k_ce, apriete=ap[1], aflojado=ap[0],
+                                          umbral_n=self.cierre_n, dur=self.cierre_s)
         fases = ([Fase("Abrir la mano", mano=k_ab), f_ir] + afinar +
                  [f_bajar,
-                  Fase("Cerrar la mano", mano=k_ce),
+                  f_cerrar,
                   Fase("Apretar un poco", mano=k_ap),
                   Fase("Aflojar", mano=k_ce),
                   Fase("Comprobar que la tengo", dur=0.3, comprobar="agarre"),
@@ -1910,11 +2217,78 @@ class Planificador:
         plan = Plan(q0, fases, nombre="coger, apretar y dejar la pelota")
         plan.pelota = dict(c=c.copy(), r=r, d_palma=d_palma, extra=extra, punto=np.asarray(punto, float).copy(),
                            i_bajar=fases.index(f_bajar), i_subir=fases.index(f_subir),
-                           c_dejada=c_d.copy(), pinza=pinza is not None)
+                           c_dejada=c_d.copy(), pinza=pinza is not None, elevar=float(elevar),
+                           k_abierta=k_ab)
         if pinza is not None:                              # posturas que la Tarea manda a la mano
             plan.posturas = dict(pinza_abierta=dict(self.pinza_ab), pinza_cerrada=dict(pinza["cerrada"]),
-                                 pinza_apretar=dict(pinza["apretar"]))
+                                 pinza_apretar=dict(pinza["apretar"]), pinza_max=dict(self.pinza_ce))
         return plan
+
+    def _recta_lenta(self, f, llegada):
+        """(18-nov) Tramo recto: a vel_cart de la palma y, si es una llegada, a vel_lenta en los últimos lento_m."""
+        f.vel_cart = self.vel_cart
+        if llegada:
+            f.lento_m, f.vel_lenta = self.lento_m, self.vel_lenta
+
+    def _caida_pinza(self, pinza):
+        """(18-nov) Cuánto baja la mano (abierta o en contacto) por debajo del punto de pinza con la mano
+        llegando desde arriba (m)."""
+        try:
+            m = self.c.fk_marcos(np.zeros(6))
+            T_mm_w = np.linalg.inv(m[6]) @ m[5]                 # wrist3 → mano_mount
+            T = (self.T_pinza_arriba(np.eye(4), 0.0, 0.0, np.array([0.0, 0.0, 1.0]), pinza["punto"], pinza["linea"])
+                 if self.pinza_arriba and pinza.get("linea") is not None
+                 else self.T_palma(np.eye(4), 0.0, 0.0, np.array([0.0, 0.0, 1.0]), pinza["punto"]))
+            R, punto = T[:3, :3], np.asarray(pinza["punto"], float)
+            caida = 0.0
+            for clave in ("pinza_abierta", "pinza_contacto"):
+                P = self._nube_postura(clave)
+                if P is None:
+                    continue
+                Pmm = P @ T_mm_w[:3, :3].T + T_mm_w[:3, 3]
+                caida = max(caida, float(-(((Pmm - punto) @ R.T)[:, 2]).min()))
+            return max(caida, 0.0)
+        except Exception as e:
+            print(f"⚠️  Tarea: no puedo medir cuánto bajan los dedos de la pinza ({e}).")
+            return 0.0
+
+    def _elevar_pinza(self, pinza, r):
+        """(18-nov) La pinza coge la pelota a la altura de su centro; si la mano baja por debajo del punto de
+        pinza más de lo que deja la holgura con la mesa (holgura_mesa_mano), se coge algo más arriba (como
+        mucho pinza_elevar_max × r: más arriba, la pelota se escurre hacia abajo al levantarla)."""
+        self._info_pinza = None
+        caida = self._caida_pinza(pinza)
+        hace_falta = caida + self.holgura_mesa_mano + 0.003 - r
+        if hace_falta <= 0:
+            return 0.0
+        elevar = min(hace_falta, self.pinza_elevar_max * r)
+        self._info_pinza = (caida, hace_falta, elevar)
+        txt = (f"la pinza coge la pelota {100 * elevar:.1f} cm por encima de su centro (la mano baja "
+               f"{100 * caida:.1f} cm por debajo del punto de pinza y hay que dejar {100 * self.holgura_mesa_mano:.0f} cm "
+               f"con la mesa)")
+        if hace_falta > elevar + 1e-4:
+            txt += f"; harían falta {100 * hace_falta:.1f} cm (máx. {100 * elevar:.1f}): probablemente no salga"
+        print(f"ℹ️  Tarea: {txt}.")
+        self.avisos.append(txt)
+        return elevar
+
+    def _aviso_pinza(self):
+        i = getattr(self, "_info_pinza", None)
+        if not i or i[1] <= i[2] + 1e-4:
+            return ""
+        return (f" · la pelota es demasiado pequeña para esta pinza desde arriba: la mano baja {100 * i[0]:.1f} cm por "
+                f"debajo del punto de pinza (ajustad AUTONOMO_TAREA_MANO_PINZA_* o AUTONOMO_TAREA_HOLGURA_MESA_MANO)")
+
+    def _bola_en_pinza(self, pinza, elevar):
+        """(18-nov) Centro de la pelota cogida en mano_mount: el punto de pinza, bajado 'elevar' en vertical
+        (con la mano llegando desde arriba)."""
+        punto = np.asarray(pinza["punto"], float)
+        if elevar <= 0:
+            return punto
+        T = (self.T_pinza_arriba(np.eye(4), 0.0, 0.0, np.array([0.0, 0.0, 1.0]), punto, pinza["linea"])
+             if self.pinza_arriba and pinza.get("linea") is not None
+             else self.T_palma(np.eye(4), 0.0, 0.0, np.array([0.0, 0.0, 1.0]), punto))
+        return punto + T[:3, :3].T @ np.array([0.0, 0.0, -float(elevar)])
 
     def rehacer_bajada(self, plan, c_nueva):
         """(12-nov) La bajada a la pelota rehecha hacia c_nueva (medida otra vez desde encima),
@@ -1925,7 +2299,7 @@ class Planificador:
         Tt = self.c.fk_marcos(fb.qs[-1])[6]
         a = _unit(Tt[:3, 0])                                # dirección de llegada (+X de mano_mount)
         punto = np.asarray(pz.get("punto", OFFSET_PALMA_ORCA), float)
-        centro = np.asarray(c_nueva, float) + a * pz["d_palma"]
+        centro = np.asarray(c_nueva, float) + a * pz["d_palma"] + [0.0, 0.0, float(pz.get("elevar", 0.0))]
         r = pz["r"]                                        # la zona de agarre, donde está ahora la pelota
         self.zonas_apoyo([(np.asarray(c_nueva, float), r + self.zona_apoyo, r),
                           (pz["c_dejada"], r + self.zona_apoyo, r + 0.01, not self.dejar_de_pie)])
@@ -1950,7 +2324,8 @@ class Planificador:
         if det.get("tipo") == "pelota":
             caja = det.get("caja")
             diam = float(det.get("diametro_m") or (2.0 * float(caja[0]) if caja else 0.07))
-            return self._previa_pelota(q0, T, diam, det.get("apoyo_z"), det.get("apoyo_poligono"))
+            return self._previa_pelota(q0, T, diam, det.get("apoyo_z"), det.get("apoyo_poligono"),
+                                       det.get("T_mundo_cam"))
         q0 = self._empezar(q0)
         ops = [(q, q, qs, inc) for q, qs, inc in self.opciones_palma(T, q0, "la herramienta")]
         (h,), (ir,), _vuelta = self._combinar(q0, [("ir a la herramienta", ops)])
@@ -1958,8 +2333,9 @@ class Planificador:
         return Plan(q0, [Fase("Abrir la mano", mano="abierta"), Fase("Ir a la herramienta", ir)],
                     nombre="llevar la mano a la herramienta")
 
-    def _previa_pelota(self, q0, T_pelota, diametro, apoyo_z=None, apoyo_poligono=None):
+    def _previa_pelota(self, q0, T_pelota, diametro, apoyo_z=None, apoyo_poligono=None, T_mundo_cam=None):
         """Como planificar_pelota (mismas formas de cogerla, en el mismo orden), hasta encima."""
+        self._T_cam_medida = None if T_mundo_cam is None else np.asarray(T_mundo_cam, float)
         T_pelota = self.apoyar(T_pelota, diametro, apoyo_z)
         self.poner_mesa(apoyo_z if self._apoyo_ok and self._z_fijo_usado is None else None, apoyo_poligono)
         todos = {"pinza": ("en pinza", 0.0), "rodeándola": ("rodeándola", 0.0),
@@ -2010,13 +2386,15 @@ class Planificador:
         c = np.asarray(T_pelota, float)[:3, 3]
         T_p = self._marco_arriba(c)
         self.zonas_apoyo([(c, r + self.zona_apoyo, r)])
+        elevar = self._elevar_pinza(pinza, r) if pinza is not None else 0.0
         if pinza is not None:
-            abierta, cerrada = ("pinza_abierta", None), ("pinza_contacto", self._pelota_en_mano(r, centro=punto))
+            abierta, cerrada = ("pinza_abierta", None), ("pinza_contacto",
+                                                          self._pelota_en_mano(r, centro=self._bola_en_pinza(pinza, elevar)))
         else:
             abierta, cerrada = ("pelota_abierta", None), ("pelota_cerrada", self._pelota_en_mano(r, extra))
 
         def coger(q_l, a):
-            centro = c + _unit(a) * d_palma
+            centro = c + _unit(a) * d_palma + [0.0, 0.0, elevar]
             with self.con_mano(*abierta):
                 qs = self.recta(q_l, punto, centro, "bajar a la pelota")
             with self.con_mano(*cerrada):
@@ -2026,9 +2404,13 @@ class Planificador:
                         raise ErrorPlan(f"subir con la pelota: {m}")
             return qs
 
-        with self.con_mano(*abierta):
-            ops_p, info = self._opciones(T_p, q0, self._pose_pelota(T_p, d_palma + self.pel_subida, punto, pinza),
-                                         coger, todas=True)
+        self._mirar_obj = (c, r) if self.afinar_s > 0 else None
+        try:
+            with self.con_mano(*abierta):
+                ops_p, info = self._opciones(T_p, q0, self._pose_pelota(T_p, d_palma + self.pel_subida, punto, pinza),
+                                             coger, todas=True)
+        finally:
+            self._mirar_obj = None
         if not ops_p:
             raise self._con_aviso(str(self._no_encuentro("llegar a la pelota (ni desde arriba ni de lado)", info))
                                   + self._que_estorba(c, r), c)
@@ -2043,7 +2425,7 @@ class Planificador:
         f_ir.mano_chk = abierta
         plan = Plan(q0, [Fase("Abrir la mano", mano=k_ab), f_ir], nombre="llevar la mano a la pelota")
         plan.pelota = dict(c=c.copy(), r=r, d_palma=d_palma, extra=extra, punto=np.asarray(punto, float).copy(),
-                           bajada=np.asarray(p[2], float).copy())
+                           bajada=np.asarray(p[2], float).copy(), elevar=float(elevar))
         if pinza is not None:
             plan.posturas = dict(pinza_abierta=dict(self.pinza_ab))
         return plan
@@ -2054,200 +2436,16 @@ class Planificador:
             return self.motivo(q)
 
     def plan_volver(self, q_actual, q_inicio):
-        self.choque.fijar_inicio(np.asarray(q_actual, float))
+        self.avisos = []
+        self._reactivar_gpu()
+        if self.huecos_desde_inicio:
+            self.choque.fijar_inicio(np.asarray(q_actual, float))
         self._rodeo_resto, self._permitir_rodeo, self.rodeos = self.rodeo_total_s, True, 0
         try:
             qs = self.conectar(np.asarray(q_actual, float), np.asarray(q_inicio, float), None, "volver")
         finally:
             self._permitir_rodeo = False
         return Plan(q_actual, [Fase("Volver al inicio", qs)], nombre="volver al inicio")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# EJECUCIÓN (en el tiempo)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _trapecio(L, v, a):
-    """(duración, s(t)) para recorrer L con velocidad máx v y aceleración a, parando al final."""
-    if L <= 1e-9:
-        return 0.0, lambda t: L
-    if L <= v * v / a:                                     # no llega a velocidad máxima
-        T = 2.0 * math.sqrt(L / a)
-        return T, lambda t: (0.5 * a * t * t if t <= T / 2 else L - 0.5 * a * (T - t) ** 2) if t < T else L
-    ta = v / a
-    T = L / v + ta
-
-    def s(t):
-        if t >= T:
-            return L
-        if t <= ta:
-            return 0.5 * a * t * t
-        if t >= T - ta:
-            return L - 0.5 * a * (T - t) ** 2
-        return 0.5 * a * ta * ta + v * (t - ta)
-    return T, s
-
-
-def _minjerk(u):
-    u = min(max(u, 0.0), 1.0)
-    return u * u * u * (10 - 15 * u + 6 * u * u)
-
-
-class Ejecutor:
-    """Recorre el plan en el tiempo. avanzar(dt) solo cuando se puede mover; q() y mano() dan el
-    comando de ESTE instante (si no se avanza, el mismo: el robot espera donde está)."""
-
-    def __init__(self, plan, posturas, vel_rad_s, acel_rad_s2, mano_ini=None, t_mano=(1.0, 1.5)):
-        self.plan = plan
-        self.posturas = dict(posturas, **(getattr(plan, "posturas", None) or {}))
-        self.v, self.a = float(vel_rad_s), float(acel_rad_s2)
-        self.t_abrir, self.t_cerrar = t_mano
-        self.i, self.t = 0, 0.0
-        self._q = plan.q0.copy()
-        self._mano = dict(mano_ini if mano_ini is not None else posturas["abierta"])
-        self._mano_ini = dict(self._mano)
-        self._prep = [self._preparar(f) for f in plan.fases]
-        self.duracion = sum(p[0] for p in self._prep)
-
-    def _preparar(self, f):
-        if f.qs is not None:
-            d = np.max(np.abs(np.diff(f.qs, axis=0)), axis=1) if len(f.qs) > 1 else np.zeros(0)
-            s_acum = np.r_[0.0, np.cumsum(d)]
-            T, s = _trapecio(float(s_acum[-1]), self.v, self.a)
-            return T, s_acum, s
-        T = f.dur if f.dur is not None else (self.t_cerrar if f.mano in ("agarre", "pelota_cerrada")
-                                             else self.t_abrir)
-        return float(T), None, None
-
-    @property
-    def terminado(self):
-        return self.i >= len(self.plan.fases)
-
-    @property
-    def fase(self):
-        return None if self.terminado else self.plan.fases[self.i]
-
-    def progreso(self):
-        hecho = sum(p[0] for p in self._prep[:self.i]) + (self.t if not self.terminado else 0.0)
-        return min(1.0, hecho / self.duracion) if self.duracion > 0 else 1.0
-
-    def avanzar(self, dt):
-        while dt > 0 and not self.terminado:
-            T, s_acum, s = self._prep[self.i]
-            f = self.plan.fases[self.i]
-            usar = min(dt, max(T - self.t, 0.0))
-            fin = self.t + usar >= T - 1e-9
-            dt = dt - usar if fin else 0.0           # (sin restos de coma flotante que no avanzan)
-            if fin and f.comprobar == "afinar":
-                dt = 0.0                             # se para aquí: la Tarea puede rehacer el siguiente tramo
-            t = self.t = T if fin else self.t + usar
-            if f.qs is not None:
-                si = s(t)
-                k = int(np.clip(np.searchsorted(s_acum, si, side="right") - 1, 0, max(len(f.qs) - 2, 0)))
-                if len(f.qs) == 1 or s_acum[k + 1] <= s_acum[k]:
-                    self._q = f.qs[min(k + 1, len(f.qs) - 1)].copy() if t >= T else f.qs[k].copy()
-                else:
-                    u = (si - s_acum[k]) / (s_acum[k + 1] - s_acum[k])
-                    self._q = f.qs[k] + (f.qs[k + 1] - f.qs[k]) * min(max(u, 0.0), 1.0)
-            elif f.mano is not None:
-                u = _minjerk(t / T) if T > 0 else 1.0
-                dest = self.posturas[f.mano]
-                claves = set(dest) | set(self._mano_ini)
-                self._mano = {k: self._mano_ini.get(k, 0.0) + (dest.get(k, 0.0) - self._mano_ini.get(k, 0.0)) * u
-                              for k in claves}
-            if self.t >= T:
-                if f.qs is not None:
-                    self._q = f.qs[-1].copy()
-                self.i += 1
-                self.t = 0.0
-                self._mano_ini = dict(self._mano)
-
-    def q(self):
-        return self._q.copy()
-
-    def mano(self):
-        return dict(self._mano)
-
-    def cambiar_tramo(self, i, qs):
-        """Sustituye las posturas de un tramo que aún no ha empezado (o justo empieza)."""
-        f = self.plan.fases[i]
-        f.qs = np.asarray(qs, float).reshape(-1, 6)
-        self._prep[i] = self._preparar(f)
-        self.duracion = sum(p[0] for p in self._prep)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MANO CON PAR
-# ══════════════════════════════════════════════════════════════════════════════
-
-class ManoActiva:
-    """La OrcaHand con par (OrcaHardwareWrapper), para la tarea. Misma cara que MonitorMano
-    (estado() y postura()) para que modo.py la use igual. Al conectar, orca_core la lleva a su
-    postura neutra; al cerrar el modo, también (desconectar())."""
-
-    def __init__(self, puerto="/dev/ttyUSB0", fabrica=None):
-        self.puerto = puerto
-        self._fabrica = fabrica
-        self.w = None
-        self.lista = False
-        self.error = None
-        self._postura, self._t_postura, self._t_leida = None, 0.0, 0.0
-
-    def conectar(self):
-        try:
-            if self._fabrica is not None:
-                self.w = self._fabrica()
-            else:
-                from orca_hardware import OrcaHardwareWrapper
-                self.w = OrcaHardwareWrapper(puerto=self.puerto)
-            if not self.w.conectar():
-                self.error = "no se pudo conectar la mano con par (mira la terminal)"
-                return False
-            self.lista = True
-            return True
-        except Exception as e:
-            self.error = f"error al conectar la mano: {e}"
-            return False
-
-    def enviar(self, postura_ctrl):
-        """postura_ctrl: {índice de ctrl de la mano 0..16: rad}."""
-        if not self.lista:
-            return False
-        w = self.w
-        arr = [float(postura_ctrl.get(w.JOINT_A_CTRL[j], 0.0)) for j in w._joints]
-        return w.enviar_posiciones(arr)
-
-    def postura(self, max_edad_s=1.0):
-        """{joint de orca_core: rad (sim)} real, leída como mucho cada 0,1 s."""
-        if not self.lista:
-            return None
-        ahora = time.time()
-        if ahora - self._t_leida >= 0.1:
-            self._t_leida = ahora
-            try:
-                e = self.w.estado_real()
-                q = self.w._desde_sdk({j: v[1] for j, v in e.items()})
-                if q is not None and np.all(np.isfinite(q)):
-                    self._postura, self._t_postura = dict(zip(self.w._joints, (float(v) for v in q))), ahora
-            except Exception:
-                pass
-        if self._postura is None or ahora - self._t_postura > max_edad_s:
-            return None
-        return dict(self._postura)
-
-    def estado(self):
-        if self.error:
-            return dict(estado="error", texto=self.error, puerto=self.puerto)
-        if not self.lista:
-            return dict(estado="aviso", texto="conectando con par…", puerto=self.puerto)
-        n = len(getattr(self.w, "_joints", []) or [])
-        return dict(estado="ok", texto="con par · la mueve la tarea", motores_ok=n, motores_total=n,
-                    par_activo=n, puerto=self.puerto, postura=self._postura is not None)
-
-    def cerrar(self):
-        if self.w is not None and self.lista:
-            self.w.desconectar()
-        self.lista = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2275,6 +2473,15 @@ def _envolvente(P2, res):
         return Delaunay(P2)
     except Exception:                                   # todos en línea
         return None
+
+
+def _acepta(f, nombre):
+    """¿La función f acepta el argumento 'nombre'? (planificadores de prueba con firmas antiguas)"""
+    import inspect
+    try:
+        return nombre in inspect.signature(f).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def _postura_cfg(cfg, clave, defecto):
@@ -2305,7 +2512,28 @@ class Tarea:
         self._comprobada = None
         self.vel = math.radians(float(_g(self.cfg, "AUTONOMO_TAREA_VEL_DEG_S", 15.0)))
         self.acel = math.radians(float(_g(self.cfg, "AUTONOMO_TAREA_ACEL_DEG_S2", 30.0)))
-        self.desvio_max = math.radians(float(_g(self.cfg, "AUTONOMO_TAREA_DESVIO_MAX_DEG", 8.0)))
+        # (18-nov) desvío del robot real respecto a lo mandado: en joints y en la PALMA (lo que importa con 2-3
+        # cm de margen), comparando con lo mandado en la última ventana (el robot va algo por detrás)
+        self.desvio_max = math.radians(float(_g(self.cfg, "AUTONOMO_TAREA_DESVIO_MAX_DEG", 4.0)))
+        self.desvio_max_m = float(_g(self.cfg, "AUTONOMO_TAREA_DESVIO_MAX_M", 0.02))
+        self.desvio_ventana_s = float(_g(self.cfg, "AUTONOMO_TAREA_DESVIO_VENTANA_S", 0.5))
+        self.desvio_tiempo_s = float(_g(self.cfg, "AUTONOMO_TAREA_DESVIO_TIEMPO_S", 0.3))
+        self._hist_cmd, self._t_hist = deque(), 0.0
+        # (18-nov) reintentos del agarre (no la notan los táctiles, o un dedo toca algo al bajar)
+        self.reintentos_max = int(_g(self.cfg, "AUTONOMO_TAREA_REINTENTOS", 2))
+        self._reintentos = 0
+        self._conservar_inicio = False
+        self.bajada_tactil_n = float(_g(self.cfg, "AUTONOMO_TAREA_BAJADA_TACTIL_N", 0.5))
+        self._fase_vigilada, self._base_bajada = None, None
+        self.cierre_tactil = bool(_g(self.cfg, "AUTONOMO_TAREA_CIERRE_TACTIL", True))
+        # (18-nov) tramos articulares con TOPP-RA (si está instalado: bash instalar_toppra.sh)
+        self.toppra = bool(_g(self.cfg, "AUTONOMO_TAREA_TOPPRA", True))
+        self.toppra_tol = math.radians(float(_g(self.cfg, "AUTONOMO_TAREA_TOPPRA_TOL_DEG", 0.5)))
+        # (18-nov) el afinado (rehacer la bajada) en un hilo: el bucle de 60 Hz no se queda parado
+        self.afinar_en_hilo = bool(_g(self.cfg, "AUTONOMO_TAREA_AFINAR_EN_HILO", True))
+        self._hilo_afinar, self._res_afinar = None, None
+        # (18-nov) la autocorrección de la calibración, congelada mientras hay una tarea (modo.py la avisa)
+        self.congelar_autocalib_cfg = bool(_g(self.cfg, "AUTONOMO_AUTOCALIB_CONGELAR_EN_TAREA", True))
         self.excluir_r = float(_g(self.cfg, "AUTONOMO_TAREA_EXCLUIR_RADIO", 0.09))
         self.excluir_pelota = float(_g(self.cfg, "AUTONOMO_TAREA_EXCLUIR_PELOTA_MARGEN", 0.01))
         # (18-nov) corrección fija de dónde se coge la pelota (derecha, lejos, arriba) vista desde la cámara
@@ -2373,7 +2601,7 @@ class Tarea:
         contexto = contexto() if callable(contexto) else contexto
         a = t.get("accion")
         if a == "planificar":
-            self._pedir_plan(contexto, volver=False)
+            self._pedir_plan(contexto, volver=False)              # (un «Planificar» nuevo: sin reintentos)
         elif a == "ejecutar":
             self._ejecutar(contexto.get("q_real"))
         elif a == "cancelar":
@@ -2384,11 +2612,15 @@ class Tarea:
     def _puede_planificar(self):
         return self.estado in ("libre", "lista", "terminada", "error", "pausada")
 
-    def _pedir_plan(self, ctx, volver, mirar=True):
+    def _pedir_plan(self, ctx, volver, mirar=True, reintento=False):
+        """reintento (18-nov): lo pide la propia tarea tras subir para reintentar el agarre (o tras apartarse
+        a mirar durante un reintento): se ejecuta solo (con el pedal) y conserva la postura de inicio."""
         if not self._puede_planificar():
             return
         if self.estado == "pausada":
             self._cancelar("")
+        if not reintento:
+            self._reintentos, self._conservar_inicio = 0, False
         q = ctx.get("q_real")
         if q is None:
             return self._error("No hay pose real del FR5: hace falta para planificar.")
@@ -2442,9 +2674,11 @@ class Tarea:
                          mirar=bool(mirar and not self.simulacro and self.mirar))
         datos["mapa"] = ctx.get("mapa") if self.usar_mapa else None
         datos["visto"] = ctx.get("visto") if self.usar_mapa else None
+        if not volver:
+            datos["T_mundo_cam"] = self._T_cam_plan
         self.estado, self.texto = "planificando", "Planificando…"
         self.plan, self.ejec, self._resultado = None, None, None
-        self._auto = volver
+        self._auto = volver or reintento
         self._gen += 1
         datos["gen"] = self._gen
         self._hilo = threading.Thread(target=self._planificar, args=(datos,), daemon=True, name="Tarea-plan")
@@ -2471,6 +2705,9 @@ class Tarea:
             elif d.get("pelota"):
                 kw = ({"apoyo_z": d["apoyo_z"], "apoyo_poligono": d.get("apoyo_poligono")}
                       if d.get("apoyo_z") is not None else {})
+                if d.get("T_mundo_cam") is not None and _acepta(pl.planificar_pelota, "T_mundo_cam"):
+                    # (18-nov) para deslizarla por el rayo de esa cámara
+                    kw["T_mundo_cam"] = d["T_mundo_cam"]
                 plan = pl.planificar_pelota(d["q"], d["T"][0], d["diametro"], d["T"][1], **kw)
             else:
                 plan = pl.planificar(d["q"], *d["T"])
@@ -2513,7 +2750,11 @@ class Tarea:
                 mapa=np.zeros((0, 3)) if centros is None else np.asarray(centros, float), res=float(res),
                 excluir=np.array([[*np.asarray(c, float), r] for c, r in d.get("excluir", ())]).reshape(-1, 4),
                 info=json.dumps(dict(error=error, nombres=d.get("nombres"), pelota=bool(d.get("pelota")),
-                                     diametro=d.get("diametro"), volver=bool(d.get("volver")))), **extra)
+                                     diametro=d.get("diametro"), volver=bool(d.get("volver")),
+                                     # (18-nov) para reproducirlo igual en diagnosticos/banco_planes.py
+                                     apoyo_z=d.get("apoyo_z"), apoyo_poligono=d.get("apoyo_poligono"),
+                                     T_mundo_cam=None if d.get("T_mundo_cam") is None
+                                     else np.asarray(d["T_mundo_cam"], float).tolist())), **extra)
             if plan is not None:
                 import glob
                 viejos = sorted(glob.glob(os.path.join(carpeta, "plan_ok_*.npz")))
@@ -2538,6 +2779,30 @@ class Tarea:
             T = cargar(ruta)["T_mundo_cam"]
         return Planificador(cargar_cadena(self.cfg.get("RUTA_XML"), verbose=False), self.cfg, T)
 
+    def _fk_palma(self):
+        """q → centro de la palma (mundo), del planificador de verdad (None con planificadores de prueba)."""
+        return getattr(self._planificador, "_palma", None)
+
+    def _fuerzas_dedos(self):
+        """(18-nov) {dedo: fuerza normal (N) o None} de los táctiles, o None si no hay (o en simulacro)."""
+        if self.tactil is None or self.simulacro:
+            return None
+        try:
+            e = self.tactil() or {}
+        except Exception:
+            return None
+        if e.get("estado") != "ok" or not e.get("dedos"):
+            return None
+        return {d.get("dedo"): d.get("fz") for d in e["dedos"]}
+
+    def _nuevo_ejecutor(self, plan, mano0=None):
+        return Ejecutor(plan, self.posturas, self.vel, self.acel, mano0,
+                        (float(_g(self.cfg, "AUTONOMO_TAREA_T_ABRIR_S", 1.0)),
+                         float(_g(self.cfg, "AUTONOMO_TAREA_T_CERRAR_S", 1.5))),
+                        fk_palma=self._fk_palma(),
+                        contactos=self._fuerzas_dedos if self.cierre_tactil else None,
+                        toppra=self.toppra, toppra_tol_rad=self.toppra_tol)
+
     def _ejecutar(self, q_real):
         if self.estado == "pausada":
             return                                      # ya está en marcha: solo falta el pedal
@@ -2558,9 +2823,9 @@ class Tarea:
                 mano0 = {OrcaHardwareWrapper.JOINT_A_CTRL[j]: v for j, v in p.items()
                          if j in OrcaHardwareWrapper.JOINT_A_CTRL}
         self._comprobada = None
-        self.ejec = Ejecutor(self.plan, self.posturas, self.vel, self.acel, mano0,
-                             (float(_g(self.cfg, "AUTONOMO_TAREA_T_ABRIR_S", 1.0)),
-                              float(_g(self.cfg, "AUTONOMO_TAREA_T_CERRAR_S", 1.5))))
+        self._fase_vigilada = None
+        self._hist_cmd.clear()
+        self.ejec = self._nuevo_ejecutor(self.plan, mano0)
         self.estado, self.texto = "pausada", "Pisa el pedal para empezar."
         self._t_desvio = 0.0
 
@@ -2571,11 +2836,15 @@ class Tarea:
         self._gen += 1                                  # un plan que esté calculándose ya no vale
         self._resultado = None
         self._auto = False
+        self._hilo_afinar = None
+        self._conservar_inicio = False
         self.estado, self.texto = "libre", texto or "Elige la herramienta y pulsa «Planificar»."
 
     def _error(self, texto):
         self._parar_fr5()
         self.ejec = None
+        self._hilo_afinar = None
+        self._conservar_inicio = False
         self.estado, self.texto = "error", texto
         print(f"⚠️  Tarea: {texto}")
 
@@ -2583,6 +2852,17 @@ class Tarea:
         if self._enviando and self.fr5 is not None:
             self.fr5.habilitar(False)
         self._enviando = False
+
+    @property
+    def afinando(self):
+        """(18-nov) True mientras se rehace la bajada en su hilo (el robot espera quieto)."""
+        return self._hilo_afinar is not None
+
+    @property
+    def congelar_autocalib(self):
+        """(18-nov) Lo mira modo.py: mientras hay una tarea (de planificar a terminar), la cámara no aplica
+        la autocorrección de la calibración (la pelota y el robot no se «mueven» a mitad de tarea)."""
+        return self.congelar_autocalib_cfg and self.estado in ("planificando", "lista", "ejecutando", "pausada")
 
     # ── cada vuelta del bucle ──
     def paso(self, dt, q_real, pedal, contexto=None):
@@ -2594,15 +2874,20 @@ class Tarea:
             if r == "ok":
                 self.plan = x
                 apartarse = bool(getattr(x, "replanificar", False))
-                if x.nombre != "volver al inicio" and not apartarse:
+                if x.nombre != "volver al inicio" and not apartarse and not self._conservar_inicio:
                     self._q_inicio = x.q0.copy()
-                dur = Ejecutor(x, self.posturas, self.vel, self.acel).duracion
+                dur = Ejecutor(x, self.posturas, self.vel, self.acel, fk_palma=self._fk_palma(),
+                               toppra=self.toppra, toppra_tol_rad=self.toppra_tol).duracion
                 self.estado = "lista"
+                avisos = list(getattr(self._planificador, "avisos", None) or [])
                 if apartarse:
                     self.texto = (f"El brazo le tapa a la cámara la mesa alrededor del objetivo: primero me aparto "
                                   f"para mirar (unos {dur:.0f} s) y después planifico la tarea con el mapa al día. "
                                   "Pulsa «Ejecutar».")
                     print(f"🗺️  Tarea: {self.texto}")
+                    if self._auto:                      # (18-nov) durante un reintento, sigue solo
+                        self._auto = False
+                        self._ejecutar(q_real)
                     return None
                 inc = [i for i in (getattr(self._planificador, "inclinaciones", None) or []) if i]
                 self.texto = (f"Plan listo: {len(x.fases)} tramos, unos {dur:.0f} s "
@@ -2612,12 +2897,19 @@ class Tarea:
                                  if (nr := getattr(self._planificador, "rodeos", 0)) else "")
                               + (f"; cuRobo (GPU) en {nc} tramo{'s' if nc > 1 else ''}"
                                  if (nc := getattr(self._planificador, "tramos_curobo", 0)) else "")
+                              + (f" ({ng} eligiendo la mejor de varias poses a la vez)"
+                                 if (ng := getattr(self._planificador, "goalsets_curobo", 0)) else "")
+                              + (f" ({nrc} propuesto{'s' if nrc > 1 else ''} por cuRobo no pasaron las comprobaciones)"
+                                 if (nrc := getattr(self._planificador, "curobo_rechazos", 0)) else "")
                               + (f"; la coge {self._planificador.modo_pelota}"
                                  if getattr(self._planificador, "modo_pelota", None) and x.pelota is not None else "")
                               + ("; el punto de dejada está de pie: la soltará delante del marcador"
                                  if x.nombre.endswith("pelota") and getattr(self._planificador, "dejar_de_pie", False)
                                  else "")
-                              + ". Pulsa «Ejecutar».")
+                              + (f"; reintento {self._reintentos} de {self.reintentos_max}"
+                                 if self._conservar_inicio and self._reintentos else "")
+                              + ". " + ("" if not avisos else "⚠️ " + " · ".join(avisos) + ". ")
+                              + ("Sigo (pisa el pedal)." if self._auto else "Pulsa «Ejecutar»."))
                 print(f"🗺️  Tarea: {self.texto}")
                 if self._auto:
                     self._auto = False
@@ -2634,6 +2926,15 @@ class Tarea:
             self._error("La controladora del FR5 dio error (¿colisión?): tarea abortada. "
                         "Reinicia desde la web y vuelve a planificar.")
             return None
+        # (18-nov) ¿ha terminado el afinado que iba en su hilo? Se aplica aquí, en el bucle principal
+        if self._hilo_afinar is not None and not self._hilo_afinar.is_alive():
+            hilo, res = self._hilo_afinar, self._res_afinar
+            self._hilo_afinar, self._res_afinar = None, None
+            if getattr(hilo, "ejec", None) is self.ejec:
+                fallo = self._aplicar_afinado(res)
+                if fallo:
+                    self._error(fallo)
+                    return None
         if pedal:
             if self.mover_mano and not self._mano_lista():
                 self.estado, self.texto = "ejecutando", "Conectando la mano con par…"
@@ -2642,6 +2943,8 @@ class Tarea:
                 fr5.publicar(self.ejec.q())
                 fr5.habilitar(True)                     # ServoMoveStart desde la pose real
                 self._enviando = True
+                self._hist_cmd.clear()
+                self._t_desvio = 0.0
             from skill_shield.hardware.fr5_servo import ENVIANDO
             listo = self.simulacro or fr5.estado()["estado"] == ENVIANDO
             f_act = self.ejec.fase
@@ -2649,29 +2952,34 @@ class Tarea:
                 self._comprobada = self.ejec.i
                 fallo = self._comprobar(f_act.comprobar)
                 if fallo:
+                    if f_act.comprobar == "agarre":     # (18-nov) no la tiene: abrir, subir y reintentar
+                        return self._reintentar(fallo)
                     self._error(fallo)
                     return None
-            if listo:
+            if listo and f_act is not None and getattr(f_act, "vigilar_tactil", False):
+                toque = self._toque_al_bajar()          # (18-nov) bajada vigilada con los táctiles
+                if toque:
+                    return self._reintentar(toque)
+            if listo and self._hilo_afinar is None:
                 i0 = self.ejec.i
                 self.ejec.avanzar(dt)
                 if (self.ejec.i > i0 and self.plan.fases[i0].comprobar == "afinar"):
-                    fallo = self._afinar(contexto)
+                    fallo = self._lanzar_afinar(contexto)
                     if fallo:
                         self._error(fallo)
                         return None
                 if not self.simulacro and q_real is not None:
-                    if float(np.max(np.abs(np.asarray(q_real) - self.ejec.q()))) > self.desvio_max:
-                        self._t_desvio += dt
-                        if self._t_desvio > 0.5:
-                            self._error(f"El robot no sigue lo mandado (más de "
-                                        f"{math.degrees(self.desvio_max):.0f}°): tarea abortada.")
-                            return None
-                    else:
-                        self._t_desvio = 0.0
+                    fallo = self._desvio(q_real, dt)
+                    if fallo:
+                        self._error(fallo)
+                        return None
             fr5.publicar(self.ejec.q())
             self.estado = "ejecutando"
             f = self.ejec.fase
-            self.texto = (f.nombre if f is not None else "Terminando…") if listo else "Arrancando el FR5…"
+            if self._hilo_afinar is not None:
+                self.texto = "Afinando con la cámara (el robot espera quieto)…"
+            else:
+                self.texto = (f.nombre if f is not None else "Terminando…") if listo else "Arrancando el FR5…"
         else:
             if self._enviando:
                 fr5.habilitar(False)                    # ServoMoveEnd: se para donde está
@@ -2682,7 +2990,9 @@ class Tarea:
         if self.mano_activa is not None and self.mano_activa.lista:
             self.mano_activa.enviar(self.ejec.mano())
         if self.ejec.terminado and getattr(self.plan, "replanificar", False):
-            # (17-nov) ya se ha apartado y ha mirado: ahora sí, el plan de la tarea con el mapa al día
+            # (17-nov) ya se ha apartado y ha mirado: ahora sí, el plan de la tarea con el mapa al día.
+            # (18-nov) también al acabar de subir para reintentar el agarre
+            reintento = bool(getattr(self.plan, "reintento", False))
             self._parar_fr5()
             q = self.ejec.q()
             self.ejec, self.plan = None, None
@@ -2692,18 +3002,93 @@ class Tarea:
             except Exception:
                 ctx = None
             if ctx:
-                self._pedir_plan(ctx, volver=False, mirar=False)
+                self._pedir_plan(ctx, volver=False, mirar=reintento, reintento=self._conservar_inicio)
             else:
                 self.texto = "Ya veo la mesa: pulsa «Planificar»."
             return q if self.simulacro else None
         if self.ejec.terminado:
             self._parar_fr5()
             nombre = self.plan.nombre
-            self.estado, self.texto = "terminada", f"Hecho: {nombre}."
+            info = getattr(self.ejec, "cierre_info", None)
+            self.estado, self.texto = "terminada", f"Hecho: {nombre}." + (
+                f" Cerró con los táctiles ({', '.join(info['tocados']) or 'ningún dedo notó la pelota'})." if info else "")
+            self._conservar_inicio = False
             print(f"✅ Tarea: {self.texto}")
             q = self.ejec.q()
             self.ejec = None
             return q if self.simulacro else None
+        return self._q_gemelo()
+
+    def _desvio(self, q_real, dt):
+        """(18-nov) Texto si el robot real no sigue lo mandado; None si va bien. Se compara con lo mandado en
+        la última ventana (desvio_ventana_s: el robot va algo por detrás) en joints y en la palma."""
+        self._t_hist += dt
+        qc = self.ejec.q()
+        fk = self._fk_palma()
+        self._hist_cmd.append((self._t_hist, qc, None if fk is None else fk(qc)))
+        while self._hist_cmd and self._t_hist - self._hist_cmd[0][0] > self.desvio_ventana_s:
+            self._hist_cmd.popleft()
+        qr = np.asarray(q_real, float)
+        Q = np.array([h[1] for h in self._hist_cmd])
+        dj = float(np.min(np.max(np.abs(Q - qr), axis=1)))
+        dm = 0.0
+        if fk is not None:
+            P = np.array([h[2] for h in self._hist_cmd])
+            dm = float(np.min(np.linalg.norm(P - fk(qr), axis=1)))
+        if dj > self.desvio_max or dm > self.desvio_max_m:
+            self._t_desvio += dt
+            if self._t_desvio > self.desvio_tiempo_s:
+                return (f"El robot no sigue lo mandado ({math.degrees(dj):.1f}° en joints, {100 * dm:.1f} cm en la "
+                        f"palma; máx. {math.degrees(self.desvio_max):.0f}° y {100 * self.desvio_max_m:.0f} cm): "
+                        "tarea abortada.")
+        else:
+            self._t_desvio = 0.0
+        return None
+
+    def _toque_al_bajar(self):
+        """(18-nov) Bajando a coger: si algún dedo nota más de bajada_tactil_n que al empezar la bajada, ha tocado
+        algo (la pelota descolocada, la mesa): texto, o None."""
+        fz = self._fuerzas_dedos()
+        if not fz:
+            return None
+        if self._fase_vigilada != self.ejec.i:
+            self._fase_vigilada, self._base_bajada = self.ejec.i, dict(fz)
+            return None
+        toque = [d for d, v in fz.items() if v is not None and self._base_bajada.get(d) is not None
+                 and float(v) - float(self._base_bajada[d]) >= self.bajada_tactil_n]
+        return f"Al bajar, {' y '.join(toque)} ha tocado algo" if toque else None
+
+    def _reintentar(self, motivo):
+        """(18-nov) El agarre no ha salido (los táctiles no notan la pelota, o un dedo tocó algo al bajar): en vez
+        de parar, se abre la mano, se sube por donde bajó y se vuelve a planificar con lo que ve ahora la cámara
+        (hasta reintentos_max veces). Sigue haciendo falta el pedal en todo momento."""
+        pz = getattr(self.plan, "pelota", None)
+        if pz is None or "i_bajar" not in pz or self._reintentos >= self.reintentos_max:
+            self._error(motivo + (": tarea parada." if self._reintentos == 0 else
+                                  f" (tras {self._reintentos} reintentos): tarea parada.") + " La mano se queda como está.")
+            return None
+        self._reintentos += 1
+        q = self.ejec.q()
+        bajada = np.asarray(self.plan.fases[pz["i_bajar"]].qs, float)
+        k = int(np.argmin(np.max(np.abs(bajada - q), axis=1)))
+        subida = np.vstack([q[None], bajada[:k + 1][::-1]])
+        if len(subida) < 2:
+            subida = np.vstack([q, q])
+        f_subir = Fase("Subir para reintentar", subida)
+        if hasattr(self._planificador, "_recta_lenta"):
+            self._planificador._recta_lenta(f_subir, llegada=False)
+        plan = Plan(q, [Fase("Abrir la mano", mano=pz.get("k_abierta", "abierta")), f_subir],
+                    nombre="subir para reintentar")
+        plan.posturas = dict(getattr(self.plan, "posturas", None) or {})
+        plan.replanificar, plan.reintento = True, True
+        mano0 = self.ejec.mano()
+        self.plan = plan
+        self.ejec = self._nuevo_ejecutor(plan, mano0)
+        self._comprobada, self._fase_vigilada = None, None
+        self._hist_cmd.clear()
+        self._conservar_inicio = True
+        self.texto = f"{motivo}: abro, subo y lo vuelvo a intentar ({self._reintentos}/{self.reintentos_max})."
+        print(f"🔁 Tarea: {self.texto}")
         return self._q_gemelo()
 
     def _comprobar(self, que):
@@ -2719,16 +3104,57 @@ class Tarea:
             return None
         n = sum(1 for d in e["dedos"] if (d.get("fz") or 0.0) >= self.tactil_n)
         if n < self.tactil_dedos:
-            return (f"No noto la pelota en los dedos (solo {n} con más de {self.tactil_n:g} N): tarea parada. "
-                    "La mano se queda como está.")
+            return f"No noto la pelota en los dedos (solo {n} con más de {self.tactil_n:g} N)"
         print(f"✋ Tarea: pelota cogida ({n} dedos la notan).")
         return None
 
-    def _afinar(self, contexto):
-        """(12-nov) Encima de la pelota y con el brazo quieto: la cámara ha corregido la calibración
-        con el brazo (que ahora está justo al lado de la pelota) y ha vuelto a medir la pelota. Si
-        está en otro sitio que al planificar, se rehace la bajada hacia donde está de verdad.
-        None si todo bien (o si no se puede medir: se sigue con el plan); texto si hay que parar."""
+    # ── afinar (12-nov; 18-nov: en un hilo) ──
+    def _lanzar_afinar(self, contexto):
+        """Al acabar la parada de «Afinar con la cámara». Con afinar_en_hilo, el cálculo va en otro hilo y el
+        robot espera quieto (paso() lo aplica al acabar); si no, aquí mismo. Texto si hay que parar."""
+        if not self.afinar_en_hilo:
+            return self._aplicar_afinado(self._calcular_afinado(contexto))
+        self._res_afinar = None
+
+        def _hilo():
+            try:
+                self._res_afinar = self._calcular_afinado(contexto)
+            except Exception as e:                       # un fallo al afinar no para la tarea: sigue con el plan
+                import traceback
+                traceback.print_exc()
+                print(f"⚠️  Tarea: fallo al afinar ({e}): sigo con el plan.")
+                self._res_afinar = None
+        h = threading.Thread(target=_hilo, daemon=True, name="Tarea-afinar")
+        h.ejec = self.ejec                               # si entretanto se cancela, el resultado no vale
+        self._hilo_afinar = h
+        h.start()
+        return None
+
+    def _aplicar_afinado(self, res):
+        """res de _calcular_afinado: None (sigue con el plan), ("error", texto) o ("bajada", qs, c2, n, recolocado)."""
+        if res is None or self.ejec is None or self.plan is None:
+            return None
+        if res[0] == "error":
+            return res[1]
+        _, qs, c2, n, recolocado = res
+        pz = self.plan.pelota
+        self.ejec.cambiar_tramo(pz["i_bajar"], qs)
+        self.ejec.cambiar_tramo(pz["i_subir"], qs[::-1])
+        dc = np.asarray(c2, float) - pz["c"]
+        pz["c"] = np.asarray(c2, float)
+        self.afinado_cm = round(n * 100, 1)
+        if recolocado:
+            print(f"🎯 Tarea: afinado sin verla: con la corrección de la cámara junto al brazo, la pelota está "
+                  f"{n * 100:.1f} cm desplazada (x, y, z: {', '.join(f'{100 * v:+.1f}' for v in dc)} cm) → bajada corregida.")
+        else:
+            print(f"🎯 Tarea: afinado con la cámara: la pelota estaba {n * 100:.1f} cm desplazada → bajada corregida.")
+        return None
+
+    def _calcular_afinado(self, contexto):
+        """(12-nov) Encima de la pelota y con el brazo quieto: la cámara ha vuelto a medir la pelota. Si está
+        en otro sitio que al planificar, se rehace la bajada hacia donde está de verdad.
+        Devuelve None (sigue con el plan), ("error", texto) o ("bajada", qs, c2, n, recolocado). No toca el
+        Ejecutor (puede ir en otro hilo)."""
         pz = getattr(self.plan, "pelota", None)
         if pz is None or self._planificador is None:
             return None
@@ -2740,10 +3166,12 @@ class Tarea:
             ctx = contexto() if callable(contexto) else (contexto or {})
         except Exception:
             ctx = {}
+        ctx = ctx or {}
+        q_aqui = self.ejec.q() if self.ejec is not None else None
         f = None
-        if self.ejec is not None and hasattr(self._planificador, "fraccion_tapada"):
+        if q_aqui is not None and hasattr(self._planificador, "fraccion_tapada"):
             try:
-                f = self._planificador.fraccion_tapada(self.ejec.q(), pz["c"], pz["r"])
+                f = self._planificador.fraccion_tapada(q_aqui, pz["c"], pz["r"])
             except Exception as e:
                 print(f"⚠️  Tarea: no puedo mirar si el brazo tapa la pelota: {e}")
         if f is not None:
@@ -2763,24 +3191,23 @@ class Tarea:
             print("⚠️  Tarea: al afinar no veo la pelota (¿la tapa la mano?).")
             return self._recolocar(pz, ctx)
         T_h = self._corregir_pelota(np.asarray(h["T_mundo"], float), ctx.get("T_mundo_cam"))
-        c2 = self._planificador.apoyar(T_h, 2 * pz["r"], h.get("apoyo_z"))[:3, 3]
+        with self._lock_pl:
+            c2 = self._planificador.apoyar(T_h, 2 * pz["r"], h.get("apoyo_z"),
+                                           **({"T_mundo_cam": ctx["T_mundo_cam"]} if ctx.get("T_mundo_cam") is not None
+                                              and _acepta(self._planificador.apoyar, "T_mundo_cam") else {}))[:3, 3]
         n = float(np.linalg.norm(c2 - pz["c"]))
         if n < self.afinar_min:
             print(f"🎯 Tarea: afinado: la pelota está donde se planificó ({n * 100:.1f} cm).")
             return None
         if n > self.afinar_max:
-            return (f"La pelota está a {n * 100:.0f} cm de donde estaba al planificar (¿se ha movido?): "
-                    "tarea parada. Vuelve a planificar.")
+            return ("error", f"La pelota está a {n * 100:.0f} cm de donde estaba al planificar (¿se ha movido?): "
+                             "tarea parada. Vuelve a planificar.")
         try:
-            qs = self._planificador.rehacer_bajada(self.plan, c2)
+            with self._lock_pl:
+                qs = self._planificador.rehacer_bajada(self.plan, c2)
         except ErrorPlan as e:
-            return f"Al afinar (la pelota está {n * 100:.1f} cm desplazada) no puedo rehacer la bajada: {e}"
-        self.ejec.cambiar_tramo(pz["i_bajar"], qs)
-        self.ejec.cambiar_tramo(pz["i_subir"], qs[::-1])
-        pz["c"] = c2
-        self.afinado_cm = round(n * 100, 1)
-        print(f"🎯 Tarea: afinado con la cámara: la pelota estaba {n * 100:.1f} cm desplazada → bajada corregida.")
-        return None
+            return ("error", f"Al afinar (la pelota está {n * 100:.1f} cm desplazada) no puedo rehacer la bajada: {e}")
+        return ("bajada", qs, c2, n, False)
 
     def _corregir_pelota(self, T, T_mundo_cam=None):
         """(18-nov) Corrección FIJA de dónde se coge la pelota, AUTONOMO_TAREA_PELOTA_CORRECCION_M = (derecha, lejos,
@@ -2812,7 +3239,9 @@ class Tarea:
         distancia de la pelota, recoge tanto el error de la calibración en esa zona como el de la profundidad del
         estéreo (que a ~0,9 m mide algún cm de más). La pelota medida al planificar, pasada a la cámara con la
         transformación de ENTONCES y vuelta al mundo con la de AHORA, queda donde está de verdad.
-        None (se sigue: con la bajada corregida o con la del plan); nunca para la tarea por esto."""
+        (Con la autocorrección congelada durante la tarea, AUTONOMO_AUTOCALIB_CONGELAR_EN_TAREA, no cambia: se
+        sigue con el plan.)
+        Devuelve None (se sigue con la bajada del plan) o ("bajada", qs, c2, n, True); nunca para la tarea."""
         T_ant, T_now = self._T_cam_plan, ctx.get("T_mundo_cam") if ctx else None
         if T_ant is None or T_now is None:
             print("   Sigo con el plan (la pelota, donde se vio al planificar).")
@@ -2829,19 +3258,13 @@ class Tarea:
                   "sigo con el plan.")
             return None
         try:
-            qs = self._planificador.rehacer_bajada(self.plan, c2)
+            with self._lock_pl:
+                qs = self._planificador.rehacer_bajada(self.plan, c2)
         except ErrorPlan as e:
             print(f"⚠️  Con la corrección de la cámara la pelota estaría {n * 100:.1f} cm desplazada, pero no puedo "
                   f"rehacer la bajada ({e}): sigo con el plan.")
             return None
-        dc = c2 - pz["c"]
-        self.ejec.cambiar_tramo(pz["i_bajar"], qs)
-        self.ejec.cambiar_tramo(pz["i_subir"], qs[::-1])
-        pz["c"] = c2
-        self.afinado_cm = round(n * 100, 1)
-        print(f"🎯 Tarea: afinado sin verla: con la corrección de la cámara junto al brazo, la pelota está "
-              f"{n * 100:.1f} cm desplazada (x, y, z: {', '.join(f'{100 * v:+.1f}' for v in dc)} cm) → bajada corregida.")
-        return None
+        return ("bajada", qs, c2, n, True)
 
     def _q_gemelo(self):
         return self.ejec.q() if (self.simulacro and self.ejec is not None) else None
@@ -2867,7 +3290,9 @@ class Tarea:
     def estado_web(self):
         e = self.ejec
         f = e.fase if e is not None else None
-        return dict(estado=self.estado, texto=self.texto, simulacro=self.simulacro,
+        avisos = list(getattr(self._planificador, "avisos", None) or []) if self.estado != "libre" else []
+        return dict(estado=self.estado, texto=self.texto, simulacro=self.simulacro, avisos=avisos,
+                    reintentos=self._reintentos if self._conservar_inicio else 0,
                     fase=f.nombre if f is not None else None,
                     i=(e.i + 1) if e is not None and not e.terminado else None,
                     n=len(self.plan.fases) if self.plan is not None else None,

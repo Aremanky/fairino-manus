@@ -809,13 +809,39 @@ def test_lo_no_visto_cuenta_como_coste(cadena, pl):
     assert pl.desconocido(qs) == 0.0
 
 
+def _en_mesa(pl, P):
+    """Dentro de una mesa: losas (mundo simple, 18-nov) o discos de suelo (mundo completo)."""
+    P = np.asarray(P, float)
+    return bool(pl._mascara_losas(P, 0.0).any()) if pl.mundo_simple else pl._bajo_suelo(P, solo_discos=True)
+
+
 def test_la_mesa_medida_es_suelo_en_toda_su_extension(pl):
     pl.poner_mapa(None, 0.02)
     pl.poner_mesa(-0.25, [[0.0, -0.8], [0.6, -0.8], [0.6, -0.4], [0.0, -0.4]])
     pl.zonas_apoyo(())
-    assert pl._bajo_suelo(np.array([[0.30, -0.60, -0.27]]), solo_discos=True)        # dentro y debajo: no
-    assert not pl._bajo_suelo(np.array([[0.30, -0.60, -0.20]]), solo_discos=True)    # encima: sí
-    assert not pl._bajo_suelo(np.array([[0.80, -0.60, -0.27]]), solo_discos=True)    # fuera de la mesa: sí
+    assert _en_mesa(pl, [[0.30, -0.60, -0.27]])               # dentro y debajo: no
+    assert not _en_mesa(pl, [[0.30, -0.60, -0.20]])           # encima: sí
+    assert not _en_mesa(pl, [[0.80, -0.60, -0.27]])           # fuera de la mesa: sí
+    pl.poner_mapa(None, 0.02)
+
+
+def test_mundo_simple_quita_la_capa_de_la_mesa_pero_no_lo_que_hay_encima(cadena):
+    """(18-nov) Con el mundo simple, lo que la cámara ve de la propia mesa (con su ruido de unos cm) no son
+    obstáculos (la losa ya es la mesa); una caja de 10 cm encima, sí."""
+    pl = TA.Planificador(cadena, dict(G, AUTONOMO_TAREA_MUNDO="simple"))
+    pl.grupo_min = 1
+    zt = -0.25
+    x, y = np.meshgrid(np.arange(0.05, 0.55, 0.02), np.arange(-0.75, -0.35, 0.02))
+    mesa = np.column_stack([x.ravel(), y.ravel(), np.full(x.size, zt + 0.01)])
+    ruido = mesa[::7] + [0.0, 0.0, 0.02]
+    caja = np.array([[0.30, -0.55, zt + h] for h in np.arange(0.03, 0.11, 0.02)])
+    pl.poner_mapa(np.vstack([mesa, ruido, caja]), 0.02)
+    pl.poner_mesa(zt, [[0.0, -0.8], [0.6, -0.8], [0.6, -0.3], [0.0, -0.3]])
+    pl.zonas_apoyo(())
+    quedan = pl._arbol.data
+    assert pl.quitados_mesa >= len(mesa)
+    assert np.all(quedan[:, 2] > zt + 0.035)                  # solo lo de la caja por encima de la capa
+    assert len(quedan) >= 3
     pl.poner_mapa(None, 0.02)
 
 
@@ -831,7 +857,7 @@ def test_las_mesas_del_mapa_son_suelo_y_no_estorban_si_el_robot_esta_debajo(cade
     v["superficies"] = [(-0.25, mesa)]
     pl.poner_mapa(None, 0.02)
     pl.poner_visto(v)
-    assert pl._bajo_suelo(np.array([[0.3, -0.6, -0.30]]), solo_discos=True)
+    assert _en_mesa(pl, [[0.3, -0.6, -0.30]])
     # el robot, con la mano debajo de una «mesa» a z más alta que la palma: esa mesa no se usa
     p = pl._palma(Q0)
     estante = np.array([[p[0] - 0.2, p[1] - 0.2], [p[0] + 0.2, p[1] - 0.2], [p[0] + 0.2, p[1] + 0.2], [p[0] - 0.2, p[1] + 0.2]])

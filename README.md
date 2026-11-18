@@ -78,6 +78,20 @@ La teleoperación de «Mano Física + Gemelo» (mismo pedal, mismo FR5 con `TELE
 - Pruebas por separado: `python -m skill_shield.autonomo.camara --ventana` · `python -m skill_shield.autonomo.web`
 - Cerrar el menú con la X o Esc equivale a pulsar este botón (es el «Cancelar» de zenity).
 
+### Revisión del 18-nov (modo autónomo)
+Cambios de la revisión (todos con su clave en el bloque «(18-nov) Revisión del modo autónomo» de `config.py`, para poder volver atrás uno a uno):
+- **Pelota:** se apoya en la mesa deslizándola por el **rayo de la cámara** (no en vertical); centro por la **silueta** (ignora el lado en sombra), sin la distorsión de la lente y sin el sesgo de la mediana de profundidad.
+- **Escala de la profundidad:** `python calibrar_escala_profundidad.py` (tablero ChArUco: distancia por solvePnP frente a la del estéreo) → `AUTONOMO_CAM_ESCALA_PROF`.
+- **Autocorrección congelada** mientras hay una tarea (mide y lo dice en la terminal, pero no mueve nada a mitad de tarea).
+- **Planificador:** huecos de la mano **fijos** (`AUTONOMO_TAREA_MANO_HOLGURA`; ya no dependen de la postura de inicio); **mundo simple** (`mundo_tarea.py`: mesas = losas, el resto = cubos sin la capa de la mesa, tres márgenes); la postura de encima de la pelota se elige para que el brazo **no le tape la pelota a la cámara**; IK comprobada **en lote** (GPU si hay); la pinza se coge algo más arriba si los dedos bajarían de la holgura con la mesa.
+- **cuRobo** con la misma geometría y márgenes (mano + pelota cogida, mundo inflado); un fallo de la GPU ya no la apaga para toda la sesión (aviso en la web); sin RRT en CPU cuando está cuRobo.
+- **Agarre:** cierre con los **táctiles** (cada dedo hasta que toca, y desde ahí aprieta), **bajada vigilada** y **reintentos** (abre, sube y vuelve a planificar; `AUTONOMO_TAREA_REINTENTOS`).
+- **Ejecución:** tramos rectos a velocidad de la **palma** (lenta en los últimos 3 cm); desvío máximo 4° / 2 cm en la palma (comparado con lo mandado en los últimos 0,5 s); el afinado va en un hilo; ServoJ por UDP en este modo (vuelve solo a XML-RPC si no va); aviso si falta `FR5_CARGA_CDM_MM` (`python diagnosticos/estimar_cdm_mano.py` da una primera estimación).
+- **TOPP-RA** (opcional, `bash instalar_toppra.sh`): tramos articulares lo más rápidos posible respetando velocidad y aceleración de cada joint; sin él, el trapecio de siempre.
+- **cuRobo con goalset:** en cada sitio, una sola llamada a la GPU elige la mejor de varias formas de llegar (`AUTONOMO_TAREA_OPCIONES_GPU`) y su camino (`MotionPlanner.plan_pose` con varias poses).
+- **Carga de la brida:** `python diagnosticos/identificar_carga.py --leer` (la que tiene la controladora) y sin `--leer` la mide con el robot (pares de J4-J6 en ~12 posturas de la muñeca, con el pedal) → `FR5_CARGA_CDM_MM`.
+- **Código:** `ejecucion.py` (Ejecutor, ManoActiva) y `mundo_tarea.py` salen de `tarea.py`. **Banco de pruebas** con los planes guardados: `python diagnosticos/banco_planes.py --guardar antes.json` y, tras un cambio, `--comparar antes.json`.
+
 ### Herramientas con marcadores ArUco (paso 5)
 `skill_shield/autonomo/herramientas.py` — cada herramienta (y el punto de uso y el de dejada) lleva un marcador ArUco 4x4. Catálogo en `AUTONOMO_HERRAMIENTAS` (id, nombre, tipo, lado impreso, dónde queda la herramienta respecto al marcador, tamaño).
 1. `python -m skill_shield.autonomo.herramientas --generar` → PNG de cada marcador en `marcadores/`. Imprímelos a 300 ppp al 100 %, mide el cuadrado negro y pégalos planos sin recortar el margen blanco.

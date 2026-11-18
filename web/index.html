@@ -664,7 +664,8 @@ function pintarTarea(t, vivo){
   const on = vivo && t;
   const [txt, col] = on ? (ETQ_TAREA[t.estado] || [t.estado, "neutro"]) : ["—", "neutro"];
   etq($("tareaEtq"), txt, col);
-  $("tareaTxt").textContent = !vivo ? "Sin datos del modo autónomo." : !t ? "La tarea está desactivada en config (AUTONOMO_TAREA)." : (t.texto || "");
+  $("tareaTxt").textContent = !vivo ? "Sin datos del modo autónomo." : !t ? "La tarea está desactivada en config (AUTONOMO_TAREA)." : (t.texto || "")
+    + (t.avisos && t.avisos.length && !(t.texto || "").includes("⚠️") ? " ⚠️ " + t.avisos.join(" · ") : "");
   $("tareaPaso").textContent = on && t.i && t.n ? `tramo ${t.i} de ${t.n}` : "";
   $("tareaMeta").textContent = on ? (t.simulacro ? "simulacro · solo el gemelo" : `FR5 REAL · ${t.vel_deg_s}°/s`) : "";
   $("tareaBarra").style.width = on ? Math.round((t.progreso || 0) * 100) + "%" : "0";

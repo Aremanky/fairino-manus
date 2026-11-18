@@ -30,6 +30,10 @@ from skill_shield.autonomo.autocalib import ConCorreccion
 
 ID_BASE = 100              # ids de las pelotas en la lista (las herramientas ArUco van del 20 al 49)
 DIAM_MIN, DIAM_MAX = 0.03, 0.20
+# (18-nov) La mediana de la profundidad dentro de 0,6·r cae, de media, a ρ ≈ 0,6/√2·r del centro del disco, donde
+# la superficie de la esfera está r·(1 − √(1 − 0,18)) ≈ 0,095·r más lejos que su punto más cercano: sin
+# corregirlo, el centro salía ~3 mm más lejos (pelota de 7 cm)
+SESGO_MEDIANA = 1.0 - math.sqrt(1.0 - 0.18)
 
 
 def catalogo(cfg):
@@ -82,14 +86,63 @@ def relleno(m, c):
     return float(np.count_nonzero(m[y:y + h, x:x + w][dentro > 0])) / max(n, 1)
 
 
-def candidatas(img_bgr, prof_mm, K, cat, min_area=60, min_redondez=0.6, min_relleno=0.7):
-    """[(entrada del catálogo, centro 3D en la cámara, diámetro m, (u, v, r_px))] de una imagen."""
+def ajustar_circulo(pts, r_ref, tol_px=1.5, iteraciones=80, min_frac=0.45, rng=None):
+    """(18-nov) Círculo (u, v, r) que pasa por la mayor parte del contorno (RANSAC con 3 puntos + ajuste por
+    mínimos cuadrados de los que caen en él), o None. Con la pelota iluminada de lado, la máscara de color
+    pierde la parte en sombra: el borde de ese lado NO es la silueta (es la línea de sombra, más curvada o más
+    recta) y minEnclosingCircle, que se apoya en los extremos, ponía el centro desplazado hacia la luz. Así
+    solo cuenta el arco que de verdad es la silueta. r_ref: radio del círculo mínimo (para acotar)."""
+    P = np.asarray(pts, float).reshape(-1, 2)
+    if len(P) < 12:
+        return None
+    rng = np.random.default_rng(0) if rng is None else rng
+    mejor, n_mejor = None, 0
+    for _ in range(int(iteraciones)):
+        a, b, c = P[rng.choice(len(P), 3, replace=False)]
+        d = 2.0 * (a[0] * (b[1] - c[1]) + b[0] * (c[1] - a[1]) + c[0] * (a[1] - b[1]))
+        if abs(d) < 1e-9:
+            continue
+        aa, bb, cc = a @ a, b @ b, c @ c
+        ux = (aa * (b[1] - c[1]) + bb * (c[1] - a[1]) + cc * (a[1] - b[1])) / d
+        uy = (aa * (c[0] - b[0]) + bb * (a[0] - c[0]) + cc * (b[0] - a[0])) / d
+        r = math.hypot(a[0] - ux, a[1] - uy)
+        if not 0.8 * r_ref <= r <= 1.35 * r_ref:
+            continue
+        inl = np.abs(np.hypot(P[:, 0] - ux, P[:, 1] - uy) - r) < tol_px
+        if inl.sum() > n_mejor:
+            mejor, n_mejor = inl, int(inl.sum())
+    if mejor is None or n_mejor < min_frac * len(P):
+        return None
+    Q = P[mejor]                                          # Kåsa: x² + y² + D x + E y + F = 0
+    A = np.column_stack([Q[:, 0], Q[:, 1], np.ones(len(Q))])
+    D, E, F = np.linalg.lstsq(A, -(Q[:, 0] ** 2 + Q[:, 1] ** 2), rcond=None)[0]
+    u, v = -D / 2.0, -E / 2.0
+    r2 = u * u + v * v - F
+    if r2 <= 0:
+        return None
+    r = math.sqrt(r2)
+    return (u, v, r) if 0.8 * r_ref <= r <= 1.35 * r_ref else None
+
+
+def rayo(K, u, v, dist=None):
+    """(18-nov) Rayo (x/z, y/z, 1) del píxel (u, v), quitando la distorsión de la lente si se da."""
+    if dist is not None and np.any(np.asarray(dist, float)):
+        p = cv2.undistortPoints(np.array([[[float(u), float(v)]]], np.float64), np.asarray(K, float),
+                                np.asarray(dist, float).ravel())
+        return np.array([p[0, 0, 0], p[0, 0, 1], 1.0])
+    return np.array([(u - K[0, 2]) / K[0, 0], (v - K[1, 2]) / K[1, 1], 1.0])
+
+
+def candidatas(img_bgr, prof_mm, K, cat, min_area=60, min_redondez=0.6, min_relleno=0.7, dist=None, ajuste=True):
+    """[(entrada del catálogo, centro 3D en la cámara, diámetro m, (u, v, r_px))] de una imagen.
+    (18-nov) dist: distorsión de la lente (se quita al calcular el rayo). ajuste: centro con ajustar_circulo
+    (silueta) en vez del círculo mínimo."""
     hsv = cv2.cvtColor(cv2.GaussianBlur(img_bgr, (5, 5), 0), cv2.COLOR_BGR2HSV)
     f = 0.5 * (K[0, 0] + K[1, 1])
     out = []
     for e in cat:
         m = mascara(hsv, e["colores"])
-        cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         for c in cs:
             area = cv2.contourArea(c)
             if area < min_area:
@@ -99,6 +152,13 @@ def candidatas(img_bgr, prof_mm, K, cat, min_area=60, min_redondez=0.6, min_rell
                 continue
             if min_relleno and relleno(m, c) < min_relleno:
                 continue                                        # (18-nov) hueco por dentro: un aro, no una pelota
+            if ajuste:
+                h, w = m.shape[:2]
+                pc = c.reshape(-1, 2)
+                borde = (pc[:, 0] <= 0) | (pc[:, 1] <= 0) | (pc[:, 0] >= w - 1) | (pc[:, 1] >= h - 1)
+                ajustado = ajustar_circulo(pc[~borde], r)        # (lo cortado por el borde de la imagen, fuera)
+                if ajustado is not None:
+                    u, v, r = ajustado
             z = profundidad_en(prof_mm, u, v, r)
             if z is None:
                 continue
@@ -109,9 +169,9 @@ def candidatas(img_bgr, prof_mm, K, cat, min_area=60, min_redondez=0.6, min_rell
                 diam = float(e["diametro"])                     # el de verdad: más preciso
             elif not DIAM_MIN <= diam <= DIAM_MAX:
                 continue
-            ray = np.array([(u - K[0, 2]) / K[0, 0], (v - K[1, 2]) / K[1, 1], 1.0])
+            ray = rayo(K, u, v, dist)
             sup = ray * z                                       # punto de la superficie (lo que mide el estéreo)
-            centro = sup + sup / np.linalg.norm(sup) * diam / 2.0
+            centro = sup + sup / np.linalg.norm(sup) * diam / 2.0 * (1.0 - SESGO_MEDIANA)
             out.append((e, centro, diam, (u, v, r)))
     return out
 
@@ -242,6 +302,7 @@ class DetectorPelotas(ConCorreccion):
         self.medir_apoyo = bool(g.get("AUTONOMO_PELOTAS_MEDIR_APOYO", True))
         self.mesa_m = float(g.get("AUTONOMO_PELOTAS_MESA_RADIO", 0.35))   # m alrededor donde se mide la mesa
         self.min_relleno = float(g.get("AUTONOMO_PELOTAS_RELLENO_MIN", 0.7))   # (18-nov) aros fuera
+        self.ajuste = bool(g.get("AUTONOMO_PELOTAS_AJUSTE_SILUETA", True))      # (18-nov) centro por la silueta
         # (18-nov) lo que se quita del mapa alrededor de cada pelota: solo ella (+ este margen); lo de alrededor cuenta
         self.margen_mapa = float(g.get("AUTONOMO_MAPA_MARGEN_PELOTA", 0.01))
         self.halo = dict(factor=1.1, extra_px=2, delante=0.02, detras=0.02)
@@ -267,10 +328,11 @@ class DetectorPelotas(ConCorreccion):
                 from skill_shield.autonomo.calibracion import cargar
                 self.T_mundo_cam = cargar(self.ruta_calib)["T_mundo_cam"]
 
-    def paso(self, img_bgr, K, prof_mm, ahora=None):
+    def paso(self, img_bgr, K, prof_mm, ahora=None, dist=None):
         ahora = time.time() if ahora is None else ahora
         self._recargar(time.monotonic())
-        self.ultimas = candidatas(img_bgr, prof_mm, K, self.cat, min_relleno=self.min_relleno)
+        self.ultimas = candidatas(img_bgr, prof_mm, K, self.cat, min_relleno=self.min_relleno, dist=dist,
+                                  ajuste=self.ajuste)
         usadas = set()
         for e, p, diam, uvr in sorted(self.ultimas, key=lambda c: c[1][2]):
             libres = [s for i, s in self.pistas.items() if s.e is e and i not in usadas

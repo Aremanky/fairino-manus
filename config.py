@@ -1326,7 +1326,7 @@ AUTONOMO_CAM_CONFIANZA = 200         # confianza del estéreo (0-255, más bajo 
 # (18-nov) Escala de la profundidad del estéreo (1.0 = tal cual). A ~0,9 m la OAK puede medir algún % de más y la
 # mano baja unos cm más lejos (y más abajo) que la pelota. Medirla: un cartón plano en el centro de la imagen a
 # D mm (cinta, desde el frontal de la cámara); si el «centro:» del vídeo marca M mm, poner D / M (p. ej. 0.97)
-AUTONOMO_CAM_ESCALA_PROF = 1.0
+AUTONOMO_CAM_ESCALA_PROF = 1.0          # (18-nov) mejor que con cinta: python calibrar_escala_profundidad.py
 AUTONOMO_MAPA_Z_MIN    = 0.35        # m: más cerca la OAK-D no mide (lo que salga es ruido)
 # Rastro del brazo (12-nov): el robot se quita del mapa en todas sus poses de los últimos BARRIDO_S
 # (la profundidad llega con retraso) y los cubos por los que pasa quedan libres.
@@ -1434,7 +1434,13 @@ AUTONOMO_FR5_SIMULACRO    = False   # False = la tarea mueve el FR5 REAL (con pe
 AUTONOMO_FR5_VEL_MAX_DEG_S = 20.0   # tope de fr5_servo en este modo (°/s por joint; el FR5 llega a ~180)
 AUTONOMO_TAREA_VEL_DEG_S  = 15.0    # velocidad del plan (°/s del joint más rápido) ≈ 8 % del máximo
 AUTONOMO_TAREA_ACEL_DEG_S2 = 30.0
-AUTONOMO_TAREA_DESVIO_MAX_DEG = 8.0  # si el robot real se separa más de esto de lo mandado → abortar
+# (18-nov) Si el robot real se separa de lo mandado (comparado con lo mandado en la última VENTANA_S, porque
+# va algo por detrás) más de MAX_DEG en joints o MAX_M en la palma, durante más de TIEMPO_S → abortar.
+# Antes 8°: con el J1/J2 eso son >10 cm en la mano, y se planifica con 2-3 cm de margen.
+AUTONOMO_TAREA_DESVIO_MAX_DEG = 4.0
+AUTONOMO_TAREA_DESVIO_MAX_M = 0.02
+AUTONOMO_TAREA_DESVIO_VENTANA_S = 0.5
+AUTONOMO_TAREA_DESVIO_TIEMPO_S = 0.3
 AUTONOMO_TAREA_MOVER_MANO = True    # False = la mano no se toca (solo se mueve el brazo)
 # Distancias al marcador (m). La palma se queda DELANTE, sin tocar: al cerrar, los dedos avanzan.
 AUTONOMO_TAREA_DIST_AGARRE = 0.10   # palma ↔ marcador al coger y al dejar
@@ -1464,7 +1470,7 @@ AUTONOMO_TAREA_EXCLUIR_RADIO = 0.09   # (18-nov) m alrededor del centro de cada 
 AUTONOMO_TAREA_EXCLUIR_PELOTA_MARGEN = 0.01   # (18-nov) la pelota (+1 cm, antes +3 cm) no cuenta como obstáculo
 # (18-nov) Corrección FIJA de dónde se coge la pelota, en m, vista en la imagen de la cámara de cabeza (la de la web):
 # (derecha, lejos, arriba). La mano la cogía ~1,5 cm a la DERECHA → derecha = -0.015. Si empeora, pon +0.015.
-AUTONOMO_TAREA_PELOTA_CORRECCION_M = (-0.015, 0.0, 0.0)
+AUTONOMO_TAREA_PELOTA_CORRECCION_M = (0.0, 0.0, 0.0)
 AUTONOMO_TAREA_MARGEN_MAPA = 0.03   # m de margen de la MANO con los obstáculos del mapa
 AUTONOMO_TAREA_MARGEN_MAPA_BRAZO = 0.015  # m de margen del brazo (sus cápsulas ya son más gordas que él)
 AUTONOMO_TAREA_GUARDAR_FALLOS = True  # si no hay plan, guardar pose + sitios + mapa en diagnosticos/
@@ -1600,6 +1606,63 @@ AUTONOMO_TAREA_MANO_PELOTA_CERRADA = {0: 0.0, 1: -0.15, 2: 0.85, 3: 0.75, 4: -0.
 AUTONOMO_TAREA_MANO_PELOTA_APRETAR = {0: 0.0, 1: -0.15, 2: 1.00, 3: 0.90, 4: -0.08, 5: 1.00, 6: 0.90,
                                       7: 0.0, 8: 1.00, 9: 0.90, 10: 0.10, 11: 1.00, 12: 0.90,
                                       13: 0.25, 14: 0.9, 15: 0.70, 16: 0.80}
+
+# ── (18-nov) Revisión del modo autónomo ──────────────────────────────────────────────────────────
+# Mundo del planificador. "simple": mesas = LOSAS (escena fija, planos del mapa y la mesa medida junto al
+# objeto, macizas hasta el suelo); el resto = cubos del mapa SIN la capa de la propia mesa; tres márgenes
+# (mano↔cubos MARGEN_MAPA, brazo↔cubos MARGEN_BRAZO, mano/brazo↔mesa HOLGURA_MESA_*). Las zonas sin mesa
+# conocida se tratan como antes. "completo": todo como antes (discos, suelos, zonas de apoyo…).
+AUTONOMO_TAREA_MUNDO = "simple"
+AUTONOMO_TAREA_MARGEN_BRAZO = 0.02            # m brazo ↔ cubos del mapa (cápsulas y mallas), con el mundo simple
+AUTONOMO_TAREA_HOLGURA_MESA_BRAZO = 0.02      # m brazo ↔ mesas (losas)
+# Huecos de la MANO en la tarea: fijos, no dependen de la postura de inicio (eso es de la calibración).
+AUTONOMO_TAREA_HUECOS_DESDE_INICIO = False    # True = las reglas de la calibración (como antes)
+AUTONOMO_TAREA_MANO_HOLGURA = 0.05            # m mano ↔ brazo y giro del J4 (la pieza que se rompe, cables)
+AUTONOMO_TAREA_ENTORNO_HOLGURA = 0.03         # m mano ↔ soporte, cabeza, cámara, cajas de config y suelo
+# La pelota apoyada en la mesa se coloca DESLIZÁNDOLA POR EL RAYO de la cámara hasta su altura (no en vertical)
+AUTONOMO_TAREA_PELOTA_POR_RAYO = True
+# Al elegir la postura de encima de la pelota (donde se para a afinar), que el brazo no se la tape a la cámara
+AUTONOMO_TAREA_PESO_TAPADA = 2.0              # coste por parte tapada (0 = no mirarlo)
+AUTONOMO_TAREA_TAPADA_MAX_PLAN = 0.25         # más tapada que esto: solo si no hay otra
+# Pinza: si la mano baja por debajo del punto de pinza más de lo que deja HOLGURA_MESA_MANO, se coge la
+# pelota algo por encima de su centro (como mucho esta fracción del radio; más, se escurre al levantarla)
+AUTONOMO_TAREA_PINZA_ELEVAR_MAX_FRAC = 0.35
+# Tramos rectos a velocidad de la PALMA (m/s); la llegada a coger o dejar, más despacio en los últimos cm
+AUTONOMO_TAREA_VEL_CART_M_S = 0.05
+AUTONOMO_TAREA_LLEGADA_LENTA_M = 0.03
+AUTONOMO_TAREA_VEL_LLEGADA_M_S = 0.02
+# Cierre con los TÁCTILES: cada dedo se cierra hasta que su yema nota más de CIERRE_TACTIL_N (sobre lo que
+# notaba al empezar a cerrar) y desde ahí se aprieta (AUTONOMO_TAREA_PINZA_APRIETE: aflojado, apretado).
+# Sin táctiles (o en simulacro), a la postura del modelo como antes.
+AUTONOMO_TAREA_CIERRE_TACTIL = True
+AUTONOMO_TAREA_CIERRE_TACTIL_N = 0.2
+AUTONOMO_TAREA_CIERRE_TACTIL_S = 2.5          # s para cerrar del todo (despacio: para notar el contacto a tiempo)
+AUTONOMO_TAREA_BAJADA_TACTIL_N = 0.5          # bajando a coger, si un dedo nota más que esto: ha tocado algo
+AUTONOMO_TAREA_REINTENTOS = 2                 # agarre fallido → abre, sube y vuelve a planificar (0 = parar)
+# Afinado (rehacer la bajada) en un hilo: el bucle de 60 Hz (web, pedal, gemelo) no se para mientras
+AUTONOMO_TAREA_AFINAR_EN_HILO = True
+# GPU: un fallo de cuRobo o de la comprobación en lote ya no la apaga para toda la sesión: se avisa en la web
+# y se vuelve a probar en el siguiente plan, hasta este número de fallos
+AUTONOMO_TAREA_GPU_FALLOS_MAX = 3
+AUTONOMO_TAREA_RRT_CON_CUROBO = False         # con cuRobo, sin el RRT en CPU (6-25 s) cuando un tramo choca
+AUTONOMO_TAREA_LOTE_IK = 512                  # soluciones de IK que se comprueban de una vez (GPU si hay)
+AUTONOMO_CUROBO_PELOTA_DIAMETRO = 0.07        # la pelota cogida, en las esferas de la mano de cuRobo
+# cuRobo elige en la GPU, de UNA vez, la mejor de varias formas de llegar a cada sitio y su camino (goalset)
+AUTONOMO_CUROBO_MAX_GOALSET = 16              # poses alternativas por llamada (cuRobo reserva memoria para ellas)
+AUTONOMO_TAREA_OPCIONES_GPU = 8               # formas de llegar a cada sitio que se le pasan (sin cuRobo: OPCIONES)
+# Tramos ARTICULARES con TOPP-RA (el más rápido que respeta velocidad y aceleración de cada joint, también en las
+# esquinas). Si no está instalado (bash instalar_toppra.sh), el trapecio de siempre.
+AUTONOMO_TAREA_TOPPRA = True
+AUTONOMO_TAREA_TOPPRA_TOL_DEG = 0.5           # cuánto puede separarse el spline del camino comprobado
+# La autocorrección de la calibración con el brazo, CONGELADA mientras hay una tarea (de planificar a
+# terminar): mide y lo dice en la terminal, pero no mueve lo que ve la cámara a mitad de tarea
+AUTONOMO_AUTOCALIB_CONGELAR_EN_TAREA = True
+# Pelotas: centro por la SILUETA (ajuste de círculo que ignora el lado en sombra) y sin la distorsión de la lente
+AUTONOMO_PELOTAS_AJUSTE_SILUETA = True
+AUTONOMO_PELOTAS_QUITAR_DISTORSION = True
+# ServoJ por UDP en el modo autónomo (si la controladora no lo acepta, fr5_servo vuelve solo a XML-RPC).
+# None = el de FR5_CMD_TYPE
+AUTONOMO_FR5_CMD_TYPE = 1
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CALIBRACIÓN CÁMARA DE CABEZA → ROBOT (10-nov, paso 4) — calibrar_camara_robot.py

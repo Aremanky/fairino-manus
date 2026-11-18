@@ -718,7 +718,8 @@ class ConstructorMapa:
     lee la pose real del brazo y los mandos de la web, actualiza el mapa a AUTONOMO_MAPA_HZ y lo
     publica. paso(prof_mm, K) se llama con cada imagen de profundidad nueva."""
 
-    def __init__(self, cfg, raiz, canal_q=None, canal_mapa=None, canal_mando=None, canal_visto=None):
+    def __init__(self, cfg, raiz, canal_q=None, canal_mapa=None, canal_mando=None, canal_visto=None,
+                 canal_congelar=None):
         import os
         g = cfg if isinstance(cfg, dict) else {k: getattr(cfg, k) for k in dir(cfg) if k.isupper()}
         self.g = g
@@ -745,6 +746,10 @@ class ConstructorMapa:
         self.periodo = 1.0 / max(float(g.get("AUTONOMO_MAPA_HZ", 4.0)), 0.5)
         self.max_dibujo = int(g.get("AUTONOMO_MAPA_MAX_DIBUJO", 6000))
         self.canal_q, self.canal_mapa, self.canal_mando = canal_q, canal_mapa, canal_mando
+        # (18-nov) con una tarea en marcha (lo avisa modo.py), la autocorrección MIDE pero no se aplica: la pelota
+        # y el robot no se «mueven» a mitad de tarea. Lo que habría corregido sale en la terminal y en el estado.
+        self.canal_congelar = canal_congelar
+        self.congelada, self.medida_congelada, self._t_aviso_congelada = False, None, 0.0
         self.canal_visto = canal_visto
         self.T, self._mtime = None, None
         self._t_ult, self._t_calib = 0.0, 0.0
@@ -1000,7 +1005,9 @@ class ConstructorMapa:
                     antes = self.correccion.t.copy()
                     medida = self.autocalib.estimar(self.mapa.ultimos_puntos, q, prof_mm=prof_mm, K=K,
                                                     T_mundo_cam=self.T_efectiva())
-                    if self.correccion.aplicar(medida):
+                    if self._congelada():
+                        self._medida_sin_aplicar(medida)
+                    elif self.correccion.aplicar(medida):
                         # lo que se marcó con la calibración de antes alrededor del brazo era el
                         # propio brazo mal colocado: fuera
                         if np.linalg.norm(self.correccion.t - self._t_mapa) > 0.01:
@@ -1037,6 +1044,34 @@ class ConstructorMapa:
             self.hz, self._n, self._t_hz = self._n / (ahora - self._t_hz), 0, ahora
         return True
 
+    def _congelada(self):
+        """(18-nov) ¿Hay una tarea en marcha (aviso fresco del modo autónomo)?"""
+        if self.canal_congelar is None:
+            return False
+        import json
+        b, t = self.canal_congelar.leer()
+        try:
+            c = bool(b) and t is not None and time.time() - t < 2.0 and bool(json.loads(b).get("congelar"))
+        except ValueError:
+            c = False
+        if c != self.congelada:
+            self.congelada = c
+            print("🧊 [autónomo] Autocorrección de la calibración " + ("CONGELADA mientras dura la tarea"
+                                                                     if c else "activa de nuevo"))
+        return c
+
+    def _medida_sin_aplicar(self, medida):
+        """Con la autocorrección congelada: se guarda y se dice lo que habría corregido (para revisarlo)."""
+        if medida is None or medida.get("residuo", 1.0) > self.correccion.residuo_max:
+            return
+        self.medida_congelada = np.asarray(medida["t"], float)
+        ahora = time.monotonic()
+        if ahora - self._t_aviso_congelada >= 2.0:
+            self._t_aviso_congelada = ahora
+            t = self.medida_congelada
+            print(f"🧊 [autónomo] (congelada) la autocorrección mediría {100 * np.linalg.norm(t):.1f} cm "
+                  f"({', '.join(f'{100 * v:+.1f}' for v in t)}; residuo {1000 * medida['residuo']:.0f} mm)")
+
     def estado(self):
         if self.T is None:
             return dict(estado="sin", texto="sin calibrar")
@@ -1046,7 +1081,8 @@ class ConstructorMapa:
                     texto=f"{n_ocu} vóxeles" + ("" if self.robot_quitado else " (robot sin quitar)")
                     + (" (mano aproximada)" if self.robot_quitado and not self.mano_real else "")
                     + (f" · calibración: {self.correccion.texto()}" if np.linalg.norm(self.correccion.t) > 0.003
-                       else ""),
+                       else "")
+                    + (" · autocorrección congelada (tarea)" if self.congelada else ""),
                     mano_real=self.mano_real,
                     ocupados=n_ocu, libres=int((e == LIBRE).sum()), res=self.mapa.res,
                     hz=round(self.hz, 1), ms=self.mapa.ultima.get("ms"), aviso=self.aviso,

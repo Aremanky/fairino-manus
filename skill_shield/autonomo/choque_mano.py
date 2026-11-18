@@ -684,6 +684,24 @@ def desde_config(cadena, cfg, T_brida_tablero=None, entorno=None):
                            entorno=entorno, holgura_entorno=float(g.get("CALIB_ENTORNO_HOLGURA", 0.05)))
 
 
+def desde_config_tarea(cadena, cfg, entorno=None):
+    """(18-nov) El comprobador de la TAREA autónoma, con huecos FIJOS (no los de la calibración).
+
+    En la calibración tiene sentido que ningún hueco se cierre respecto a la postura de inicio (el
+    tablero va pegado a la mano y hay cables que no están en el gemelo). En la tarea, eso hacía que
+    hubiera plan o no según cómo se hubiera dejado el brazo: arrancando relajado se exigían ~7 cm
+    entre la mano y el brazo durante toda la tarea; arrancando encogido, 3 cm. Aquí cada hueco tiene
+    un único valor (objetivo = mínimo), así que fijar_inicio() no cambia nada:
+      · mano ↔ brazo (giro del J4 incluido): AUTONOMO_TAREA_MANO_HOLGURA (por defecto 5 cm: la pieza
+        de la mano que se rompe si se acerca al J4, los cables y lo que sobresale);
+      · mano ↔ soporte, cabeza, cámara, cajas de config y suelo: AUTONOMO_TAREA_ENTORNO_HOLGURA."""
+    g = cfg if isinstance(cfg, dict) else {k: getattr(cfg, k) for k in dir(cfg) if k.isupper()}
+    h_mano = float(g.get("AUTONOMO_TAREA_MANO_HOLGURA") or 0.05)
+    h_ent = float(g.get("AUTONOMO_TAREA_ENTORNO_HOLGURA") or 0.03)
+    return ChoqueManoBrazo(cadena, g["RUTA_XML"], h_mano, salientes=0.0, acercar_max=0.0,
+                           entorno=entorno, holgura_entorno=h_ent, holgura_entorno_min=h_ent)
+
+
 def _main():
     import argparse
     import json

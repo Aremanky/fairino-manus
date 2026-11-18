@@ -42,6 +42,8 @@ def _parsear():
     ap.add_argument("--canal-mando", default=None, help="mandos de la web (borrar mapa…)")
     ap.add_argument("--canal-visto", default=None, help="qué ha visto la cámara (para el planificador)")
     ap.add_argument("--canal-herramientas", default=None, help="herramientas detectadas (None = no detectar)")
+    ap.add_argument("--canal-congelar", default=None,
+                    help="(18-nov) aviso del modo autónomo: hay una tarea → no aplicar la autocorrección")
     ap.add_argument("--grabar", type=int, default=0, metavar="N",
                     help="guardar N pares color+profundidad en diagnosticos/escena_*.npz y salir "
                          "(con el modo autónomo cerrado), para revisar el mapa fuera del robot")
@@ -161,7 +163,9 @@ def main():
                                       Canal.esperar(args.canal_qbrazo) if args.canal_qbrazo else None,
                                       Canal.esperar(args.canal_mapa),
                                       Canal.esperar(args.canal_mando) if args.canal_mando else None,
-                                      Canal.esperar(args.canal_visto) if args.canal_visto else None)
+                                      Canal.esperar(args.canal_visto) if args.canal_visto else None,
+                                      canal_congelar=Canal.esperar(args.canal_congelar) if args.canal_congelar
+                                      else None)
         print(f"🧱 [autónomo] Mapa de obstáculos: rejilla {tuple(int(v) for v in constructor.mapa.n)} de "
               f"{constructor.mapa.res * 100:.0f} cm")
     detector, canal_herr, canal_mando_h = None, None, None
@@ -261,7 +265,8 @@ def main():
                             t_d = time.perf_counter()
                             detector.paso(img, K, dist, prof_mm=prof)
                             if pelotas is not None:
-                                pelotas.paso(img, K, prof)
+                                pelotas.paso(img, K, prof, dist=dist if getattr(
+                                    cfg_, "AUTONOMO_PELOTAS_QUITAR_DISTORSION", True) else None)
                             ms_det = _media(ms_det, 1000.0 * (time.perf_counter() - t_d))
                         detector.dibujar(img, K, dist)
                         if pelotas is not None:

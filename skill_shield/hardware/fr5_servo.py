@@ -96,7 +96,8 @@ _E_QCMD = 8           # 8..13: último comando enviado (o pose real si no se env
 _E_QREAL = 14         # 14..19: pose REAL leída del robot (grados)
 _E_TREAL = 20         # time.monotonic() de esa lectura
 _E_MAIN, _E_SUB, _E_COLIS, _E_RSTATE = 21, 22, 23, 24   # 9-nov: códigos de fallo de la controladora
-_N_ESTADO = 25
+_E_TOR = 25          # (18-nov) 25..30: par REAL de cada joint (N·m, del paquete de estado), para identificar la carga
+_N_ESTADO = 31
 PERIODO_LECTURA_S = 0.02    # pose real: 50 Hz (del paquete de estado en tiempo real, sin RPC)
 
 
@@ -200,6 +201,15 @@ class FR5Servo:
         return np.radians(q_deg - np.asarray(self.p["FR5_OFFSET_DEG"], float)) \
             * np.asarray(self.p["FR5_SIGNO"], float)
 
+    def par_real(self, max_edad_s=0.3):
+        """(18-nov) Par REAL de cada joint (N·m, en el sentido del MJCF: × FR5_SIGNO), o None."""
+        if not self.en_linea:
+            return None
+        e = self._est[:]
+        if not e[_E_TREAL] or time.monotonic() - e[_E_TREAL] > max_edad_s:
+            return None
+        return np.asarray(e[_E_TOR:_E_TOR + 6], float) * np.asarray(self.p["FR5_SIGNO"], float)
+
     @property
     def enviando(self):
         """True mientras el proceso manda ServoJ (habilitado y sin error)."""
@@ -265,14 +275,26 @@ class _LlamadaServoJ:
         self.robot, self.p = robot, p
         self.v2 = True
         self.epos = [0.0, 0.0, 0.0, 0.0]
+        # (18-nov) ServoJ por UDP (cmdType 1): si los primeros envíos fallan, se vuelve a XML-RPC (0) y se avisa
+        self.tipo = int(p.get("FR5_CMD_TYPE", 0) or 0)
+        self._udp_ok, self._udp_mal = 0, 0
 
     def __call__(self, q_deg, cmd_id):
         q = [float(v) for v in q_deg]
         if self.v2:
             try:
-                return self.robot.ServoJ(joint_pos=q, axisPos=self.epos, acc=0.0, vel=0.0,
-                                         cmdT=self.p["FR5_PERIODO_S"], filterT=0.0, gain=0.0,
-                                         id=cmd_id, cmdType=self.p["FR5_CMD_TYPE"])
+                r = self.robot.ServoJ(joint_pos=q, axisPos=self.epos, acc=0.0, vel=0.0,
+                                      cmdT=self.p["FR5_PERIODO_S"], filterT=0.0, gain=0.0,
+                                      id=cmd_id, cmdType=self.tipo)
+                if self.tipo == 1 and self._udp_ok < 25:     # mientras no esté claro que el UDP va bien
+                    if _ret(r) == 0:
+                        self._udp_ok += 1
+                    else:
+                        self._udp_mal += 1
+                        if self._udp_mal >= 3:
+                            self.tipo = 0
+                            print(f"  fr5_servo: ServoJ por UDP no funciona (código {_ret(r)}) → vuelvo a XML-RPC")
+                return r
             except TypeError:
                 self.v2 = False
                 print("  fr5_servo: SDK antiguo (ServoJ sin axisPos/cmdType) → firma v1")
@@ -287,12 +309,17 @@ class _LectorPoseReal:
         self.robot = robot
         self.rapido = True
         self.t_rpc = 0.0
+        self.par = None                  # (18-nov) par real de cada joint (N·m) de la última lectura rápida
 
     def __call__(self, ahora):
         if self.rapido:
             try:
                 r = self.robot.GetRobotRealTimeState()
                 pkg = r[1] if isinstance(r, (tuple, list)) else r
+                try:
+                    self.par = [float(v) for v in list(pkg.jt_cur_tor)[:6]]
+                except Exception:
+                    self.par = None
                 q = [float(v) for v in list(pkg.jt_cur_pos)[:6]]
                 if len(q) == 6 and any(abs(v) > 1e-9 for v in q):
                     return q
@@ -505,6 +532,19 @@ def _configurar_colisiones(robot, p):
               + " ".join(f"j{i + 1}={int(v)}" for i, v in enumerate(list(pkg.collisionLevel)[:6])))
     except Exception:
         pass
+    # (18-nov) la carga y el centro de masas que tiene AHORA la controladora (los de la WebApp o los de la última vez)
+    try:
+        rw, rc = robot.GetTargetPayload(0), robot.GetTargetPayloadCog(0)
+        if _ret(rw) == 0 and _ret(rc) == 0 and rw[1] is not None and rc[1] is not None:
+            cog = [float(v) for v in rc[1]]
+            print(f"  fr5_servo: carga en la controladora: {float(rw[1]):.2f} kg, centro de masas "
+                  f"({cog[0]:.0f}, {cog[1]:.0f}, {cog[2]:.0f}) mm")
+            if p.get("FR5_CARGA_CDM_MM") is None and max(abs(v) for v in cog) < 1.0 and p.get("FR5_CARGA_KG"):
+                print("  ⚠ fr5_servo: el centro de masas de la carga está en (0, 0, 0) (en la brida) y config no lo "
+                      "pone (FR5_CARGA_CDM_MM = None): con la mano, la controladora espera pares equivocados y da "
+                      "falsas colisiones → python diagnosticos/identificar_carga.py")
+    except Exception:
+        pass
     ordenes = []
     if p.get("FR5_CARGA_KG") is not None:
         ordenes.append(("carga", lambda: robot.SetLoadWeight(0, float(p["FR5_CARGA_KG"])),
@@ -715,6 +755,8 @@ def _sesion_fr5(Robot, p, obj, est, habilitado, salir, listo, reset, ppid):
             q_ = leer_real(ahora_)
             if q_ is not None:
                 est[_E_QREAL:_E_QREAL + 6] = q_
+                if leer_real.par is not None and len(leer_real.par) == 6:
+                    est[_E_TOR:_E_TOR + 6] = leer_real.par
                 est[_E_TREAL] = time.monotonic()
 
         # ── Bucle a 8 ms ──────────────────────────────────────────────────────

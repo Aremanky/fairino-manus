@@ -168,13 +168,17 @@ def test_planificador_usa_la_escena_fija(con_fija):
                     voxeles=[], res=0.02))
     pl = TA.Planificador(cadena, con_fija)
     pl.poner_mapa(None, 0.02)
-    assert len(pl._arbol.data) > 100                           # sus caras, como cubos
+    if pl.mundo_simple:                                        # (18-nov) la caja es una LOSA (tapa maciza)
+        assert len(pl._losas) == 1 and abs(pl._losas[0].z - zt) < 2e-4
+        assert "mesa" in str(pl.motivo(q0))
+    else:
+        assert len(pl._arbol.data) > 100                       # sus caras, como cubos
     assert any(abs(z - zt) < 2e-4 for z, _ in pl._superficies)  # su tapa, como suelo
     assert pl.motivo(q0) is not None                           # la mano, dentro: no vale
     # sin la escena fija, la misma postura sí vale
     os.remove(con_fija["AUTONOMO_ESCENA_FIJA_ARCHIVO"])
     pl.poner_mapa(None, 0.02)
-    assert pl._arbol is None and pl.motivo(q0) is None
+    assert pl._arbol is None and pl.motivo(q0) is None and not pl._losas
     # la pelota sobre una tapa fija se apoya a su altura (aunque el estéreo la vea 2 cm alta)
     EF.guardar(con_fija["AUTONOMO_ESCENA_FIJA_ARCHIVO"],
                dict(cajas=[EF.caja("cajonera", (0.35, -1.04, 0.5 * (0.07 - 0.975)), (0.25, 0.21, 0.5 * 1.045))],

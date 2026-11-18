@@ -31,18 +31,49 @@ def _radio_max_esferas(robot):
     return max(rs) if rs else 0.06
 
 
+def ajustar_mano(robot, enlace="mano_mount", extra=0.0, esferas=()):
+    """(18-nov) Suma 'extra' al radio de las esferas de colisión de 'enlace' y le añade 'esferas'
+    [(centro (3,), radio)] en el diccionario de configuración del robot de cuRobo. Devuelve cuántas se
+    han añadido, o None si el diccionario no tiene las esferas de ese enlace (no se toca)."""
+    k = robot.get("robot_cfg", robot).get("kinematics", {}) if isinstance(robot, dict) else {}
+    esf = k.get("collision_spheres")
+    if not isinstance(esf, dict) or not isinstance(esf.get(enlace), list):
+        if extra or esferas:
+            print(f"⚠️  cuRobo: la configuración no tiene las esferas de {enlace} en línea: no ajusto la mano.")
+        return None
+    lista = esf[enlace]
+    for e in lista:
+        e["radius"] = float(e["radius"]) + float(extra)
+    for c, r in esferas or ():
+        lista.append(dict(center=[float(v) for v in np.asarray(c, float).ravel()[:3]],
+                          radius=float(r) + float(extra)))
+    return len(esferas or ())
+
+
 class PlanificadorCuRobo:
     def __init__(self, ruta_robot, entorno, limites, res=0.02, intentos=4, cuda_graph=False, margen_entorno=0.0,
-                 dispositivo="cuda:0", calentar=True, semillas=8, desconocido_extra=0.02, activacion=None):
+                 dispositivo="cuda:0", calentar=True, semillas=8, desconocido_extra=0.02, activacion=None,
+                 margen_mundo=0.0, margen_mano_extra=0.0, esferas_mano=(), enlace_mano="mano_mount",
+                 max_goalset=1):
         """semillas: trayectorias que cuRobo optimiza A LA VEZ en la GPU para cada tramo (se queda con la mejor).
         desconocido_extra (17-nov): lo no visto se le da a cuRobo como «a (esfera más gruesa + esto) de un
         obstáculo»: no es choque, pero con la distancia de activación (por defecto, esto + la esfera más
-        gruesa) su optimizador lo penaliza."""
+        gruesa) su optimizador lo penaliza.
+        (18-nov) La misma geometría y márgenes que las comprobaciones del proyecto (antes cuRobo planificaba
+        sin márgenes y sin la pelota cogida, y muchos de sus tramos se rechazaban después):
+          · margen_mundo: se resta de la distancia del mapa (= inflar todas las esferas del robot contra los
+            cubos y las mesas); margen_entorno: lo mismo con las cápsulas y cajas fijas;
+          · margen_mano_extra: lo que la mano necesita además (margen de la mano − el del brazo), sumado al
+            radio de las esferas de enlace_mano;
+          · esferas_mano: [(centro en el marco de enlace_mano, radio)] que se añaden a la mano (la pelota cogida).
+        Se cambia el diccionario del robot ANTES de crear el planificador: no depende de la API de cuRobo.
+        max_goalset (18-nov): cuántas poses alternativas de la mano admite plan_goalset() de una vez (cuRobo
+        reserva la memoria al crear el planificador; los goalsets más pequeños se rellenan solos)."""
         import torch
         import yaml
         from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
         from curobo.scene import Capsule, Cuboid, Scene, VoxelGrid
-        from curobo.types import JointState
+        from curobo.types import GoalToolPose, JointState, Pose
         from curobo._src.types.device_cfg import DeviceCfg
         if not torch.cuda.is_available():
             raise RuntimeError("PyTorch no ve la GPU (CUDA)")
@@ -50,6 +81,9 @@ class PlanificadorCuRobo:
             raise FileNotFoundError(f"no está la configuración de cuRobo del robot ({ruta_robot}): "
                                     "python -m skill_shield.autonomo.curobo_fr5.robot")
         self.torch, self.JointState = torch, JointState
+        self._Pose, self._GoalToolPose = Pose, GoalToolPose
+        self.enlace_mano = enlace_mano
+        self.max_goalset = max(1, int(max_goalset))
         self._Scene, self._Cuboid, self._Capsule, self._VoxelGrid = Scene, Cuboid, Capsule, VoxelGrid
         self.dev = DeviceCfg(device=torch.device(dispositivo), dtype=torch.float32)
         self.limites, self.res, self.intentos = limites, float(res), int(intentos)
@@ -59,6 +93,11 @@ class PlanificadorCuRobo:
         vacia = np.full(tuple(n), 1.0, np.float32)
         with open(ruta_robot) as f:
             robot = yaml.safe_load(f)
+        self.margen_mundo = float(margen_mundo)
+        n_extra = ajustar_mano(robot, enlace_mano, margen_mano_extra, esferas_mano)
+        if n_extra is not None:
+            print(f"🔵 cuRobo: mano con +{100 * float(margen_mano_extra):.1f} cm y {n_extra} esferas de la pelota "
+                  f"cogida; mundo inflado {100 * self.margen_mundo:.1f} cm")
         self.r_max = _radio_max_esferas(robot)
         self.desconocido_dist = self.r_max + float(desconocido_extra) if desconocido_extra is not None else None
         act = float(activacion) if activacion is not None else (
@@ -68,6 +107,7 @@ class PlanificadorCuRobo:
             collision_cache={"cuboid": len(self._cajas) + 4, "capsule": len(self._caps) + 4, "voxel": 1},
             device_cfg=self.dev, use_cuda_graph=bool(cuda_graph), graph_planner_algorithm="rrt",
             num_trajopt_seeds=int(semillas), num_ik_seeds=max(32, 4 * int(semillas)),
+            max_goalset=self.max_goalset,
             optimizer_collision_activation_distance=act)
         self.mp = MotionPlanner(cfg)
         self.nombres = list(self.mp.joint_names)
@@ -99,7 +139,8 @@ class PlanificadorCuRobo:
         """Carga en cuRobo el mundo actual del planificador `pl` (si ha cambiado desde la última vez)."""
         if clave is not None and clave == self._clave_mundo:
             return
-        sdf, centro, dims = M.mundo_del_planificador(pl, self.limites, self.res, self.desconocido_dist)
+        sdf, centro, dims = M.mundo_del_planificador(pl, self.limites, self.res, self.desconocido_dist,
+                                                     margen=self.margen_mundo)
         self.mp.update_world(self._escena(sdf, centro, dims))
         self._clave_mundo = clave
 
@@ -119,3 +160,30 @@ class PlanificadorCuRobo:
         qs = pos[:, self._de_curobo].astype(float)
         qs[0], qs[-1] = np.asarray(q0, float), np.asarray(q1, float)          # puntas exactas
         return qs
+
+    def plan_goalset(self, q0, T_lista):
+        """(18-nov) De q0 a la MEJOR de varias poses de la mano (marco enlace_mano, matrices 4x4 en el mundo): cuRobo
+        resuelve la IK de todas y la trayectoria a la vez en la GPU (MotionPlanner.plan_pose con num_goalset > 1)
+        y se queda con la mejor. Devuelve (índice de la pose elegida, posturas N x 6) o None.
+        Si hay más poses que max_goalset, se usan las max_goalset primeras (vienen ordenadas de mejor a peor)."""
+        t = self.torch
+        T = np.asarray(T_lista, float).reshape(-1, 4, 4)[:self.max_goalset]
+        if len(T) == 0:
+            return None
+        t0 = time.perf_counter()
+        kw = self.dev.as_torch_dict()
+        pose = self._Pose(position=t.tensor(T[:, :3, 3], **kw), rotation=t.tensor(T[:, :3, :3], **kw))
+        goal = self._GoalToolPose.from_poses({self.enlace_mano: pose}, ordered_tool_frames=[self.enlace_mano],
+                                             num_goalset=len(T))
+        a = t.tensor([np.asarray(q0, float)[self._a_curobo]], **kw)
+        r = self.mp.plan_pose(goal, self.JointState.from_position(a, joint_names=self.nombres),
+                              max_attempts=self.intentos)
+        self.t_ultimo = time.perf_counter() - t0
+        if r is None or r.success is None or not bool(r.success.any()):
+            return None
+        gi = getattr(r, "goalset_index", None)
+        idx = int(gi.reshape(-1)[0].item()) if gi is not None else 0
+        pos = r.get_interpolated_plan().position.detach().float().cpu().numpy().reshape(-1, len(self.nombres))
+        qs = pos[:, self._de_curobo].astype(float)
+        qs[0] = np.asarray(q0, float)
+        return idx, qs
