@@ -145,6 +145,10 @@ def main():
     canal_herr = Canal.esperar(args.canal_herramientas) if args.canal_herramientas else None
     voxeles = (0.0, None)
     herr = ([], None)
+    # (17-nov) escena fija: sus cajas, en azul translúcido (se recarga si se vuelve a escanear)
+    from skill_shield.autonomo import escena_fija as EF
+    escena = EF.EscenaFija(cfg) if getattr(cfg, "AUTONOMO_ESCENA_FIJA_VER", True) else None
+    t_escena = 0.0
 
     ruta_calib = args.calibracion if os.path.isabs(args.calibracion) else \
         os.path.join(os.path.dirname(os.path.abspath(cfg.__file__)), args.calibracion)
@@ -182,9 +186,15 @@ def main():
                 if b_h and t_h and time.time() - t_h < 3.0:
                     d_h = _mando(b_h)
                     herr = (d_h.get("lista", []), d_h.get("objetivo"))
+            if escena is not None and t0 - t_escena > 1.0:
+                t_escena = t0
+                escena.actualizar()
+            ver_fijo = escena is not None and _mando(b_mando).get("ver_obstaculos", True)
             render.update_scene(datos, camera=cam)
             if voxeles[1] is not None:
                 dibujar_voxeles(render.scene, voxeles[1], voxeles[0])
+            if ver_fijo:
+                EF.dibujar(render.scene, escena.cajas)
             dibujar_herramientas(render.scene, *herr)
             rgb = render.render()
             if canal_sim is not None or args.ventana:
@@ -235,6 +245,8 @@ def main():
                     scn = render_cam.scene
                     if voxeles[1] is not None:              # así se ve si caen sobre los objetos reales
                         dibujar_voxeles(scn, voxeles[1], voxeles[0])
+                    if ver_fijo:                            # y si las cajas fijas cuadran con los muebles
+                        EF.dibujar(scn, escena.cajas)
                     dibujar_herramientas(scn, *herr)
                     g = C.camara_gl(corr.T() @ calib["T_mundo_cam"], Kc, w, h, float(scn.camera[0].frustum_near))
                     for c in (scn.camera[0], scn.camera[1]):

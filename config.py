@@ -1338,6 +1338,26 @@ AUTONOMO_MAPA_DESCONOCIDO_OCUPADO = True # para esquivar: lo tapado (debajo/detr
                                          #   detrás se trata como ocupado»): hay que cablearlo en el planificador
 AUTONOMO_MAPA_VER_VISOR = True           # dibujar los obstáculos también en la ventana de MuJoCo
 AUTONOMO_MAPA_MAX_DIBUJO = 6000          # máx. de vóxeles que se dibujan (el mapa completo no tiene límite)
+# ── (17-nov) ESCENA FIJA: separar lo que NO se mueve de lo que cambia (skill_shield/autonomo/escena_fija.py) ──
+# Botón «Escanear escena fija» de la web (vista del gemelo), con la mesa DESPEJADA (sin pelotas ni herramientas)
+# y el brazo apartado: se borra el mapa, la TSDF promedia unos segundos y las mesas y muebles se guardan como
+# CAJAS en escena_fija.json. Desde entonces la cámara no pone obstáculos dentro de ellas (solo lo que cambia) y
+# el planificador y cuRobo usan su forma limpia, que sigue ahí aunque la mano la tape. Revisar lo guardado:
+#     python -m skill_shield.autonomo.escena_fija
+# Si se mueve una mesa, volver a escanear (o «Olvidar fija»). Se ven en el gemelo como cajas azules.
+AUTONOMO_ESCENA_FIJA          = True
+AUTONOMO_ESCENA_FIJA_ARCHIVO  = "escena_fija.json"
+AUTONOMO_ESCENA_FIJA_ESCANEO_S = 10.0    # s de escaneo (más: la TSDF promedia más y la tapa sale más fina)
+AUTONOMO_ESCENA_FIJA_MARGEN   = 0.03     # m alrededor de las cajas en los que la cámara NO pone obstáculos (ruido
+                                         # de la tapa). Ojo: algo más bajo que esto encima de la mesa no se ve
+AUTONOMO_ESCENA_FIJA_GRUPO_MIN = 20      # cubos mínimos de un grupo para ser un mueble (menos: ruido)
+AUTONOMO_ESCENA_FIJA_LLENADO_MIN = 0.45  # si un grupo llena menos de esto de su caja, se guardan sus cubos tal cual
+AUTONOMO_ESCENA_FIJA_APOYO_TOL = 0.05    # m: una pelota sobre una tapa fija se apoya a su altura (si cuadra)
+AUTONOMO_ESCENA_FIJA_VER      = True     # dibujar las cajas en el gemelo (con «Obstáculos» activado)
+# Cajas medidas a mano (se suman a las del escaneo), en el marco del MJCF:
+#   dict(nombre="cajonera", centro=(x, y, z), semi=(sx, sy, sz), yaw_deg=0)
+#   dict(nombre="mesa", xy=(x, y), semi_xy=(sx, sy), z_sup=z, desde_suelo=True)
+AUTONOMO_ESCENA_FIJA_CAJAS    = []
 
 # Herramientas con marcadores ArUco (paso 5, skill_shield/autonomo/herramientas.py). Diccionario 4x4.
 # Por cada una: id del marcador, nombre, tipo ("herramienta" | "punto_uso" | "punto_dejada"),
@@ -1480,6 +1500,13 @@ AUTONOMO_TAREA_SUBDIV_MAX = 4          # veces que se puede partir en dos un pas
 # Lo que la cámara no ha visto cuenta como COSTE (no se prohíbe): se prefiere el camino que menos pasa por ahí
 AUTONOMO_TAREA_PESO_DESCONOCIDO = 2.0  # 0 = no se tiene en cuenta
 AUTONOMO_TAREA_ALTERNATIVAS = 1        # planes completos que se comparan (1 = el primero; más = más lento)
+AUTONOMO_TAREA_ALTERNATIVAS_GPU = 4    # con cuRobo (cada tramo cuesta ms en la GPU): planes completos que se comparan
+AUTONOMO_TAREA_PRECALENTAR = True      # preparar el planificador (mallas, pinza, cuRobo) al arrancar el modo autónomo
+# Comprobación del mapa EN LOTE: mapa de distancias + todas las posturas de un tramo a la vez. Conservador
+# (si hay duda, se hace la búsqueda exacta de siempre): las decisiones no cambian, solo el tiempo
+AUTONOMO_TAREA_COMPROBAR_LOTE = True
+AUTONOMO_TAREA_COMPROBAR_MOTOR = "auto"   # "auto" (GPU si hay PyTorch con CUDA) · "gpu" · "numpy"
+AUTONOMO_TAREA_COMPROBAR_LOTE_TAM = 24    # posturas por lote (se para en el primer lote con un choque)
 # De un sitio a otro POR ARRIBA: sube en vertical, se traslada y baja (si no se puede, como antes)
 AUTONOMO_TAREA_POR_ALTO = True
 AUTONOMO_TAREA_ALTO_MARGEN = 0.10      # m por encima de lo más alto que haya en el pasillo entre los dos sitios
@@ -1502,6 +1529,11 @@ AUTONOMO_TAREA_PELOTA_APOYO_TOL = 0.04   # m que puede corregir (si la mesa medi
 AUTONOMO_TAREA_PLANIFICADOR = "curobo"
 AUTONOMO_CUROBO_ROBOT = "curobo_fr5/fr5_orca.yml"   # la genera python -m skill_shield.autonomo.curobo_fr5.robot
 AUTONOMO_CUROBO_INTENTOS = 4               # intentos de cuRobo por tramo (con RRT a partir del 2º)
+AUTONOMO_CUROBO_SEMILLAS = 8               # trayectorias que optimiza A LA VEZ en la GPU por tramo (se queda la mejor)
+# Lo que la cámara NO ha visto: para cuRobo es «cerca de un obstáculo» (esfera más gruesa + esto, en m): no es
+# choque, pero su optimizador lo PENALIZA y busca caminos por lo visto. None = no penalizarlo
+AUTONOMO_CUROBO_DESCONOCIDO_EXTRA = 0.02
+AUTONOMO_CUROBO_ACTIVACION = None          # m: distancia a la que empieza el coste de colisión (None = lo de arriba + 2 cm)
 AUTONOMO_CUROBO_CUDA_GRAPH = False         # True = algo más rápido, pero el mundo no puede crecer de tamaño
 AUTONOMO_TAREA_GUARDAR_PLANES = True
 AUTONOMO_TAREA_PLANES_GUARDADOS = 10
@@ -1516,7 +1548,9 @@ AUTONOMO_TAREA_MARGEN_MAPA_MALLA = 0.02      # m entre las mallas del brazo y el
 # Formas de coger la pelota, en orden de preferencia (13-nov): "pinza" (pulgar contra índice y medio,
 # con anular y meñique recogidos, como la cogería una persona), "rodeándola" (con toda la mano),
 # "con los dedos" (toda la mano, la palma algo más lejos). Se usa la primera que salga.
-AUTONOMO_TAREA_PELOTA_MODOS = ("pinza", "rodeándola", "con los dedos")
+AUTONOMO_TAREA_PELOTA_MODOS = ("pinza",)   # (17-nov) solo en pinza (antes: "pinza", "rodeándola", "con los dedos")
+AUTONOMO_TAREA_PINZA_DESDE_ARRIBA = True   # pinza desde arriba, pulgar e índice a los lados (a la altura del centro)
+AUTONOMO_TAREA_PINZA_INCLINACION_MAX_DEG = 20.0   # cuánto puede inclinarse la mano además (0 = solo vertical)
 # Pinza: abierta (yemas a ~13 cm) y cerrada (yema del pulgar contra la del índice); para cada pelota se
 # calcula con el modelo de la mano hasta dónde cerrar para tocarla, y se cierra un poco más para
 # apretarla: (al cerrar, al «apretar un poco»), en fracción del recorrido abierta → cerrada.

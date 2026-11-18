@@ -320,7 +320,11 @@ class DetectorPelotas(ConCorreccion):
         if s is None or self.T_mundo_cam is None or time.time() - s.t > self.olvido_s:
             return None
         c = self.T_mundo_cam[:3, :3] @ s.p + self.T_mundo_cam[:3, 3]
-        return c.tolist(), [s.diam / 2.0 + 0.02] * 3
+        r = s.diam / 2.0
+        # (17-nov) desde 1 cm por encima de su parte de abajo: la MESA de debajo no se quita del mapa (antes la
+        # caja bajaba 2 cm por debajo de la pelota y dejaba un agujero en la mesa justo donde hay que cogerla)
+        z0, z1 = c[2] - r + 0.01, c[2] + r + 0.02
+        return [float(c[0]), float(c[1]), float(0.5 * (z0 + z1))], [r + 0.02, r + 0.02, float(0.5 * (z1 - z0))]
 
     def pixeles_halo(self, factor=1.4, extra_px=3, delante=0.05, detras=0.30):
         """(12-nov) Píxeles de la profundidad que NO van al mapa: alrededor de cada pelota vista en
@@ -332,8 +336,14 @@ class DetectorPelotas(ConCorreccion):
         for e, p, diam, (u, v, r) in self.ultimas:
             d = float(np.linalg.norm(p))
             z_sup = float(p[2]) * max(d - diam / 2.0, 0.05) / max(d, 1e-6)       # profundidad (Z) de su cara
+            # (17-nov) 7º: altura (mundo) por debajo de la cual NO se quita nada: la mesa en la que está apoyada
+            # (antes el halo se llevaba también la mesa de detrás de la pelota)
+            z_min = None
+            if self.T_mundo_cam is not None:
+                c = self.T_mundo_cam[:3, :3] @ p + self.T_mundo_cam[:3, 3]
+                z_min = float(c[2] - diam / 2.0 + 0.01)
             out.append((float(u), float(v), float(r) * factor + extra_px, z_sup - delante, z_sup + diam + detras,
-                        float(v) + 0.5 * float(r)))       # por debajo de esta fila, la mesa: no se toca
+                        float(v) + 0.5 * float(r), z_min))       # por debajo de esta fila, la mesa: no se toca
         return out
 
     def cajas_mundo(self, margen=0.04):

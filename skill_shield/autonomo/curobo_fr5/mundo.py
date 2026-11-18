@@ -82,14 +82,36 @@ def obstaculos_entorno(entorno, margen=0.0, ancho_suelo=4.0):
     return caps, cajas
 
 
-def mundo_del_planificador(pl, limites, res=None):
+def desconocido_en(visto, P):
+    """Máscara de los puntos P que caen en cubos que la cámara NO ha visto (lo de fuera de su rejilla, no)."""
+    out = np.zeros(len(P), bool)
+    if not visto or visto.get("conocido") is None:
+        return out
+    o, r, N = np.asarray(visto["origen"], float), float(visto["res"]), np.asarray(visto["n"])
+    idx = np.floor((np.asarray(P, float) - o) / r).astype(int)
+    ok = np.all((idx >= 0) & (idx < N), axis=1)
+    out[ok] = ~visto["conocido"][idx[ok, 0], idx[ok, 1], idx[ok, 2]]
+    return out
+
+
+def mundo_del_planificador(pl, limites, res=None, desconocido_dist=None):
     """ESDF (nx, ny, nz), centro y medidas de la rejilla para el estado ACTUAL del planificador
-    `pl` (tarea.Planificador): sus cubos (con macizo y sin lo excluido ni lo de las zonas) y su suelo."""
+    `pl` (tarea.Planificador): sus cubos (sin lo excluido ni lo de las zonas) y su suelo.
+    desconocido_dist (17-nov): en lo que la cámara NO ha visto (pl._visto) la distancia se rebaja a este
+    valor (algo más que la esfera más gruesa del robot): cuRobo no lo trata como choque —el camino sigue
+    siendo posible— pero, con una distancia de activación mayor, su optimizador lo PENALIZA y prefiere
+    caminos por lo que sí se ha visto."""
     res = float(res or pl._res)
     origen, n = rejilla(limites, res)
     occ = ocupacion(pl._arbol.data if pl._arbol is not None else np.zeros((0, 3)), origen, n, res)
+    C = None
     if pl._suelo is not None or pl._discos:
         C = centros_rejilla(origen, n, res)
         occ |= pl._mascara_suelo(C).reshape(tuple(n))
+    sdf = esdf(occ, res)
+    if desconocido_dist is not None and getattr(pl, "_visto", None):
+        C = centros_rejilla(origen, n, res) if C is None else C
+        desc = desconocido_en(pl._visto, C).reshape(tuple(n)) & ~occ
+        sdf = np.where(desc & (sdf > desconocido_dist), np.float32(desconocido_dist), sdf).astype(np.float32)
     centro = origen + 0.5 * n * res
-    return esdf(occ, res), centro, (n * res)
+    return sdf, centro, (n * res)

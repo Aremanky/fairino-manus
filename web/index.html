@@ -251,7 +251,7 @@ footer b{color:var(--azul)}
           </div>
         </div>
       </div>
-      <div class="pie-video"><span id="camPie"></span><button type="button" class="btn-mini" id="btnBorrarMapa" hidden>Borrar mapa</button>
+      <div class="pie-video"><span id="camPie"></span><button type="button" class="btn-mini" id="btnBorrarMapa" hidden>Borrar mapa</button><button type="button" class="btn-mini" id="btnEscanearFijo" hidden title="Escanea las mesas, la cajonera… (lo que NO se mueve) y las guarda como cajas limpias. Antes: quita pelotas y herramientas y aparta el brazo">Escanear escena fija</button><button type="button" class="btn-mini" id="btnOlvidarFijo" hidden title="Deja de usar la escena fija (el archivo queda como .bak)">Olvidar fija</button>
         <label class="superponer" id="supCtl" title="El gemelo visto desde la cámara calibrada, encima de la imagen real: si la calibración está bien, el robot virtual tapa al real">
           <input type="checkbox" id="chkSup"> Superponer gemelo <input type="range" id="opac" min="10" max="90" value="50" aria-label="Opacidad del gemelo">
         </label>
@@ -452,8 +452,11 @@ function pintar(e){
   $("camMeta").textContent = modoVision === "sim" ? (simViva ? "MuJoCo · vista compartida por todos" : "")
                                                   : (cv ? `${c.fps} fps · USB ${c.usb}` : "");
   const mp = e.mapa || {};
-  const txtMapa = mp.estado && mp.estado !== "sin" ? `Obstáculos: <b>${mp.ocupados ?? 0}</b> vóxeles de ${Math.round((mp.res||0.02)*100)} cm · ${mp.hz ?? 0} Hz` + (mp.aviso ? ` · <span style="color:var(--aviso)">${mp.aviso}</span>` : "") : "Obstáculos: hace falta la calibración cámara→robot.";
+  const txtMapa = mp.estado && mp.estado !== "sin" ? `Obstáculos: <b>${mp.ocupados ?? 0}</b> vóxeles de ${Math.round((mp.res||0.02)*100)} cm · ${mp.hz ?? 0} Hz` + (mp.aviso ? ` · <span style="color:var(--aviso)">${mp.aviso}</span>` : "") + (mp.fijo && mp.fijo.texto ? ` · ${mp.fijo.escaneando ? `<b style="color:var(--aviso)">${mp.fijo.texto}</b>` : mp.fijo.texto}` : "") : "Obstáculos: hace falta la calibración cámara→robot.";
   $("btnBorrarMapa").hidden = !(modoVision === "sim" && mp.estado && mp.estado !== "sin");
+  const fj = mp.fijo || {};
+  $("btnEscanearFijo").hidden = $("btnBorrarMapa").hidden || !!fj.escaneando;
+  $("btnOlvidarFijo").hidden = $("btnBorrarMapa").hidden || !!fj.escaneando || !fj.cajas;
   $("camPie").innerHTML = modoVision === "sim" ? txtMapa : cv ? `MxId <b>${c.mxid}</b> &nbsp;·&nbsp; <b>${c.ancho}×${c.alto}</b> px &nbsp;·&nbsp; centro: <b>${c.prof_centro_mm ? Math.round(c.prof_centro_mm)+" mm" : "—"}</b>` : "";
 
   pintarHerramientas(e.herramientas || {}, vivo);
@@ -595,6 +598,14 @@ $("btnObst").addEventListener("click", async () => {
 });
 $("btnBorrarMapa").addEventListener("click", async () => {
   const r = await post("/api/mapa", {accion: "borrar"}); tostada(r.msg || "No se pudo borrar");
+});
+$("btnEscanearFijo").addEventListener("click", async () => {
+  if (!confirm("Escanear la escena fija: se borra el mapa y, en unos segundos, las mesas y muebles que vea la cámara se guardan como cajas fijas.\n\nAntes: quita pelotas y herramientas y aparta el brazo de delante. ¿Seguir?")) return;
+  const r = await post("/api/mapa", {accion: "fijo_escanear"}); tostada(r.msg || "No se pudo escanear");
+});
+$("btnOlvidarFijo").addEventListener("click", async () => {
+  if (!confirm("¿Dejar de usar la escena fija? (el archivo queda como copia .bak)")) return;
+  const r = await post("/api/mapa", {accion: "fijo_olvidar"}); tostada(r.msg || "No se pudo");
 });
 $("zMenos").addEventListener("click", () => vistaPost({accion:"zoom", factor:1.2}));
 

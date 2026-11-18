@@ -550,6 +550,98 @@ class ChoqueManoBrazo:
                 self.exigido[(objeto, cosa)] = min(max(d0 - self.acercar_max, minimo), objetivo)
         return self
 
+    # ── (17-nov) comprobación EN LOTE (mapas de distancias de cada eslabón; GPU si hay) ──
+    def _rejillas(self):
+        """{cosa: (marco o None, MapaDistancias)} de cada eslabón (en su marco) y del soporte (mundo).
+        Se hacen una vez (~1 s, al precalentar); 5 mm los eslabones (la mano va siempre a pocos cm del
+        antebrazo y del giro del J4) y 1 cm el soporte."""
+        if getattr(self, "_md_cosas", None) is None:
+            from skill_shield.autonomo.comprobador_lote import MapaDistancias
+            cota = max(max(self._rango(o, c)[0] for o in self._objetos for c in self._cosas()) + 0.05, 0.12)
+            self._md_cosas = {n: (i, MapaDistancias(arbol.data, 0.005, margen=cota), arbol)
+                              for n, (i, arbol) in self.arboles.items()}
+            if self.soporte is not None:
+                self._md_cosas["soporte"] = (None, MapaDistancias(self.soporte.data, 0.01, margen=cota),
+                                             self.soporte)
+        return self._md_cosas
+
+    def _ok_entorno(self, Pw, exigido, margen):
+        ent = self.entorno
+        if ent is None:
+            return True
+        for cap in ent.capsulas:
+            if float(_dist_segmento(Pw, cap.a, cap.b).min() - cap.r) < exigido[cap.nombre] - margen:
+                return False
+        for caja in ent.cajas:
+            if float(_dist_caja(Pw, caja).min()) < exigido[caja.nombre] - margen:
+                return False
+        return ent.z_suelo is None or float(Pw[:, 2].min() - ent.z_suelo) >= exigido["suelo"] - margen
+
+    def ok_rapido(self, marcos, margen=0.0):
+        """Lo mismo que ok(q, margen) —EXACTO— pero mucho más rápido: con el mapa de distancias de cada
+        eslabón se descartan los puntos de la mano que seguro están lejos, y solo los demás (pocos) se
+        buscan en el árbol."""
+        Tb = marcos[MARCO_CADENA["wrist3_Link"]]
+        for objeto, P in self._objetos.items():
+            exigido = self._hueco_exigido(objeto)
+            for cosa, (i, md, arbol) in self._rejillas().items():
+                T = Tb if i is None else np.linalg.inv(marcos[i]) @ Tb
+                Q = P @ T[:3, :3].T + T[:3, 3]
+                u = exigido[cosa] - margen
+                cerca = md.leer(Q) - md.h < u
+                if cerca.any():
+                    d, _ = arbol.query(Q[cerca], distance_upper_bound=u)
+                    if float(d.min()) < u:
+                        return False
+            if not self._ok_entorno(P @ Tb[:3, :3].T + Tb[:3, 3], exigido, margen):
+                return False
+        return True
+
+    def cumple_lote(self, marcos_lista, margen=0.0, torch=None, dev=None):
+        """(N,) bool EXACTO, lo mismo que [ok(q, margen) for q], de muchas posturas a la vez (dadas por sus
+        marcos de fk_marcos): mapas de distancias para descartar en bloque lo que está lejos (GPU si hay)
+        y búsqueda en el árbol solo de lo que queda cerca."""
+        from skill_shield.autonomo.comprobador_lote import (dist_caja_lote, dist_segmento_lote,
+                                                            exacto_en_lote)
+        N = len(marcos_lista)
+        if not N:
+            return np.zeros(0, bool)
+        M = np.stack([np.stack(m) for m in marcos_lista])            # (N, 6+, 4, 4)
+        Tb = M[:, MARCO_CADENA["wrist3_Link"]]
+        ok = np.ones(N, bool)
+        for objeto, P in self._objetos.items():
+            exigido = self._hueco_exigido(objeto)
+            for cosa, (i, md, arbol) in self._rejillas().items():
+                idx = np.flatnonzero(ok)
+                if not len(idx):
+                    return ok
+                T = Tb[idx] if i is None else np.linalg.inv(M[idx, i]) @ Tb[idx]
+                Q = np.matmul(T[:, :3, :3], P.T).transpose(0, 2, 1) + T[:, None, :3, 3]
+                ok[idx] = exacto_en_lote(md, arbol, Q, exigido[cosa] - margen, torch, dev)
+            ent = self.entorno
+            if ent is None:
+                continue
+            # primero con la esfera que envuelve el objeto (centro c, radio R): si la esfera ya guarda el
+            # hueco con algo, todos sus puntos también (exacto); solo las demás se miran punto a punto
+            c0 = P.mean(axis=0)
+            R = float(np.linalg.norm(P - c0, axis=1).max())
+            C = np.einsum("nij,j->ni", Tb[:, :3, :3], c0) + Tb[:, :3, 3]
+            formas = [(lambda X, cap=cap: dist_segmento_lote(X, cap.a, cap.b) - cap.r, exigido[cap.nombre])
+                      for cap in ent.capsulas]
+            formas += [(lambda X, caja=caja: dist_caja_lote(X, caja), exigido[caja.nombre]) for caja in ent.cajas]
+            if ent.z_suelo is not None:
+                formas.append((lambda X: X[..., 2] - ent.z_suelo, exigido["suelo"]))
+            for f, u in formas:
+                idx = np.flatnonzero(ok)
+                if not len(idx):
+                    return ok
+                lejos = f(C[idx][:, None, :])[:, 0] - R >= u - margen
+                idx = idx[~lejos]
+                if len(idx):
+                    Pw = np.matmul(Tb[idx, :3, :3], P.T).transpose(0, 2, 1) + Tb[idx, None, :3, 3]
+                    ok[idx] = f(Pw).min(axis=1) >= u - margen
+        return ok
+
     # ── comprobaciones ──
     def incumple(self, q, margen=0.0):
         """Lista de (objeto, cosa, hueco en metros, hueco exigido) de lo que queda demasiado cerca

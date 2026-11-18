@@ -82,6 +82,39 @@ def test_mundo_del_planificador_lleva_cubos_y_suelo(cadena):
     pl.poner_mapa(None, 0.02)
 
 
+def test_mundo_del_planificador_penaliza_lo_no_visto(cadena):
+    """(17-nov) Lo que la cámara no ha visto NO es choque para cuRobo (sdf > 0) pero queda a una distancia
+    corta (desconocido_dist) para que su optimizador lo penalice; lo visto y libre sigue lejos y lo
+    ocupado sigue siendo negativo."""
+    from test_tarea import _cajonera
+    pl = TA.Planificador(cadena, G)
+    pl.poner_mapa(_cajonera(), 0.02)
+    pl._empezar(np.radians([93.0, -17.0, 53.0, 43.0, 105.0, 25.0]))
+    pl.zonas_apoyo(())
+    lim = ((-1.0, 0.6), (-1.6, 0.4), (-0.975, 0.9))
+    origen, n = M.rejilla(lim, 0.02)
+    conocido = np.ones(tuple(n), bool)
+    i0 = np.floor((np.array([-0.40, 0.10, 0.20]) - origen) / 0.02).astype(int)    # un hueco sin ver
+    i1 = np.floor((np.array([-0.20, 0.30, 0.40]) - origen) / 0.02).astype(int)
+    conocido[i0[0]:i1[0], i0[1]:i1[1], i0[2]:i1[2]] = False
+    ic = np.floor((np.array([0.35, -0.5, -0.30]) - origen) / 0.02).astype(int)  # la cajonera, tampoco vista
+    conocido[ic[0], ic[1], ic[2]] = False
+    pl.poner_visto({"res": 0.02, "origen": origen, "n": n, "conocido": conocido})
+    def en(sdf, p):
+        i = np.floor((np.asarray(p) - origen) / 0.02).astype(int)
+        return float(sdf[i[0], i[1], i[2]])
+    sdf0, _, _ = M.mundo_del_planificador(pl, lim)
+    sdf, _, _ = M.mundo_del_planificador(pl, lim, desconocido_dist=0.12)
+    hueco = [-0.30, 0.20, 0.30]
+    assert en(sdf0, hueco) > 0.25 and abs(en(sdf, hueco) - 0.12) < 1e-6      # rebajado, pero no choque
+    assert en(sdf, [0.35, -0.5, 0.10]) == pytest.approx(en(sdf0, [0.35, -0.5, 0.10]))   # visto: igual
+    assert (sdf0 < 0).any() and np.array_equal(sdf[sdf0 < 0], sdf0[sdf0 < 0])  # ocupado (visto o no): igual
+    pl.poner_visto(None)
+    sdf2, _, _ = M.mundo_del_planificador(pl, lim, desconocido_dist=0.12)
+    assert np.array_equal(sdf2, sdf0)                                         # sin máscara: como antes
+    pl.poner_mapa(None, 0.02)
+
+
 class CuRoboFalso:
     """Lo que hace PlanificadorCuRobo, sin GPU: devuelve el tramo que se le diga."""
 

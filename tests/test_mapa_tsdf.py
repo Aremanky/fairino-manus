@@ -148,3 +148,52 @@ def test_gpu_igual_que_numpy():
     assert set(a[0].tolist()) == set(b[0].tolist())
     ia, ib = np.argsort(a[0]), np.argsort(b[0])
     assert np.allclose(a[1][ia], b[1][ib], atol=1e-4)
+
+
+def test_la_mesa_debajo_y_alrededor_de_la_pelota_no_desaparece():
+    """(17-nov) Con las MISMAS exclusiones que el modo autónomo (la caja de la pelota elegida, sus cajas
+    de halo y los píxeles del halo), la tapa de la cajonera debajo y alrededor de la pelota sigue en el
+    mapa (antes quedaba un agujero justo donde hay que cogerla)."""
+    import time as _t
+    from skill_shield.autonomo.mapa import ConstructorMapa
+    from skill_shield.autonomo.pelotas import DetectorPelotas, _Pista
+    T = _T()
+    r = 0.035
+    c = np.array([0.35, -0.95, Z_TAPA + r])
+    dw, dc = _rayos(T)
+    o = T[:3, 3]
+    oc = o - c
+    b = dw @ oc
+    a = np.sum(dw ** 2, -1)
+    disc = b ** 2 - a * (oc @ oc - r * r)
+    t_b = np.where(disc > 0, (-b - np.sqrt(np.maximum(disc, 0))) / a, np.inf)
+    t = np.minimum(_caja(o, dw, CAJONERA), t_b)
+    z = np.where(np.isfinite(t), t * dc[:, 2], 0.0).reshape(H, W_)
+    rng = np.random.default_rng(0)
+    cc = np.linalg.inv(T) @ np.r_[c, 1.0]
+    u, v, rp = cc[0] / cc[2] * K[0, 0] + K[0, 2], cc[1] / cc[2] * K[1, 1] + K[1, 2], r * K[0, 0] / cc[2]
+    det = DetectorPelotas({}, RAIZ)
+    det.T_mundo_cam = T
+    e = dict(nombre="Pelota roja", color_gemelo=(1, 0, 0))
+    det.ultimas = [(e, cc[:3], 2 * r, (u, v, rp))]
+    det.pistas[100] = _Pista(100, e, cc[:3], 2 * r, _t.time())
+    # como en el modo autónomo (AUTONOMO_MAPA_MESAS = True): la tapa como plano. Justo DEBAJO de la pelota la
+    # cámara no ve la mesa (la tapa la propia pelota): ahí la pone el plano
+    m = MapaOcupacion(LIM, 0.02, z_suelo=-0.975, metodo="tsdf", motor="numpy", dist_max=1.7, superficies=True)
+    m.excluir = [tuple(np.asarray(x, float) for x in det.caja_mundo(100))] + det.cajas_mundo()
+    for i in range(10):
+        prof = (np.clip(z + rng.normal(0, 0.003, z.shape) * z * z, 0, 10) * 1000).astype(np.uint16)
+        prof = ConstructorMapa.quitar_pixeles(prof, det.pixeles_halo(), K, T)
+        m.actualizar(prof, K, T, ahora=1000.0 + i)
+    O = m._centros[(m.estado(1010.0) == OCUPADO).reshape(-1)]
+    tapa = (O[:, 2] > Z_TAPA - 0.03) & (O[:, 2] < Z_TAPA + 0.016)          # la capa de la tapa (z = 0,07)
+    dh = np.linalg.norm(O[:, :2] - c[:2], axis=1)
+    debajo = tapa & (dh < 0.03)
+    anillo = tapa & (dh >= 0.04) & (dh < 0.10)
+    print(f"\ndebajo de la pelota: {debajo.sum()} cubos de mesa · alrededor: {anillo.sum()}")
+    assert debajo.sum() >= 2, f"debajo de la pelota solo {debajo.sum()} cubos de mesa"
+    # el anillo alrededor: casi completo (lo que tapa la pelota a la cámara puede faltar, pero no un agujero)
+    from skill_shield.autonomo.mapa import MapaOcupacion as _M
+    total = sum(1 for x in np.arange(-0.10, 0.101, 0.02) for y in np.arange(-0.10, 0.101, 0.02)
+                if 0.04 <= np.hypot(x, y) < 0.10)
+    assert anillo.sum() >= 0.6 * total, f"alrededor de la pelota solo {anillo.sum()}/{total} cubos de mesa"

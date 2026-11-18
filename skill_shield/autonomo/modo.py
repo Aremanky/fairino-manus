@@ -321,6 +321,8 @@ def ejecutar(cfg):
         t_mapa = 0.0
         from skill_shield.autonomo.mapa import desempaquetar, dibujar_voxeles
         from skill_shield.autonomo.herramientas import dibujar_herramientas
+        from skill_shield.autonomo import escena_fija as EF                # (17-nov) cajas fijas en azul
+        escena_ver = EF.EscenaFija(cfg) if cfg.get("AUTONOMO_ESCENA_FIJA_VER", True) else None
         print("✅ Modo autónomo en marcha. " + ("Cierra la ventana de MuJoCo o pulsa" if con_ventana else "Pulsa")
               + " Ctrl+C para salir.")
         q_tarea_sim, t_ant = None, time.monotonic()
@@ -373,6 +375,9 @@ def ejecutar(cfg):
                     if ver and b_m and t_m and time.time() - t_m < 3.0:
                         res_m, cen_m = desempaquetar(b_m)
                         dibujar_voxeles(visor.user_scn, cen_m, res_m)
+                    if ver and escena_ver is not None:
+                        escena_ver.actualizar()
+                        EF.dibujar(visor.user_scn, escena_ver.cajas)
                     if b_h and t_h and time.time() - t_h < 3.0:
                         try:
                             d_h = json.loads(b_h)

@@ -263,7 +263,15 @@ class Planificador:
         # por ahí (no se prohíbe: no sabemos qué hay, pero mejor no meter la mano)
         self.peso_desconocido = float(_g(g, "AUTONOMO_TAREA_PESO_DESCONOCIDO", 2.0))
         self.alternativas = int(_g(g, "AUTONOMO_TAREA_ALTERNATIVAS", 1))      # planes completos que se comparan (1 = el primero)
+        self.alternativas_gpu = int(_g(g, "AUTONOMO_TAREA_ALTERNATIVAS_GPU", 4))  # lo mismo, con cuRobo
         self._visto = None
+        # (17-nov) comprobación del mapa EN LOTE con un mapa de distancias (GPU si hay; comprobador_lote.py)
+        from skill_shield.autonomo.comprobador_lote import crear_motor
+        self.comprobar_lote = bool(_g(g, "AUTONOMO_TAREA_COMPROBAR_LOTE", True))
+        self._lote_torch, self._lote_dev = crear_motor(str(_g(g, "AUTONOMO_TAREA_COMPROBAR_MOTOR", "auto")))
+        self._md, self._md_arbol, self._libre_cache, self._libre_ctx = None, None, {}, None
+        self.lote_aciertos = self.lote_dudas = 0
+        self.lote_tam = max(1, int(_g(g, "AUTONOMO_TAREA_COMPROBAR_LOTE_TAM", 24)))
         # (17-nov) cuRobo (GPU): propone los tramos articulares; los de aquí los verifican
         self.curobo, self.tramos_curobo, self.curobo_rechazos = None, 0, 0
         if str(_g(g, "AUTONOMO_TAREA_PLANIFICADOR", "propio")).lower() == "curobo":
@@ -315,7 +323,10 @@ class Planificador:
         self.afinar_s = float(_g(g, "AUTONOMO_TAREA_PELOTA_AFINAR_S", 2.0))   # 0 = sin parar a afinar
         self.pref_derecho = float(_g(g, "AUTONOMO_TAREA_PELOTA_PREFERIR_DERECHO", 0.3))  # coste por rad de inclinación
         # formas de coger la pelota, en orden de preferencia (13-nov: primero en pinza)
-        self.pel_modos = tuple(_g(g, "AUTONOMO_TAREA_PELOTA_MODOS", ("pinza", "rodeándola", "con los dedos")))
+        self.pel_modos = tuple(_g(g, "AUTONOMO_TAREA_PELOTA_MODOS", ("pinza",)))
+        # (17-nov) la pinza, desde ARRIBA y con pulgar e índice a los lados de la pelota (no por debajo)
+        self.pinza_arriba = bool(_g(g, "AUTONOMO_TAREA_PINZA_DESDE_ARRIBA", True))
+        self.pinza_inc_max = float(_g(g, "AUTONOMO_TAREA_PINZA_INCLINACION_MAX_DEG", 20.0))
         self.pinza_ab = _postura_cfg(g, "AUTONOMO_TAREA_MANO_PINZA_ABIERTA", MANO_PINZA_ABIERTA)
         self.pinza_ce = _postura_cfg(g, "AUTONOMO_TAREA_MANO_PINZA_CERRADA", MANO_PINZA_CERRADA)
         ap = _g(g, "AUTONOMO_TAREA_PINZA_APRIETE", (0.15, 0.30))   # cuánto más se cierra tras tocarla (0..1)
@@ -327,12 +338,51 @@ class Planificador:
         self.T_cam = None if T_mundo_cam is None else np.asarray(T_mundo_cam, float)
         self.dejar_de_pie = False
         self.modo_pelota = None                   # cómo se cogió la pelota en el último plan
+        # (17-nov) escena FIJA (escena_fija.py): mesas, cajonera… escaneadas una vez y guardadas como cajas.
+        # Su superficie entra como cubos limpios (el mapa en vivo ya no los pone) y sus tapas como «suelo»
+        # para mano y brazo; siguen ahí aunque la mano o el brazo las tapen a la cámara
+        from skill_shield.autonomo.escena_fija import EscenaFija
+        self.escena = EscenaFija(g)
+        self._fijo_version, self._fijo_pts, self._tapas_fijas = None, np.zeros((0, 3)), []
+        self._superficies_vivas = []
+        self.apoyo_fijo_tol = float(_g(g, "AUTONOMO_ESCENA_FIJA_APOYO_TOL", 0.05))
+        self._z_fijo_usado = None
+        self._cargar_fijo()
+
+    def _cargar_fijo(self):
+        """(17-nov) Recarga la escena fija si ha cambiado (otro escaneo, o el archivo editado a mano)."""
+        self.escena.actualizar()
+        if self._fijo_version == (self.escena.version, self._res):
+            return
+        self._fijo_version = (self.escena.version, self._res)
+        from skill_shield.autonomo.escena_fija import superficie
+        P = superficie(self.escena.cajas, self._res)
+        V = np.asarray(self.escena.voxeles, float).reshape(-1, 3)
+        self._fijo_pts = np.vstack([P, V]) if len(V) else P
+        self._tapas_fijas = [(float(z), np.asarray(p, float)) for z, p in self.escena.tapas()]
+
+    def _apoyo_fijo(self, p, r):
+        """(17-nov) Altura de la tapa FIJA sobre la que está apoyada una pelota (centro p, radio r), o None."""
+        from skill_shield.autonomo.tsdf import dentro_poligono
+        p = np.asarray(p, float)
+        mejor = None
+        for z, poli in self._tapas_fijas:
+            dz = z + r - p[2]
+            if abs(dz) <= self.apoyo_fijo_tol and dentro_poligono(poli, p[None, :2])[0]:
+                if mejor is None or abs(dz) < abs(mejor + r - p[2]):
+                    mejor = z
+        return mejor
 
     # ── mapa ──
     def poner_mapa(self, centros, res, excluir=()):
         """centros: vóxeles ocupados (N x 3). excluir: [(centro, radio)] que no cuentan."""
         C = self._sin_grupos_sueltos(np.asarray(centros if centros is not None else [], float).reshape(-1, 3),
                                      float(res or 0.02))
+        self._res = float(res or 0.02)
+        self._cargar_fijo()                       # (17-nov) + la escena fija, con su forma limpia
+        if len(self._fijo_pts):
+            C = np.vstack([C, self._fijo_pts])
+        self._superficies = list(self._superficies_vivas) + list(self._tapas_fijas)
         quitado = []
         for c, r in excluir:
             dentro = np.linalg.norm(C - np.asarray(c, float), axis=1) <= float(r)
@@ -472,6 +522,133 @@ class Planificador:
             return max(float(z_m) - float(self.z_suelo_mapa), self.grosor_suelo_zona)
         return self.grosor_suelo_zona
 
+    # ── (17-nov) comprobación del mapa en lote ──
+    def _mapa_dist(self):
+        if not self.comprobar_lote or self._arbol is None or self._arbol_suave is not None:
+            return None
+        if self._md_arbol is not self._arbol:            # (se guarda el árbol mismo, no su id: los id se reusan)
+            from skill_shield.autonomo.comprobador_lote import MapaDistancias
+            self._md = MapaDistancias(self._arbol.data, self._res)
+            self._md_arbol = self._arbol
+        self._ctx_lote()
+        return self._md
+
+    def _ctx_lote(self):
+        ctx = (self._arbol, self._mano_pts, self._carga, getattr(self.choque, "exigido", None))
+        if self._libre_ctx is None or any(a is not b for a, b in zip(ctx, self._libre_ctx)):
+            self._libre_cache, self._libre_ctx = {}, ctx  # otro mapa, otra mano, carga o inicio: se olvida
+
+    def _choque_lote(self):
+        return self.comprobar_lote and hasattr(self.choque, "cumple_lote")
+
+    def _puntos_lote(self, Qs, marcos_lista=None):
+        """(N, M, 3) puntos del robot (lo mismo que mira motivo() contra el mapa) y (M,) sus umbrales."""
+        h = 0.5 * self._res
+        grupos, U = [], []
+        ms = marcos_lista if marcos_lista is not None else [self.c.fk_marcos(q) for q in Qs]
+        R5 = np.stack([m[5][:3, :3] for m in ms])
+        t5 = np.stack([m[5][:3, 3] for m in ms])
+        for pts, u in ((self._mano_pts, self.margen_mapa + h), (self._carga, self.margen_mapa + h)):
+            if pts is not None and len(pts):
+                grupos.append(np.matmul(R5, pts.T).transpose(0, 2, 1) + t5[:, None, :])
+                U.append(np.full(len(pts), u))
+        for marco, pts, _ in self._brazo_pts:
+            R = np.stack([m[marco][:3, :3] for m in ms])
+            t = np.stack([m[marco][:3, 3] for m in ms])
+            grupos.append(np.matmul(R, pts.T).transpose(0, 2, 1) + t[:, None, :])
+            U.append(np.full(len(pts), self.margen_mapa_malla + h))
+        caps = [self.modelo.capsulas(q, m) for q, m in zip(Qs, ms)]
+        for k, c0 in enumerate(caps[0]):
+            if c0.nombre == "base" or (c0.nombre == "mano" and self._mano_pts is not None) or \
+                    (self._brazo_pts and c0.nombre in ("brazo", "antebrazo")):
+                continue
+            n = max(2, int(math.ceil(np.linalg.norm(c0.b - c0.a) / 0.02)) + 1)
+            s_ = np.linspace(0.0, 1.0, n)
+            A = np.stack([cs[k].a for cs in caps])
+            B = np.stack([cs[k].b for cs in caps])
+            grupos.append(A[:, None, :] + s_[None, :, None] * (B - A)[:, None, :])
+            U.append(np.full(n, c0.r + self.margen_mapa_brazo + h))
+        return np.concatenate(grupos, axis=1), np.concatenate(U)
+
+    @staticmethod
+    def _clave_libre(q):
+        return np.asarray(q, float).tobytes()
+
+    def prefiltrar(self, Qs):
+        """Mira de una vez (mapa de distancias en la GPU si hay + árbol solo para lo que queda cerca) qué
+        posturas de Qs chocan con el mapa y cuáles con la mano contra el brazo. Resultado EXACTO (el mismo
+        que postura a postura): motivo() lo usa y solo repite la cuenta en las que chocan, para el texto."""
+        Qs = np.asarray(Qs, float).reshape(-1, 6)
+        md = self._mapa_dist()
+        ch = self._choque_lote()
+        if not len(Qs) or (md is None and not ch):
+            return
+        self._ctx_lote()
+        from skill_shield.autonomo.comprobador_lote import exacto_en_lote
+        ms = [self.c.fk_marcos(q) for q in Qs]
+        def calcular(torch, dev):
+            lm = lc = None
+            if md is not None:
+                P, U = self._puntos_lote(Qs, ms)
+                lm = exacto_en_lote(md, self._arbol, P, U, torch, dev)
+            if ch:
+                lc = self.choque.cumple_lote(ms, torch=torch, dev=dev)
+            return lm, lc
+        try:
+            lm, lc = calcular(self._lote_torch, self._lote_dev)
+        except Exception as e:                           # la GPU nunca debe tumbar el plan
+            if self._lote_torch is None:
+                raise
+            print(f"⚠️  Tarea: comprobación en la GPU falló ({e}): sigo con numpy.")
+            self._lote_torch = self._lote_dev = None
+            lm, lc = calcular(None, None)
+        if len(self._libre_cache) > 200000:
+            self._libre_cache = {}
+        for k, q in enumerate(Qs):
+            self._libre_cache[self._clave_libre(q)] = (None if lm is None else bool(lm[k]),
+                                                       None if lc is None else bool(lc[k]))
+
+    def motivos(self, qs):
+        """motivo() de cada postura de qs, en orden, comprobándolas EN LOTES (de lote_tam): para en
+        cuanto una choca, así no se gasta en las de detrás (un tramo que choca suele hacerlo pronto)."""
+        qs = np.asarray(qs, float).reshape(-1, 6)
+        for k0 in range(0, len(qs), self.lote_tam):
+            trozo = qs[k0:k0 + self.lote_tam]
+            self.prefiltrar(trozo)
+            for q in trozo:
+                yield q, self.motivo(q)
+
+    def _de_cache(self, q, cual):
+        r = self._libre_cache.get(self._clave_libre(q))
+        return None if r is None else r[cual]
+
+    def _contar(self, r):
+        if r:
+            self.lote_aciertos += 1
+        else:
+            self.lote_dudas += 1
+        return r
+
+    def _mapa_libre(self, q, marcos=None):
+        md = self._mapa_dist()
+        if md is None:
+            return False
+        r = self._de_cache(q, 0)
+        if r is None:
+            from skill_shield.autonomo.comprobador_lote import exacto_en_lote
+            P, U = self._puntos_lote(np.asarray(q, float)[None], None if marcos is None else [marcos])
+            r = bool(exacto_en_lote(md, self._arbol, P, U)[0])   # una sola: numpy (la GPU no compensa)
+        return self._contar(r)
+
+    def _choque_libre(self, q, marcos):
+        if not self._choque_lote():
+            return False
+        self._ctx_lote()
+        r = self._de_cache(q, 1)
+        if r is None:                                    # no estaba en un lote: la cuenta exacta, rápida
+            r = self.choque.ok_rapido(marcos)
+        return self._contar(r)
+
     def _bajo_suelo(self, P, solo_discos=False):
         """¿Algún punto de P (mundo) por debajo del «suelo» de las zonas de apoyo?"""
         return bool(self._mascara_suelo(P, solo_discos).any())
@@ -549,7 +726,7 @@ class Planificador:
             if "mano" in (a, b):               # la mano la mira choque_mano, con sus mallas
                 continue
             return f"{NOMBRES.get(a, a)} choca con {NOMBRES.get(b, b)} ({pen * 100:.1f} cm)"
-        m = self.choque.motivo(q)
+        m = None if self._choque_libre(q, marcos) else self.choque.motivo(q)
         if m:
             return m
         if self._suelo is not None or self._discos:
@@ -574,6 +751,8 @@ class Planificador:
                     pts = cap.a + np.linspace(0.0, 1.0, n)[:, None] * (cap.b - cap.a) - np.array([0.0, 0.0, cap.r])
                     if self._bajo_suelo(pts, solo_discos=True):
                         return f"{NOMBRES.get(cap.nombre, cap.nombre)} se metería en la mesa (por debajo de la pelota)"
+        if self._mapa_libre(q, marcos):                  # (17-nov) ya comprobado (en lote, exacto): no choca
+            return None
         for arbol, margen, m_brazo, donde in (
                 (self._arbol, self.margen_mapa, self.margen_mapa_brazo, "un obstáculo del mapa"),
                 (self._arbol_suave, self.margen_suave, self.margen_suave, "la superficie de apoyo")):
@@ -584,7 +763,8 @@ class Planificador:
             for pts, que in ((self._mano_pts, "la mano"), (self._carga, "la pelota que lleva")):
                 if pts is None:
                     continue
-                d, i = arbol.query(pts @ Tb[:3, :3].T + Tb[:3, 3])
+                # (17-nov) con tope: solo importa si algo está más cerca que el umbral (~8 veces más rápido)
+                d, i = arbol.query(pts @ Tb[:3, :3].T + Tb[:3, 3], distance_upper_bound=umbral)
                 if float(np.min(d)) < umbral:
                     if arbol is self._arbol and len(self._choques) < 5000:
                         self._choques.append(arbol.data[i[int(np.argmin(d))]])
@@ -594,8 +774,9 @@ class Planificador:
                 # entre joints, pero el tramo del brazo del FR5 va desplazado ~14 cm de ella
                 for marco, pts, nombre in self._brazo_pts:
                     T = marcos[marco]
-                    d, _ = arbol.query(pts @ T[:3, :3].T + T[:3, 3])
-                    if float(np.min(d)) < self.margen_mapa_malla + 0.5 * self._res:
+                    u = self.margen_mapa_malla + 0.5 * self._res
+                    d, _ = arbol.query(pts @ T[:3, :3].T + T[:3, 3], distance_upper_bound=u)
+                    if float(np.min(d)) < u:
                         return f"{nombre} toca {donde}"
             for cap in self.modelo.capsulas(q, marcos):
                 if cap.nombre == "base" or (cap.nombre == "mano" and self._mano_pts is not None):
@@ -604,8 +785,9 @@ class Planificador:
                     continue                              # ya mirados con sus mallas
                 n = max(2, int(math.ceil(np.linalg.norm(cap.b - cap.a) / 0.02)) + 1)
                 pts = cap.a + np.linspace(0.0, 1.0, n)[:, None] * (cap.b - cap.a)
-                d, _ = arbol.query(pts)
-                if float(np.min(d)) < cap.r + m_brazo + 0.5 * self._res:
+                u = cap.r + m_brazo + 0.5 * self._res
+                d, _ = arbol.query(pts, distance_upper_bound=u)
+                if float(np.min(d)) < u:
                     return f"{NOMBRES.get(cap.nombre, cap.nombre)} toca {donde}"
         return None
 
@@ -648,7 +830,7 @@ class Planificador:
         destino = np.asarray(destino, float)
         n = max(1, int(math.ceil(np.linalg.norm(destino - p0) / paso_m)))
         qs = [q0]
-        for k in range(1, n + 1):
+        for k in range(1, n + 1):                        # primero la IK de toda la recta…
             p = p0 + (destino - p0) * (k / n)
             q = self._ik_cercana(T_de(R, p - R @ p_loc), qs[-1])
             if q is None:
@@ -656,10 +838,10 @@ class Planificador:
             if float(np.max(np.abs(q - qs[-1]))) > self.salto_max:
                 raise ErrorPlan(f"{nombre}: no se puede seguir la recta sin un salto (el brazo se "
                                 "estiraría del todo o la muñeca pasaría por una singularidad)")
-            m = self.motivo(q)
+            qs.append(np.asarray(q, float))
+        for _, m in self.motivos(qs[1:]):                # …luego las comprobaciones, en lotes (GPU)
             if m:
                 raise ErrorPlan(f"{nombre}: {m}")
-            qs.append(np.asarray(q, float))
         qs = np.array(qs)
         self.comprobar_continuo(qs, nombre)
         return qs
@@ -690,8 +872,19 @@ class Planificador:
         P, U = self._puntos_holgura(q)
         if self._arbol is None or not len(P):
             return np.inf, P
-        d, _ = self._arbol.query(P)
-        return float(np.min(d - U)), P
+        md = self._mapa_dist()
+        if md is not None:
+            # (17-nov) con el mapa de distancias: cada punto tiene su holgura entre est y est + 2h; la mínima
+            # solo puede estar entre los que tienen est ≤ mín + 2h → búsqueda exacta solo de esos pocos
+            est = md.leer(P) - md.h - U
+            e0 = float(est.min())
+            if e0 >= 0.25:
+                return e0, P
+            cerca = est <= e0 + 2.0 * md.h
+            d, _ = self._arbol.query(P[cerca], distance_upper_bound=float(U[cerca].max()) + 0.25)
+            return float(np.min(np.minimum(d, 10.0) - U[cerca])), P
+        d, _ = self._arbol.query(P, distance_upper_bound=float(U.max()) + 0.25)
+        return float(np.min(np.minimum(d, 10.0) - U)), P
 
     def comprobar_continuo(self, qs, nombre="tramo"):
         """(17-nov) Entre cada dos posturas seguidas de qs (que ya valen): si algún punto se mueve más
@@ -719,8 +912,7 @@ class Planificador:
         q0, q1 = np.asarray(q0, float), np.asarray(q1, float)
         n = max(1, int(math.ceil(float(np.max(np.abs(q1 - q0))) / self.paso)))
         qs = q0 + (q1 - q0) * np.linspace(0.0, 1.0, n + 1)[:, None]
-        for q in qs[1:]:
-            m = self.motivo(q)
+        for q, m in self.motivos(qs[1:]):
             if m:
                 raise ErrorPlan(f"{nombre}: {m}")
         self.comprobar_continuo(qs, nombre)
@@ -770,6 +962,9 @@ class Planificador:
             return PlanificadorCuRobo(os.path.normpath(ruta), self.modelo.entorno, lim,
                                       float(g.get("AUTONOMO_MAPA_RES", 0.02)),
                                       intentos=int(g.get("AUTONOMO_CUROBO_INTENTOS", 4)),
+                                      semillas=int(g.get("AUTONOMO_CUROBO_SEMILLAS", 8)),
+                                      desconocido_extra=g.get("AUTONOMO_CUROBO_DESCONOCIDO_EXTRA", 0.02),
+                                      activacion=g.get("AUTONOMO_CUROBO_ACTIVACION"),
                                       cuda_graph=bool(g.get("AUTONOMO_CUROBO_CUDA_GRAPH", False)))
         except Exception as e:
             global _AVISO_CUROBO
@@ -791,7 +986,7 @@ class Planificador:
         y su carga, suelo de las mesas, J4…) y entre medias. ErrorPlan si no hay o no vale."""
         try:
             self.curobo.actualizar_mundo(self, clave=(id(self), getattr(self, "_version_mundo", 0),
-                                                      self._macizo_hecho, id(self._arbol)))
+                                                      self._macizo_hecho, id(self._arbol), id(self._visto)))
             qs = self.curobo.plan(q0, q1)
         except Exception as e:                           # la GPU nunca debe tumbar el plan
             print(f"⚠️  Tarea: fallo de cuRobo ({e}): sigo con el planificador propio.")
@@ -857,8 +1052,8 @@ class Planificador:
     # ── rodear obstáculos (paso 8): RRT-Connect en el espacio de joints + atajos ──
     def _libre_tramo(self, qa, qb):
         n = max(1, int(math.ceil(float(np.max(np.abs(qb - qa))) / self.paso)))
-        for k in range(1, n + 1):
-            if self.motivo(qa + (qb - qa) * (k / n)) is not None:
+        for _, m in self.motivos(qa + (qb - qa) * (np.arange(1, n + 1) / n)[:, None]):
+            if m is not None:
                 return False
         try:
             self.comprobar_continuo(qa + (qb - qa) * np.linspace(0.0, 1.0, n + 1)[:, None])
@@ -1148,7 +1343,10 @@ class Planificador:
                 return r
 
             soluciones = []
-            n_max = max(1, self.alternativas if self._visto is not None else 1)
+            # (17-nov) con cuRobo (GPU) cada tramo cuesta milisegundos: se buscan varios planes completos y se
+            # elige el mejor (longitud y lo no visto); sin él, el primero (comparar en CPU es lento)
+            n_max = max(1, self.alternativas_gpu if self.curobo is not None else
+                        (self.alternativas if self._visto is not None else 1))
             t_lim = time.monotonic() + 8.0                  # s como mucho buscando alternativas
 
             def buscar(k, q_actual, elegidas, tramos):
@@ -1400,8 +1598,9 @@ class Planificador:
         o None (entonces no hay coste por lo desconocido)."""
         self._visto = visto if visto and visto.get("conocido") is not None else None
         # (17-nov) las mesas que ha encontrado el mapa (planos): suelo para mano y brazo, como la medida
-        self._superficies = [(float(z), np.asarray(p, float)) for z, p in ((visto or {}).get("superficies") or [])
-                             if len(p) >= 3]
+        self._superficies_vivas = [(float(z), np.asarray(p, float)) for z, p in ((visto or {}).get("superficies") or [])
+                                   if len(p) >= 3]
+        self._superficies = self._superficies_vivas + list(self._tapas_fijas)    # (17-nov) + las tapas fijas
         self.zonas_apoyo(self._zonas_actuales)
 
     def desconocido(self, qs, cada=3):
@@ -1438,11 +1637,20 @@ class Planificador:
         por encima. Es más fiable que la altura que da el estéreo en la propia pelota (sus bordes)."""
         T = np.array(T_pelota, float)
         self._apoyo_ok = False
+        r = float(diametro) / 2.0
+        # (17-nov) si está sobre una tapa de la escena FIJA, su altura (escaneada con calma) manda
+        self._cargar_fijo()
+        z_fijo = self._apoyo_fijo(T[:3, 3], r) if self._tapas_fijas else None
+        self._z_fijo_usado = z_fijo               # (la tapa fija ya es «suelo»: no hace falta la mesa medida)
+        if z_fijo is not None:
+            if apoyo_z is None or abs(float(apoyo_z) - z_fijo) > 0.005:
+                print(f"🧱 Tarea: la pelota está sobre una tapa de la escena fija: apoyo a z = {z_fijo:+.3f} m"
+                      + ("" if apoyo_z is None else f" (la medida en vivo daba {float(apoyo_z):+.3f})"))
+            apoyo_z = z_fijo
         if apoyo_z is None:
             return T
-        r = float(diametro) / 2.0
         dz = float(apoyo_z) + r - T[2, 3]
-        if abs(dz) <= self.apoyo_tol:
+        if abs(dz) <= (max(self.apoyo_tol, self.apoyo_fijo_tol) if z_fijo is not None else self.apoyo_tol):
             T[2, 3] += dz
             self._apoyo_ok = True
         else:
@@ -1461,7 +1669,7 @@ class Planificador:
         y acercarse; cerrada y con la pelota al retirarse, llevarla y dejarla), y alrededor de la
         pelota y del sitio de dejada la mesa se trata aparte (zonas_apoyo)."""
         T_pelota = self.apoyar(T_pelota, diametro, apoyo_z)
-        self.poner_mesa(apoyo_z if self._apoyo_ok else None, apoyo_poligono)
+        self.poner_mesa(apoyo_z if self._apoyo_ok and self._z_fijo_usado is None else None, apoyo_poligono)
         todos = {"pinza": ("en pinza", 0.0), "rodeándola": ("rodeándola", 0.0),
                  "con los dedos": ("con los dedos", self.pel_dedos)}
         modos = []
@@ -1479,6 +1687,7 @@ class Planificador:
         self.inc_max = self.pel_inc_max
         try:
             for clave, nombre, extra in modos:
+                self.inc_max = self.pinza_inc_max if (clave == "pinza" and self.pinza_arriba) else self.pel_inc_max
                 try:
                     plan = self._plan_pelota(q0, T_pelota, diametro, T_dejada, extra,
                                              pinza=self.pinza(diametro) if clave == "pinza" else None)
@@ -1515,7 +1724,7 @@ class Planificador:
                     for k in ks}
 
         ss = np.linspace(0.0, 1.0, 21)
-        gaps, mids = [], []
+        gaps, mids, lineas = [], [], []
         for s_ in ss:
             y = yemas_mano(self._ruta_xml, tuple(sorted((k, round(v, 4)) for k, v in postura(s_).items())), 0.004)
             if "pulgar" not in y or "indice" not in y:
@@ -1524,6 +1733,7 @@ class Planificador:
             t, i = (T_mm_w[:3, :3] @ y[d] + T_mm_w[:3, 3] for d in ("pulgar", "indice"))
             gaps.append(float(np.linalg.norm(t - i)))
             mids.append((t + i) / 2)
+            lineas.append(i - t)
         gaps = np.array(gaps)
         objetivo = float(diametro)
         if objetivo > gaps[0] - 0.015 or objetivo < 0.02:      # más de lo que abre (con holgura) o diminuta
@@ -1533,11 +1743,33 @@ class Planificador:
         u = (gaps[k - 1] - objetivo) / max(gaps[k - 1] - gaps[k], 1e-9)
         s_c = float(ss[k - 1] + u * (ss[k] - ss[k - 1]))
         punto = mids[k - 1] + u * (mids[k] - mids[k - 1])
-        res = dict(s=s_c, punto=punto, contacto=postura(s_c),
+        linea = lineas[k - 1] + u * (lineas[k] - lineas[k - 1])    # pulgar → índice, en mano_mount
+        res = dict(s=s_c, punto=punto, linea=linea, contacto=postura(s_c),
                    cerrada=postura(min(1.0, s_c + self.pinza_apriete[0])),
                    apretar=postura(min(1.0, s_c + self.pinza_apriete[1])))
         cache[clave] = res
         return res
+
+    def T_pinza_arriba(self, T_m, ang, d, a, punto, linea):
+        """(17-nov) Pinza DESDE ARRIBA: la mano como en T_palma (llegando por a, girada ang) y luego
+        inclinada lo justo para que la línea pulgar-índice quede HORIZONTAL: los dos dedos cogen la
+        pelota por los lados, a la altura de su centro (antes el pulgar iba por debajo, rozando la mesa)."""
+        T = self.T_palma(T_m, ang, d, a, punto)
+        R = T[:3, :3]
+        lw = R @ np.asarray(linea, float)
+        lw = lw / max(float(np.linalg.norm(lw)), 1e-9)
+        k = np.cross(lw, [0.0, 0.0, 1.0])
+        if float(np.linalg.norm(k)) > 1e-6 and abs(lw[2]) > 1e-6:
+            th = math.asin(max(-1.0, min(1.0, float(lw[2]))))
+            Rk = min((_rot_eje(k, sg * th) for sg in (1.0, -1.0)), key=lambda M: abs(float((M @ lw)[2])))
+            R = Rk @ R
+        p_m = np.asarray(T_m, float)[:3, 3]
+        return T_de(R, p_m + R[:, 0] * d - R @ np.asarray(punto, float))
+
+    def _pose_pelota(self, T_m, d, punto, pinza):
+        if pinza is not None and self.pinza_arriba and pinza.get("linea") is not None:
+            return lambda a, ang: self.T_pinza_arriba(T_m, ang, d, a, punto, pinza["linea"])
+        return lambda a, ang: self.T_palma(T_m, ang, d, a, punto)
 
     def _plan_pelota(self, q0, T_pelota, diametro, T_dejada, extra=0.0, pinza=None):
         q0 = self._empezar(q0)
@@ -1588,16 +1820,23 @@ class Planificador:
                         raise ErrorPlan(f"subir tras dejarla: {m}")
             return qs
         with self.con_mano(*abierta):
-            ops_p, info = self._opciones(T_p, q0, lambda a, ang: self.T_palma(T_p, ang, d_palma + self.pel_subida, a,
-                                                                          punto),
+            ops_p, info = self._opciones(T_p, q0, self._pose_pelota(T_p, d_palma + self.pel_subida, punto, pinza),
                                          coger, todas=True)
         if not ops_p:
             raise self._con_aviso(str(self._no_encuentro("llegar a la pelota (ni desde arriba ni de lado)", info))
                                   + self._que_estorba(c, r), c)
-        with self.con_mano(*cerrada):
-            ops_d, info = self._opciones(T_d, q0, lambda a, ang: self.T_palma(T_d, ang, d_palma + self.pel_subida, a,
-                                                                          punto),
-                                         dejar, todas=True)
+        inc_coger, self.inc_max = self.inc_max, self.pel_inc_max   # (17-nov) «desde arriba» es para COGERLA; para
+        try:                                                       # soltarla (ya la lleva) vale cualquier inclinación
+            with self.con_mano(*cerrada):
+                ops_d, info = self._opciones(T_d, q0, self._pose_pelota(T_d, d_palma + self.pel_subida, punto, pinza),
+                                             dejar, todas=True)
+                if not ops_d and pinza is not None and self.pinza_arriba:
+                    # soltarla con la pinza nivelada no se puede: con la mano en su orientación normal (la holgura
+                    # de toda la mano con la mesa se sigue comprobando)
+                    ops_d, info = self._opciones(T_d, q0, self._pose_pelota(T_d, d_palma + self.pel_subida, punto, None),
+                                                 dejar, todas=True)
+        finally:
+            self.inc_max = inc_coger
         if not ops_d:
             raise self._con_aviso(self._no_encuentro("llevar la pelota al punto de dejada", info), c_d,
                                   "acerca el punto de dejada")
@@ -1687,7 +1926,7 @@ class Planificador:
     def _previa_pelota(self, q0, T_pelota, diametro, apoyo_z=None, apoyo_poligono=None):
         """Como planificar_pelota (mismas formas de cogerla, en el mismo orden), hasta encima."""
         T_pelota = self.apoyar(T_pelota, diametro, apoyo_z)
-        self.poner_mesa(apoyo_z if self._apoyo_ok else None, apoyo_poligono)
+        self.poner_mesa(apoyo_z if self._apoyo_ok and self._z_fijo_usado is None else None, apoyo_poligono)
         todos = {"pinza": ("en pinza", 0.0), "rodeándola": ("rodeándola", 0.0),
                  "con los dedos": ("con los dedos", self.pel_dedos)}
         modos = []
@@ -1705,6 +1944,7 @@ class Planificador:
         self.inc_max = self.pel_inc_max
         try:
             for clave, nombre, extra in modos:
+                self.inc_max = self.pinza_inc_max if (clave == "pinza" and self.pinza_arriba) else self.pel_inc_max
                 try:
                     plan = self._previa_pelota_modo(q0, T_pelota, diametro, extra,
                                                     pinza=self.pinza(diametro) if clave == "pinza" else None)
@@ -1752,8 +1992,7 @@ class Planificador:
             return qs
 
         with self.con_mano(*abierta):
-            ops_p, info = self._opciones(T_p, q0, lambda a, ang: self.T_palma(T_p, ang, d_palma + self.pel_subida, a,
-                                                                          punto),
+            ops_p, info = self._opciones(T_p, q0, self._pose_pelota(T_p, d_palma + self.pel_subida, punto, pinza),
                                          coger, todas=True)
         if not ops_p:
             raise self._con_aviso(str(self._no_encuentro("llegar a la pelota (ni desde arriba ni de lado)", info))
@@ -2054,6 +2293,31 @@ class Tarea:
         self.afinado_cm = None
         self.afinar_min = float(_g(self.cfg, "AUTONOMO_TAREA_AFINAR_MIN_M", 0.005))
         self.afinar_max = float(_g(self.cfg, "AUTONOMO_TAREA_AFINAR_MAX_M", 0.10))
+        # (17-nov) el planificador (mallas de la mano, pinza, cuRobo en la GPU) se prepara al arrancar, en otro
+        # hilo: así el primer «Planificar» no paga esos segundos
+        self._lock_pl = threading.Lock()
+        if fabrica_planificador is None and _g(self.cfg, "AUTONOMO_TAREA_PRECALENTAR", True):
+            threading.Thread(target=self._precalentar, daemon=True, name="Tarea-precalentar").start()
+
+    def _precalentar(self):
+        try:
+            t0 = time.monotonic()
+            with self._lock_pl:
+                if self._planificador is None:
+                    self._planificador = self._crear_planificador()
+                pl = self._planificador
+                for d in (0.065, 0.07):
+                    pl.pinza(d)
+                for k in ("pelota_abierta", "pelota_cerrada"):
+                    pl._nube_postura(k)
+                if pl._choque_lote():
+                    pl.choque._rejillas()                # mapas de distancias de los eslabones (~1 s)
+            gpu = [t for t, si in (("cuRobo", getattr(pl, "curobo", None) is not None),
+                                   ("comprobaciones", getattr(pl, "_lote_torch", None) is not None)) if si]
+            print(f"🔥 Tarea: planificador listo en {time.monotonic() - t0:.1f} s"
+                  + (f" ({' y '.join(gpu)} en la GPU)" if gpu else " (todo en la CPU)"))
+        except Exception as e:
+            print(f"⚠️  Tarea: no se pudo preparar el planificador por adelantado ({e}): se hará al planificar.")
 
     # ── órdenes de la web ──
     def orden(self, mando, contexto):
@@ -2138,9 +2402,10 @@ class Tarea:
     def _planificar(self, d):
         t0 = time.monotonic()
         try:
-            if self._planificador is None:
-                self._planificador = (self._fabrica_plan() if self._fabrica_plan is not None
-                                      else self._crear_planificador())
+            with self._lock_pl:                         # (si se está preparando al arrancar, se espera)
+                if self._planificador is None:
+                    self._planificador = (self._fabrica_plan() if self._fabrica_plan is not None
+                                          else self._crear_planificador())
             pl = self._planificador
             res, centros = d["mapa"] if d.get("mapa") else (0.02, None)
             n_vox = pl.poner_mapa(centros, res, d.get("excluir", ()))

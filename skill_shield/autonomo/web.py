@@ -11,6 +11,7 @@ Lectura (abierta):
                         cámara de cabeza calibrada (para superponerlo a la imagen real)
   POST /api/vista       girar / acercar / mover / vista predefinida del gemelo (sin contraseña)
   POST /api/mapa {"accion": "ver" | "ocultar" | "borrar"}   obstáculos en el gemelo (borrar pide contraseña)
+                 {"accion": "fijo_escanear" | "fijo_olvidar"}  escena fija (17-nov, pide contraseña)
   POST /api/objetivo {"id": n | null}   herramienta objetivo (de la lista de detectadas)
 Mandos (con contraseña AUTONOMO_WEB_CLAVE; sesión por cookie):
   POST /api/login {"clave": "..."}      ·  POST /api/logout
@@ -77,6 +78,7 @@ class ServicioWeb:
         self.vista = dict(self._vista_inicial)
         self.ver_obstaculos = True
         self._mapa_borrar_n = 0
+        self._fijo_n = dict(escanear=0, olvidar=0)       # (17-nov) escena fija
         self._canales = {}
         self._lock = threading.Lock()
         self.clave = clave or None
@@ -220,6 +222,8 @@ class ServicioWeb:
                 self.ver_obstaculos = accion == "ver"
             elif accion == "borrar":
                 self._mapa_borrar_n += 1
+            elif accion in ("fijo_escanear", "fijo_olvidar"):      # (17-nov) escena fija
+                self._fijo_n[accion[5:]] += 1
             else:
                 return False
         self._escribir_mando()
@@ -254,6 +258,8 @@ class ServicioWeb:
                          pedal_obligatorio=self._pedal_obligatorio, vista=self.vista,
                          ver_obstaculos=self.ver_obstaculos, objetivo_id=self.objetivo_id,
                          mapa_borrar_id=f"{self._reset_base}-m{self._mapa_borrar_n}",
+                         **{f"fijo_{k}_id": (f"{self._reset_base}-f{k[0]}{n}" if n else None)
+                            for k, n in self._fijo_n.items()},
                          reset_id=f"{self._reset_base}-{self._reset_n}" if self._reset_n else None,
                          tarea=self._tarea, t=time.time())
         c.escribir(json.dumps(datos).encode())
@@ -409,11 +415,14 @@ def crear_app(servicio):
     @app.post("/api/mapa")
     async def mapa(request: Request):
         accion = (await _cuerpo(request)).get("accion")
-        if accion == "borrar" and not servicio.autorizado(_token(request)):
+        if accion in ("borrar", "fijo_escanear", "fijo_olvidar") and not servicio.autorizado(_token(request)):
             return _no_autorizado()                     # borrar afecta a lo que se esquiva
         ok = servicio.mapa(accion)
         return JSONResponse({"ok": ok, "msg": {"ver": "Obstáculos visibles", "ocultar": "Obstáculos ocultos",
-                                               "borrar": "Mapa borrado: se vuelve a llenar en un momento"}
+                                               "borrar": "Mapa borrado: se vuelve a llenar en un momento",
+                                               "fijo_escanear": "Escaneando la escena fija: que no haya nada "
+                                                                "que se mueva ni el brazo delante",
+                                               "fijo_olvidar": "Escena fija olvidada"}
                              .get(accion, "Acción desconocida")}, status_code=200 if ok else 400)
 
     @app.post("/api/tarea")

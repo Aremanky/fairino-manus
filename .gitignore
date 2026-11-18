@@ -234,8 +234,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Calibración cámara→robot (datos de cada robot; calib_posturas.json SÍ se versiona)
-tablero_calib_robot.png
 
 # autocorrección de la calibración con el brazo (la genera el modo autónomo)
 *.correccion.json

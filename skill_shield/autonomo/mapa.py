@@ -19,6 +19,7 @@ cada vóxel al obstáculo más cercano (transformada de distancia): comprobar un
 robot es mirar esa distancia en unos pocos puntos de su eje. Ver ColisionMapa.
 """
 import math
+import os
 import time
 
 import numpy as np
@@ -137,6 +138,25 @@ class MapaOcupacion:
         from skill_shield.autonomo.tsdf import SeguidorSuperficies
         self.seguidor = SeguidorSuperficies(olvido_s=self.olvido_s)
         self._t_planos = 0.0
+        # (17-nov) escena FIJA (escena_fija.py): dentro de sus cajas (+ margen) la cámara no pone obstáculos
+        self.fijo, self.margen_fijo, self._mascara_fija = [], 0.03, None
+
+    def poner_fijo(self, cajas, margen=None):
+        """Cajas de la escena fija (escena_fija.py) o [] para quitarlas. Lo de dentro (+ margen) ya lo
+        sabe el planificador con su forma limpia: la cámara solo añade lo que cambia."""
+        from skill_shield.autonomo.escena_fija import en_cajas
+        self.fijo = list(cajas or [])
+        if margen is not None:
+            self.margen_fijo = float(margen)
+        self._mascara_fija = (en_cajas(self._centros, self.fijo, self.margen_fijo).reshape(self.L.shape)
+                              if self.fijo else None)
+        self._dist = self._dist_desc = None
+
+    def _puntos_fijos(self, P):
+        if not self.fijo or not len(P):
+            return np.zeros(len(P), bool)
+        from skill_shield.autonomo.escena_fija import en_cajas
+        return en_cajas(P, self.fijo, self.margen_fijo)
 
     # ── utilidades ──
     def borrar(self):
@@ -177,6 +197,8 @@ class MapaOcupacion:
         e = np.full(self.L.shape, DESCONOCIDO, np.int8)
         reciente = (ahora - self.t_visto) <= self.olvido_s
         ocupado = self._ocupado_bruto() & reciente
+        if self._mascara_fija is not None:               # (17-nov) lo fijo lo pone el planificador, limpio
+            ocupado &= ~self._mascara_fija
         if self.min_grupo > 1 and ocupado.any():
             from scipy.ndimage import label
             etiquetas, n = label(ocupado, structure=np.ones((3, 3, 3), bool))   # vecinos en 26 direcciones
@@ -255,6 +277,7 @@ class MapaOcupacion:
             quitar |= q
         for caja in self.excluir:
             quitar |= _en_caja(P, caja)
+        quitar |= self._puntos_fijos(P)                  # (17-nov) la escena fija
         idx = idx[~quitar]
 
         # aciertos: vóxeles con al menos min_puntos puntos en esta imagen
@@ -314,7 +337,8 @@ class MapaOcupacion:
         excl = np.zeros(len(P), bool)
         for caja in self.excluir:
             excl |= _en_caja(P, caja)
-        sup = ~(robot | suelo | excl)
+        # (17-nov) la escena fija: lo que cae en sus cajas solo dice «libre hasta aquí» (como el robot)
+        sup = ~(robot | suelo | excl | self._puntos_fijos(P))
         d_sup = np.zeros(h * w, np.float32)
         d_lib = np.zeros(h * w, np.float32)
         pz = p.ravel()
@@ -420,6 +444,7 @@ class MapaOcupacion:
             self.L[d] = np.minimum(self.L[d], self.L_MIN)
             self.D[dentro] = 1.0                         # (TSDF) el robot estaba ahí: libre
             self.W[dentro] = np.maximum(self.W[dentro], self.W_MIN)
+            self.t_visto.reshape(-1)[dentro] = time.time()   # (17-nov) y eso se SABE: no es desconocido
             self._dist = self._dist_desc = None
         return int(dentro.sum())
 
@@ -617,6 +642,8 @@ def empaquetar_visto(mapa, ahora=None):
     pasar por lo que no sabe qué hay."""
     import json
     conocido = mapa.estado(ahora) != DESCONOCIDO
+    if getattr(mapa, "_mascara_fija", None) is not None:
+        conocido |= mapa._mascara_fija                  # (17-nov) lo fijo se sabe aunque no se vea
     cab = np.array([mapa.res, *mapa.origen, *mapa.n], np.float32)
     mesas = json.dumps([[round(float(z), 4), np.round(np.asarray(p, float), 4).tolist()]
                         for z, p in (mapa.superficies() if hasattr(mapa, "superficies") else [])]).encode()
@@ -749,6 +776,69 @@ class ConstructorMapa:
         self._nube_barrido = None
         self._t_autocalib = 0.0
         self._t_mapa = np.zeros(3)                       # corrección con la que se hizo el mapa actual
+        # (17-nov) escena FIJA (escena_fija.py): se escanea una vez desde la web y, desde entonces, el mapa
+        # solo pone obstáculos fuera de sus cajas
+        from skill_shield.autonomo.escena_fija import EscenaFija
+        self.escena = EscenaFija(g)
+        self.margen_fijo = float(g.get("AUTONOMO_ESCENA_FIJA_MARGEN", 0.03))
+        self.escaneo_s = float(g.get("AUTONOMO_ESCENA_FIJA_ESCANEO_S", 10.0))
+        self.fijo_grupo_min = int(g.get("AUTONOMO_ESCENA_FIJA_GRUPO_MIN", 20))
+        self.fijo_llenado_min = float(g.get("AUTONOMO_ESCENA_FIJA_LLENADO_MIN", 0.45))
+        self._escaneo_hasta = None                       # time.monotonic() en que acaba el escaneo en marcha
+        self._fijo_vistos = {}                           # último id visto de cada mando de la escena fija
+        self.aviso_fijo = ""
+        self._aplicar_fijo()
+
+    # ── (17-nov) escena fija ──
+    def _aplicar_fijo(self):
+        """Mientras se escanea, nada fijo (hay que ver TODO); si no, las cajas de la escena fija."""
+        self.mapa.poner_fijo([] if self._escaneo_hasta is not None else self.escena.cajas, self.margen_fijo)
+
+    def escanear_fijo(self, s=None):
+        """Empieza a escanear la escena fija: mapa en blanco y, a los s segundos, se ajustan las cajas."""
+        self._escaneo_hasta = time.monotonic() + float(s if s is not None else self.escaneo_s)
+        self.aviso_fijo = ""
+        self._aplicar_fijo()
+        self.mapa.borrar()
+        print(f"🧱 Escena fija: escaneando {self.escaneo_s:.0f} s (que no haya nada que se mueva ni el brazo delante)…")
+
+    def terminar_escaneo(self):
+        from skill_shield.autonomo import escena_fija as EF
+        self._escaneo_hasta = None
+        C = self.mapa.centros_ocupados()
+        caps = [(c.a, c.b, c.r) for c in getattr(self.modelo.entorno, "capsulas", []) or []]
+        quitar = self.mapa._cerca(C, caps, margen=0.05) if caps else None      # el soporte ya está en el modelo
+        esc = EF.ajustar(C, self.mapa.res, self.mapa.superficies(), self.mapa.z_suelo, quitar=quitar,
+                         grupo_min=self.fijo_grupo_min, llenado_min=self.fijo_llenado_min)
+        if not esc["cajas"] and not esc["voxeles"]:
+            self.aviso_fijo = "el escaneo no ha encontrado nada: no se guarda"
+            print(f"⚠️  Escena fija: {self.aviso_fijo}.")
+        else:
+            EF.guardar(self.escena.ruta, esc, calibracion=os.path.basename(self.ruta_calib),
+                       correccion_calibracion=[round(float(v), 4) for v in self.correccion.t])
+            print(f"💾 Escena fija guardada en {self.escena.ruta}: {len(esc['cajas'])} cajas"
+                  + (f" y {len(esc['voxeles'])} cubos sueltos" if esc["voxeles"] else ""))
+            for c in esc["cajas"]:
+                print(f"     · {c['nombre']}: centro {np.round(c['centro'], 2).tolist()}, "
+                      f"{2 * c['semi'][0]:.2f} × {2 * c['semi'][1]:.2f} × {2 * c['semi'][2]:.2f} m, giro {c['yaw_deg']:+.0f}°")
+            self.escena.actualizar()
+        self._aplicar_fijo()
+        return esc
+
+    def olvidar_fijo(self):
+        from skill_shield.autonomo.escena_fija import olvidar
+        olvidar(self.escena.ruta)
+        self._escaneo_hasta = None
+        self.escena.actualizar()
+        self._aplicar_fijo()
+        print("🧱 Escena fija olvidada (el archivo queda como .bak).")
+
+    def _mando_nuevo(self, m, clave):
+        """¿Hay una orden nueva con este id? (la primera vez solo se apunta: no se repite una orden vieja)"""
+        i = m.get(clave)
+        nuevo = i is not None and clave in self._fijo_vistos and i != self._fijo_vistos[clave]
+        self._fijo_vistos[clave] = i
+        return nuevo
 
     def _recargar_calibracion(self):
         import os
@@ -822,6 +912,10 @@ class ConstructorMapa:
                 self.correccion.borrar()                 # y vuelta a la calibración del archivo
                 self._t_mapa = self.correccion.t.copy()
             self._borrado_visto = bid
+        if self._mando_nuevo(m, "fijo_escanear_id"):
+            self.escanear_fijo()
+        if self._mando_nuevo(m, "fijo_olvidar_id"):
+            self.olvidar_fijo()
         self._excluir_web = [(np.asarray(c, float), np.asarray(s, float)) for c, s in (m.get("mapa_excluir") or [])]
 
     def _q_real(self):
@@ -835,8 +929,9 @@ class ConstructorMapa:
         return (q, caps) if real else (None, None)
 
     @staticmethod
-    def quitar_pixeles(prof_mm, halos):
-        """Copia de la profundidad sin los píxeles de los halos [(u, v, radio px, z mín, z máx)]."""
+    def quitar_pixeles(prof_mm, halos, K=None, T_mundo_cam=None):
+        """Copia de la profundidad sin los píxeles de los halos [(u, v, radio px, z mín, z máx[, fila, z mundo mín])].
+        Con K y T_mundo_cam, lo que esté por debajo de «z mundo mín» (la mesa) no se quita (17-nov)."""
         if not halos:
             return prof_mm
         prof = prof_mm.copy()
@@ -851,6 +946,11 @@ class ConstructorMapa:
             yy, xx = np.mgrid[y0:y1, x0:x1]
             trozo = prof[y0:y1, x0:x1]
             quita = ((xx - u) ** 2 + (yy - v) ** 2 <= r * r) & (trozo >= z0 * 1000.0) & (trozo <= z1 * 1000.0)
+            if len(halo) > 6 and halo[6] is not None and K is not None and T_mundo_cam is not None and quita.any():
+                z = trozo.astype(np.float32) * 0.001
+                P = np.stack([(xx - K[0, 2]) / K[0, 0] * z, (yy - K[1, 2]) / K[1, 1] * z, z], -1)
+                zw = P @ np.asarray(T_mundo_cam, float)[2, :3] + float(T_mundo_cam[2, 3])
+                quita &= zw > float(halo[6])                 # la mesa (por debajo de la pelota) se queda
             trozo[quita] = 0
         return prof
 
@@ -862,6 +962,8 @@ class ConstructorMapa:
         if ahora - self._t_calib > 1.0:
             self._t_calib = ahora
             self._recargar_calibracion()
+            if self.escena.actualizar():                 # (17-nov) escena fija nueva o cambiada a mano
+                self._aplicar_fijo()
         self._mandos()
         if self.T is None:
             self.aviso = "sin calibrar (camara_robot.json)"
@@ -883,7 +985,7 @@ class ConstructorMapa:
         else:
             caps_r, caps_m = (), ()
         nube = self._nube_barrido if q is not None else None
-        prof_mm = self.quitar_pixeles(prof_mm, halos)        # sin el halo de las pelotas (12-nov)
+        prof_mm = self.quitar_pixeles(prof_mm, halos, K, self.T_efectiva())   # sin el halo de las pelotas (12-nov)
         self.mapa.actualizar(prof_mm, K, self.T_efectiva(), caps_r, capsulas_mano=caps_m, img_bgr=img_bgr,
                              nube_robot=nube)
         if q is not None:
@@ -911,6 +1013,15 @@ class ConstructorMapa:
                             self.mapa.vaciar(gr, gm)
                 except Exception as e:
                     print(f"⚠️  [autónomo] Autocorrección de la calibración: {e}")
+        if self._escaneo_hasta is not None and ahora >= self._escaneo_hasta:
+            try:
+                self.terminar_escaneo()
+            except Exception as e:                       # que un fallo del ajuste no tire la cámara
+                import traceback
+                traceback.print_exc()
+                self._escaneo_hasta = None
+                self.aviso_fijo = f"fallo al ajustar la escena fija: {e}"
+                self._aplicar_fijo()
         if self.canal_mapa is not None:
             b = empaquetar(self.mapa.centros_ocupados(), self.mapa.res, self.max_dibujo)
             if len(b) <= self.canal_mapa.capacidad:
@@ -939,4 +1050,12 @@ class ConstructorMapa:
                     hz=round(self.hz, 1), ms=self.mapa.ultima.get("ms"), aviso=self.aviso,
                     correccion=[round(float(v), 4) for v in self.correccion.t],
                     correccion_texto=self.correccion.texto() if self.correccion.n_medidas or
-                    np.linalg.norm(self.correccion.t) > 0 else "")
+                    np.linalg.norm(self.correccion.t) > 0 else "",
+                    fijo=self.estado_fijo())
+
+    def estado_fijo(self):
+        if self._escaneo_hasta is not None:
+            quedan = max(0.0, self._escaneo_hasta - time.monotonic())
+            return dict(escaneando=True, texto=f"escaneando la escena fija… {quedan:.0f} s", cajas=0)
+        return dict(escaneando=False, texto=self.escena.texto() + (f" · {self.aviso_fijo}" if self.aviso_fijo else ""),
+                    cajas=len(self.escena.cajas), fecha=self.escena.fecha)

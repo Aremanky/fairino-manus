@@ -14,9 +14,30 @@ import numpy as np
 from skill_shield.autonomo.curobo_fr5 import mundo as M
 
 
+def _radio_max_esferas(robot):
+    """Radio de la esfera de colisión más gruesa de la configuración de cuRobo (0,06 m si no se encuentra)."""
+    rs = []
+
+    def buscar(x):
+        if isinstance(x, dict):
+            if "radius" in x and isinstance(x["radius"], (int, float)):
+                rs.append(float(x["radius"]))
+            for v in x.values():
+                buscar(v)
+        elif isinstance(x, list):
+            for v in x:
+                buscar(v)
+    buscar(robot)
+    return max(rs) if rs else 0.06
+
+
 class PlanificadorCuRobo:
     def __init__(self, ruta_robot, entorno, limites, res=0.02, intentos=4, cuda_graph=False, margen_entorno=0.0,
-                 dispositivo="cuda:0", calentar=True):
+                 dispositivo="cuda:0", calentar=True, semillas=8, desconocido_extra=0.02, activacion=None):
+        """semillas: trayectorias que cuRobo optimiza A LA VEZ en la GPU para cada tramo (se queda con la mejor).
+        desconocido_extra (17-nov): lo no visto se le da a cuRobo como «a (esfera más gruesa + esto) de un
+        obstáculo»: no es choque, pero con la distancia de activación (por defecto, esto + la esfera más
+        gruesa) su optimizador lo penaliza."""
         import torch
         import yaml
         from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
@@ -38,10 +59,16 @@ class PlanificadorCuRobo:
         vacia = np.full(tuple(n), 1.0, np.float32)
         with open(ruta_robot) as f:
             robot = yaml.safe_load(f)
+        self.r_max = _radio_max_esferas(robot)
+        self.desconocido_dist = self.r_max + float(desconocido_extra) if desconocido_extra is not None else None
+        act = float(activacion) if activacion is not None else (
+            self.desconocido_dist + 0.02 if self.desconocido_dist is not None else 0.0025)
         cfg = MotionPlannerCfg.create(
             robot=robot, scene_model=self._escena(vacia, origen + 0.5 * n * self.res, n * self.res),
             collision_cache={"cuboid": len(self._cajas) + 4, "capsule": len(self._caps) + 4, "voxel": 1},
-            device_cfg=self.dev, use_cuda_graph=bool(cuda_graph), graph_planner_algorithm="rrt")
+            device_cfg=self.dev, use_cuda_graph=bool(cuda_graph), graph_planner_algorithm="rrt",
+            num_trajopt_seeds=int(semillas), num_ik_seeds=max(32, 4 * int(semillas)),
+            optimizer_collision_activation_distance=act)
         self.mp = MotionPlanner(cfg)
         self.nombres = list(self.mp.joint_names)
         orden = [f"joint{i}" for i in range(1, 7)]
@@ -72,7 +99,7 @@ class PlanificadorCuRobo:
         """Carga en cuRobo el mundo actual del planificador `pl` (si ha cambiado desde la última vez)."""
         if clave is not None and clave == self._clave_mundo:
             return
-        sdf, centro, dims = M.mundo_del_planificador(pl, self.limites, self.res)
+        sdf, centro, dims = M.mundo_del_planificador(pl, self.limites, self.res, self.desconocido_dist)
         self.mp.update_world(self._escena(sdf, centro, dims))
         self._clave_mundo = clave
 
