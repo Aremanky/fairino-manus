@@ -1401,12 +1401,18 @@ AUTONOMO_MAPA_HOJA_MARGEN = (0.005, 0.005, 0.03)   # (x, y, grosor): el grosor c
 # (18-nov, tarde) «Ella» es dónde pueden caer SUS cubos (pelotas.zona_propia): una cápsula a lo largo del rayo de la
 # cámara con radio r + medio cubo en diagonal (1,7 cm con cubos de 2 cm) y larga como el ruido de la profundidad a
 # esa distancia (RUIDO_PROF_K · d²) + lo que la TSDF engorda las superficies hacia la cámara. Con r + 1 cm, a ~1 m la
-# cara de la pelota que mira a la cámara salía como obstáculo y la mano no podía bajar a cogerla. De lado no se quita
-# nada más: lo que haya al lado de la pelota sigue contando. Este margen se SUMA a eso (0 = solo lo calculado)
-AUTONOMO_MAPA_MARGEN_PELOTA = 0.0
+# cara de la pelota que mira a la cámara salía como obstáculo y la mano no podía bajar a cogerla. Este margen se SUMA
+# a eso (0 = solo lo calculado).
+# (18-nov, noche) 1,5 cm DE LADO también: el estéreo «corre» el borde de la pelota hacia un lado (plan_fallido
+# 20261118_134028: 6 cubos a la profundidad de la pelota y a su altura, todos a su IZQUIERDA vista desde la cámara,
+# entre 0,5 y 2,4 cm fuera de la cápsula, y nada al otro lado). Con 0 no había plan; con 1,5 cm, sí. Lo que esté a
+# más de ~1,5 cm del borde de la pelota sigue contando (la verde de test_tarea, a 9,75 cm, sigue siendo obstáculo)
+AUTONOMO_MAPA_MARGEN_PELOTA = 0.015
 # píxeles de la pelota que no van al mapa: su círculo × factor (+ extra_px) y de «delante» m delante de su cara a
-# «detras» m detrás de su fondo, más el ruido de la profundidad a esa distancia (se suma solo)
-AUTONOMO_MAPA_HALO_PELOTA = dict(factor=1.1, extra_px=2, delante=0.02, detras=0.02)
+# «detras» m detrás de su fondo, más el ruido de la profundidad a esa distancia (se suma solo).
+# (18-nov, noche) factor 1,1 → 1,5: lo mismo que el margen de arriba, pero antes de que entre en el mapa (1,5 cm
+# fuera de una pelota de 5,8 cm ≈ ×1,5). Solo quita píxeles a la profundidad de la pelota y por encima de la mesa
+AUTONOMO_MAPA_HALO_PELOTA = dict(factor=1.5, extra_px=2, delante=0.02, detras=0.02)
 AUTONOMO_HERRAMIENTAS_N_ESTABLE = 5      # imágenes seguidas antes de darla por buena
 AUTONOMO_HERRAMIENTAS_OLVIDO_S  = 2.0    # sin verla este tiempo → deja de aparecer
 
@@ -1474,7 +1480,7 @@ AUTONOMO_TAREA_OPCIONES    = 3      # formas de llegar a cada sitio que se guard
 AUTONOMO_TAREA_USAR_MAPA  = True     # esquivar (comprobar) también el mapa de obstáculos de la cámara
 AUTONOMO_TAREA_EXCLUIR_RADIO = 0.09   # (18-nov) m alrededor del centro de cada MARCADOR que no cuentan (antes 0.15):
                                      # lo justo para sus esquinas (marcador de 12,4 cm); lo de alrededor cuenta
-AUTONOMO_TAREA_EXCLUIR_PELOTA_MARGEN = 0.0    # (18-nov, tarde) margen EXTRA sobre la zona de la pelota que no cuenta
+AUTONOMO_TAREA_EXCLUIR_PELOTA_MARGEN = 0.015  # (18-nov, noche: 0 → 1,5 cm, ver AUTONOMO_MAPA_MARGEN_PELOTA) (18-nov, tarde) margen EXTRA sobre la zona de la pelota que no cuenta
                                      # como obstáculo (la misma que se quita del mapa: AUTONOMO_MAPA_MARGEN_PELOTA)
 # (18-nov) Corrección FIJA de dónde se coge la pelota, en m, vista en la imagen de la cámara de cabeza (la de la web):
 # (derecha, lejos, arriba). La mano la cogía ~1,5 cm a la DERECHA → derecha = -0.015. Si empeora, pon +0.015.

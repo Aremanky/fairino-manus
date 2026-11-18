@@ -99,6 +99,7 @@ Cambios de la revisión (todos con su clave en el bloque «(18-nov) Revisión de
 - **TOPP-RA** (opcional; lo instala `./arrancar_nivel6.sh` si falta): tramos articulares lo más rápidos posible respetando velocidad y aceleración de cada joint; sin él, el trapecio de siempre.
 - **cuRobo con goalset:** en cada sitio, una sola llamada a la GPU elige la mejor de varias formas de llegar (`AUTONOMO_TAREA_OPCIONES_GPU`) y su camino (`MotionPlanner.plan_pose` con varias poses).
 - **Carga de la brida:** `python diagnosticos/identificar_carga.py --leer` (la que tiene la controladora) y sin `--leer` la mide con el robot (pares de J4-J6 en ~12 posturas de la muñeca, con el pedal) → `FR5_CARGA_CDM_MM`.
+- **¿Qué no deja coger la pelota?** `python diagnosticos/ver_estorbo.py [plan_fallido_….npz]`: vuelve a planificar el plan fallido y dice qué cubos estorban (distancia, altura, lado visto desde la cámara) y deja una vista desde arriba en `diagnosticos/estorbo_*.png`.
 - **Código:** `ejecucion.py` (Ejecutor, ManoActiva) y `mundo_tarea.py` salen de `tarea.py`. **Banco de pruebas** con los planes guardados: `python diagnosticos/banco_planes.py --guardar antes.json` y, tras un cambio, `--comparar antes.json`.
 
 ### Herramientas con marcadores ArUco (paso 5)

@@ -1466,6 +1466,17 @@ class Planificador:
     def _no_encuentro(self, que, info):
         razones, fallos = info
         txt = f"no encuentro cómo {que}"
+        if fallos:
+            # (18-nov) si hay posturas de llegada que el brazo SÍ alcanza y fallan después (al bajar), ESO es lo que
+            # impide el plan: va lo primero. Antes salía primero el motivo «más avanzado» de las que ni se alcanzan
+            # (p. ej. «la mano queda demasiado cerca del brazo», aunque fueran 15 de 700) y despistaba
+            n = sum(fallos.values())
+            txt += (f": {'la' if n == 1 else f'las {n}'} postura{'' if n == 1 else 's'} de llegada que el brazo sí "
+                    f"alcanza {'falla' if n == 1 else 'fallan'} después · {fallos.most_common(1)[0][0]}")
+            if razones:
+                r = razones.most_common(1)[0][0]
+                txt += f" (las demás no se alcanzan: casi siempre {r})"
+            return ErrorPlan(txt)
         if razones:
             # el motivo más «avanzado» (motivo() mira en orden: límites → choques → mano → mapa):
             # si alguna postura solo fallaba por el mapa, eso es lo que hay que contar
@@ -1475,8 +1486,6 @@ class Planificador:
             if r.startswith("la muñeca"):
                 txt += (" (el marcador está demasiado cerca del robot o mirándolo de frente: aléjalo "
                         "o gíralo un poco)")
-        if fallos:
-            txt += f" · {fallos.most_common(1)[0][0]}"
         return ErrorPlan(txt)
 
     def opciones_palma(self, T_m, q_ref, que):
