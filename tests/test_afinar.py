@@ -203,6 +203,57 @@ def test_afinar_para_si_la_pelota_se_ha_ido(cadena):
     assert t.estado == "error" and "Vuelve a planificar" in t.texto
 
 
+def test_fraccion_tapada_por_el_antebrazo(cadena):
+    """(18-nov) La pelota justo detrás del antebrazo (visto desde la cámara) está tapada entera; apartada, no."""
+    m = cadena.fk_marcos(Q0)
+    medio = 0.5 * (m[2][:3, 3] + m[3][:3, 3])                       # mitad del antebrazo
+    T = np.eye(4)
+    T[:3, 3] = medio + [0.0, 0.0, 0.5]                              # la cámara, encima
+    pl = TA.Planificador(cadena, G, T)
+    assert pl.fraccion_tapada(Q0, medio - [0.0, 0.0, 0.4], 0.033) > 0.95
+    assert pl.fraccion_tapada(Q0, medio + [0.6, 0.0, 0.5], 0.033) == 0.0
+    assert TA.Planificador(cadena, G).fraccion_tapada(Q0, medio, 0.033) is None     # sin calibración
+
+
+def test_afinar_no_se_fia_si_el_brazo_tapa_la_pelota(cadena, monkeypatch):
+    """(18-nov) Con la pelota tapada por el brazo, lo que mide la cámara no vale: aunque «la vea» a 15 cm,
+    no para (antes: «¿se ha movido?») y sigue con la bajada planificada."""
+    monkeypatch.setattr(TA.Planificador, "fraccion_tapada", lambda self, q, c, r, n=9: 1.0)
+    t, i_b = _hasta_afinar(cadena, np.array([0.15, 0.0, 0.0]))
+    assert t.estado != "error", t.texto
+    assert t.ejec.i > i_b and t.afinado_tapada == 1.0 and t.afinado_cm is None
+    assert np.allclose(t.plan.pelota["c"], BOLA)                     # la bajada, la del plan
+
+
+def test_afinar_sin_verla_recoloca_con_la_correccion_de_ahora(cadena, monkeypatch):
+    """(18-nov) Tapada por el brazo: no se mide, pero la pelota del plan se recoloca con la corrección de la
+    cámara que hay ahora (hecha con el brazo junto a la pelota) y se rehace la bajada."""
+    monkeypatch.setattr(TA.Planificador, "fraccion_tapada", lambda self, q, c, r, n=9: 1.0)
+    T0 = np.eye(4)
+    T1 = T_traslacion(np.array([0.02, -0.025, 0.01]))                # la corrección se ha movido 3,4 cm
+    fr5 = FR5Falso()
+    t = TA.Tarea(dict(G, AUTONOMO_TAREA_MOVER_MANO=False, AUTONOMO_TAREA_PELOTA_CORRECCION_M=(0, 0, 0)), ".", fr5,
+                 simulacro=False, fabrica_planificador=lambda: TA.Planificador(cadena, G))
+    t.orden({"tarea": dict(accion="planificar", id="r1")},
+            lambda: dict(q_real=fr5.q, herramientas=_lista(BOLA), objetivo_id=100, mapa=None, T_mundo_cam=T0))
+    import time
+    t0 = time.time()
+    while t.estado == "planificando" and time.time() - t0 < 120:
+        time.sleep(0.05)
+        t.paso(0.0, fr5.q, False)
+    assert t.estado == "lista", t.texto
+    i_b = [f.nombre for f in t.plan.fases].index("Bajar a la pelota")
+    t.orden({"tarea": dict(accion="ejecutar", id="r2")}, lambda: dict(q_real=fr5.q))
+    ctx = lambda: dict(q_real=fr5.q, herramientas=_lista(BOLA + [0.3, 0, 0]), mapa=None, T_mundo_cam=T1)  # noqa: E731
+    for _ in range(20000):
+        t.paso(1 / 60, fr5.q, True, ctx)
+        if t.estado == "error" or t.ejec.i > i_b:
+            break
+    assert t.estado != "error", t.texto
+    assert np.allclose(t.plan.pelota["c"], BOLA + [0.02, -0.025, 0.01])  # recolocada (la roja lejana no cuenta)
+    assert t.afinado_recolocado_cm == pytest.approx(100 * np.linalg.norm([0.02, -0.025, 0.01]), abs=0.05)
+
+
 # ── el constructor del mapa entero: brazo visto con la calibración desajustada ───────────────
 def test_constructor_corrige_la_calibracion_y_quita_el_brazo(tmp_path):
     import shutil

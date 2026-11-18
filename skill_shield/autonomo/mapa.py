@@ -907,7 +907,9 @@ class ConstructorMapa:
             return
         bid = m.get("mapa_borrar_id")
         if bid is not None and bid != self._borrado_visto:
-            if self._borrado_visto is not None or m.get("mapa_borrar_nuevo"):
+            # (18-nov) «…-m0» es una web recién arrancada (p. ej. reiniciada por el vigilante), no un «Borrar mapa»:
+            # el id cambia porque cada web tiene su base, pero no hay que tirar el mapa ni la autocorrección
+            if (self._borrado_visto is not None and not str(bid).endswith("-m0")) or m.get("mapa_borrar_nuevo"):
                 self.mapa.borrar()
                 self.correccion.borrar()                 # y vuelta a la calibración del archivo
                 self._t_mapa = self.correccion.t.copy()

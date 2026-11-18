@@ -121,3 +121,18 @@ def test_altura_de_la_mesa_con_un_plano_alrededor_de_la_pelota():
     assert abs(zm2 - zt) < 0.004 and poli is not None and Delaunay(np.array(poli)).find_simplex(c[:2]) >= 0
     P = np.array(poli)
     assert (P[:, 0].max() - P[:, 0].min()) > 0.4 and (P[:, 1].max() - P[:, 1].min()) > 0.3
+
+
+def test_el_aro_rojo_de_una_articulacion_no_es_una_pelota():
+    """(18-nov) La tapa de las articulaciones del FR5: disco blanco con un ANILLO rojo. Su contorno exterior es
+    redondo, pero está hueco: no es una pelota (salía como «Pelota roja» flotando junto al brazo)."""
+    img = np.full((480, 640, 3), 120, np.uint8)
+    prof = np.full((480, 640), 600, np.uint16)
+    rojo = cv2.cvtColor(np.uint8([[[178, 190, 160]]]), cv2.COLOR_HSV2BGR)[0, 0].tolist()
+    cv2.circle(img, (320, 240), 40, rojo, 7)                                  # el aro
+    cv2.circle(img, (320, 240), 33, (235, 235, 235), -1)                      # la tapa blanca
+    assert not [1 for e, *_ in candidatas(img, prof, K, catalogo(config)) if e["nombre"] == "Pelota roja"]
+    # una pelota con un brillo blanco en medio sí sigue contando
+    img2, prof2 = _escena([("Pelota roja", (0.0, 0.0, 0.9), 0.08)])
+    cv2.circle(img2, (325, 235), 4, (255, 255, 255), -1)
+    assert [1 for e, *_ in candidatas(img2, prof2, K, catalogo(config)) if e["nombre"] == "Pelota roja"]

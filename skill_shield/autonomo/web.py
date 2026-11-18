@@ -85,6 +85,9 @@ class ServicioWeb:
         self.permitir_sin_pedal = bool(permitir_sin_pedal)
         self.latido_s = float(latido_s)
         self._sesiones = {}                       # token → caducidad (time.time())
+        # (18-nov) si el modo autónomo pasa un secreto, los tokens van firmados con él: una web reiniciada por
+        # el vigilante reconoce las sesiones abiertas antes de caerse (no hay que volver a meter la clave)
+        self._secreto = (os.environ.get("SKILL_SHIELD_WEB_SECRETO") or "").encode() or None
         self._pulsando = {}                       # token → último latido del pedal (time.time())
         self._pedal_obligatorio = bool(pedal_obligatorio) or not self.permitir_sin_pedal
         self._reset_base = uuid.uuid4().hex[:8]   # cambia en cada arranque de la web
@@ -169,9 +172,24 @@ class ServicioWeb:
         token = secrets.token_urlsafe(24)
         with self._lock:
             ahora = time.time()
+            if self._secreto is not None:
+                cad = int(ahora + SESION_S)
+                token = f"{token}.{cad}.{self._firma(token, cad)}"
             self._sesiones = {k: v for k, v in self._sesiones.items() if v > ahora}
             self._sesiones[token] = ahora + SESION_S
         return token
+
+    def _firma(self, base, cad):
+        return hmac.new(self._secreto, f"{base}.{cad}".encode(), "sha256").hexdigest()[:32]
+
+    def _token_firmado(self, token):
+        """Caducidad de un token firmado con el secreto de esta sesión del modo autónomo, o None."""
+        try:
+            base, cad, firma = str(token).rsplit(".", 2)
+            cad = int(cad)
+        except ValueError:
+            return None
+        return cad if hmac.compare_digest(firma, self._firma(base, cad)) else None
 
     def salir(self, token):
         with self._lock:
@@ -184,6 +202,10 @@ class ServicioWeb:
             return True
         with self._lock:
             cad = self._sesiones.get(token or "")
+            if cad is None and token and self._secreto is not None:
+                cad = self._token_firmado(token)          # (18-nov) de antes de un reinicio de la web
+                if cad is not None and cad > time.time():
+                    self._sesiones[token] = cad
             return cad is not None and cad > time.time()
 
     # ── mandos ──

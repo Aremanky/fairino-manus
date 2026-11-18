@@ -182,6 +182,8 @@ footer b{color:var(--azul)}
 .tostada.ver{opacity:1;transform:translateX(-50%)}
 .desconexion{display:none;background:var(--mal);color:#fff;text-align:center;font-size:13.5px;padding:8px 16px}
 .desconexion.ver{display:block}
+.reiniciando{display:none;background:var(--aviso);color:#fff;text-align:center;font-size:13.5px;padding:6px 16px}
+.reiniciando.ver{display:block}
 /* pantallas grandes: letra y vídeo algo mayores */
 @media (min-width:1800px){body{font-size:16px}.tarjeta>header h2{font-size:14px}.pedal{height:200px}.yemas{height:180px}}
 /* portátil pequeño / tableta horizontal: la mano en una columna */
@@ -200,6 +202,7 @@ footer b{color:var(--azul)}
 </head>
 <body>
 <div class="desconexion" id="desconexion">Sin conexión con el PC del robot. Reintentando…</div>
+<div class="reiniciando" id="reiniciando"></div>
 <header class="cab"><div class="dentro">
   <img src="/logo.png" alt="IDI · Investigación + Desarrollo + Innovación · Grupo Elecnor">
   <span class="sep"></span>
@@ -388,6 +391,10 @@ function pintar(e){
   E = e;
   const vivo = e.edad_s != null && e.edad_s < 2;
   $("desconexion").classList.remove("ver");
+  // (18-nov) procesos que el vigilante está reiniciando (cámara, gemelo; la web, si se ve esto, ya ha vuelto)
+  const caidos = Object.entries(e.procesos || {}).filter(([, p]) => p && !p.vivo);
+  $("reiniciando").textContent = caidos.length ? "Reiniciando: " + caidos.map(([n, p]) => n + (p.motivo ? ` (${p.motivo})` : "")).join(" · ") + "…" : "";
+  $("reiniciando").classList.toggle("ver", caidos.length > 0);
   const f = e.fr5 || {}, m = e.mano || {}, t = e.tactil || {}, c = e.camara || {}, k = e.control || {}, s = e.sesion || {};
   autorizado = !!s.autorizado; requiereClave = !!s.requiere_clave;
 

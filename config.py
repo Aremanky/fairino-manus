@@ -1280,6 +1280,13 @@ AUTONOMO_WEB_CLAVE    = _clave_web()
 AUTONOMO_PEDAL_OBLIGATORIO = True        # cómo arranca la opción «Pedal obligatorio» de la web
 AUTONOMO_PERMITIR_SIN_PEDAL = True       # False = la web NO puede desactivar el pedal
 AUTONOMO_PEDAL_LATIDO_S = 0.35
+# (18-nov) Vigilante (skill_shield/autonomo/vigilante.py): si la cámara, la web o el gemelo de la web se caen o
+# se cuelgan (AUTONOMO_VIGILAR_SIN_DATOS_S sin señales, pasado el arranque), se reinician solos. Si vuelve a
+# caerse enseguida (p. ej. la cámara desenchufada), espera cada vez más entre intentos, hasta ESPERA_MAX_S.
+AUTONOMO_VIGILAR = True
+AUTONOMO_VIGILAR_SIN_DATOS_S = 6.0
+AUTONOMO_VIGILAR_GRACIA_S = 25.0         # s de arranque en los que no se le pide nada (abrir la OAK, cargar MuJoCo)
+AUTONOMO_VIGILAR_ESPERA_MAX_S = 30.0
 # Gemelo en la web (render_gemelo.py): MuJoCo dibujado sin ventana, solo la escena (sin menús)
 AUTONOMO_SIM_WEB      = True             # False = sin gemelo en la web
 AUTONOMO_VENTANA_MUJOCO = True           # False = sin ventana de MuJoCo en el PC (solo la web)
@@ -1316,6 +1323,10 @@ AUTONOMO_MAPA_HZ       = 4.0             # actualizaciones por segundo
 AUTONOMO_CAM_RELLENAR_HUECOS = 0     # radio de relleno de huecos del estéreo (la teleop usa STEREO_HOLE_FILLING)
 AUTONOMO_CAM_FILTRO_TEMPORAL = False
 AUTONOMO_CAM_CONFIANZA = 200         # confianza del estéreo (0-255, más bajo = más estricto)
+# (18-nov) Escala de la profundidad del estéreo (1.0 = tal cual). A ~0,9 m la OAK puede medir algún % de más y la
+# mano baja unos cm más lejos (y más abajo) que la pelota. Medirla: un cartón plano en el centro de la imagen a
+# D mm (cinta, desde el frontal de la cámara); si el «centro:» del vídeo marca M mm, poner D / M (p. ej. 0.97)
+AUTONOMO_CAM_ESCALA_PROF = 1.0
 AUTONOMO_MAPA_Z_MIN    = 0.35        # m: más cerca la OAK-D no mide (lo que salga es ruido)
 # Rastro del brazo (12-nov): el robot se quita del mapa en todas sus poses de los últimos BARRIDO_S
 # (la profundidad llega con retraso) y los cubos por los que pasa quedan libres.
@@ -1382,7 +1393,13 @@ AUTONOMO_MAPA_QUITAR_HOJAS = True
 # puntos sueltos alrededor y detrás de ella que la «envolvían» de cubos. Esos píxeles no van al mapa
 # (lo de debajo de la pelota, la mesa, sí). Las pelotas tampoco cuentan como obstáculo.
 AUTONOMO_MAPA_SIN_HALO_PELOTAS = True
-AUTONOMO_MAPA_HOJA = (1.2, 1.3, 1.3)
+# (18-nov) lo que se quita del mapa en cada marcador: SOLO el marcador (antes (1.2, 1.3, 1.3): toda la hoja y lo que
+# hubiera alrededor). En lados del marcador desde su centro (medio ancho, hasta arriba, hasta abajo) + margen (m)
+AUTONOMO_MAPA_HOJA = (0.6, 0.6, 0.6)
+AUTONOMO_MAPA_HOJA_MARGEN = (0.005, 0.005, 0.03)   # (x, y, grosor): el grosor cubre el ruido de la profundidad
+# (18-nov) alrededor de cada pelota se quita del mapa solo ELLA (antes: su círculo ×1,4 hasta 30 cm por detrás + 4 cm)
+AUTONOMO_MAPA_MARGEN_PELOTA = 0.01
+AUTONOMO_MAPA_HALO_PELOTA = dict(factor=1.1, extra_px=2, delante=0.02, detras=0.02)
 AUTONOMO_HERRAMIENTAS_N_ESTABLE = 5      # imágenes seguidas antes de darla por buena
 AUTONOMO_HERRAMIENTAS_OLVIDO_S  = 2.0    # sin verla este tiempo → deja de aparecer
 
@@ -1401,6 +1418,9 @@ AUTONOMO_PELOTAS = [
     dict(nombre="Pelota roja", colores=[((0, 120, 60), (7, 255, 255)), ((168, 120, 60), (179, 255, 255))],
          diametro=None, color_gemelo=(0.9, 0.1, 0.15)),
 ]
+# (18-nov) Parte del círculo que tiene que ser del color: el anillo rojo de las tapas de las articulaciones del
+# FR5 es redondo por fuera pero hueco por dentro y salía como «Pelota roja» flotando junto al brazo. 0 = no mirar
+AUTONOMO_PELOTAS_RELLENO_MIN = 0.7
 AUTONOMO_PELOTAS_N_ESTABLE = 5
 AUTONOMO_PELOTAS_OLVIDO_S  = 2.0
 
@@ -1439,7 +1459,12 @@ AUTONOMO_TAREA_DIRECCIONES = 8      # direcciones probadas en cada inclinación
 AUTONOMO_TAREA_OPCIONES    = 3      # formas de llegar a cada sitio que se guardan (por si el camino entre ellos choca)
 # Comprobaciones del plan
 AUTONOMO_TAREA_USAR_MAPA  = True     # esquivar (comprobar) también el mapa de obstáculos de la cámara
-AUTONOMO_TAREA_EXCLUIR_RADIO = 0.15  # m alrededor de cada MARCADOR que no cuentan como obstáculo (pelotas: su radio + 2 cm)
+AUTONOMO_TAREA_EXCLUIR_RADIO = 0.09   # (18-nov) m alrededor del centro de cada MARCADOR que no cuentan (antes 0.15):
+                                     # lo justo para sus esquinas (marcador de 12,4 cm); lo de alrededor cuenta
+AUTONOMO_TAREA_EXCLUIR_PELOTA_MARGEN = 0.01   # (18-nov) la pelota (+1 cm, antes +3 cm) no cuenta como obstáculo
+# (18-nov) Corrección FIJA de dónde se coge la pelota, en m, vista en la imagen de la cámara de cabeza (la de la web):
+# (derecha, lejos, arriba). La mano la cogía ~1,5 cm a la DERECHA → derecha = -0.015. Si empeora, pon +0.015.
+AUTONOMO_TAREA_PELOTA_CORRECCION_M = (-0.015, 0.0, 0.0)
 AUTONOMO_TAREA_MARGEN_MAPA = 0.03   # m de margen de la MANO con los obstáculos del mapa
 AUTONOMO_TAREA_MARGEN_MAPA_BRAZO = 0.015  # m de margen del brazo (sus cápsulas ya son más gordas que él)
 AUTONOMO_TAREA_GUARDAR_FALLOS = True  # si no hay plan, guardar pose + sitios + mapa en diagnosticos/
@@ -1543,6 +1568,10 @@ AUTONOMO_TAREA_PLANES_GUARDADOS = 10
 AUTONOMO_TAREA_PELOTA_AFINAR_S = 2.0
 AUTONOMO_TAREA_AFINAR_MIN_M = 0.005
 AUTONOMO_TAREA_AFINAR_MAX_M = 0.10
+# (18-nov) Si al afinar el propio robot tapa más de esta parte de la pelota a la cámara (con la cámara
+# detrás del robot, el antebrazo suele quedar justo delante al pararse encima), no se mide: lo que asoma
+# lleva la profundidad del brazo mezclada y parece que la pelota «se ha movido». Se sigue con el plan.
+AUTONOMO_TAREA_AFINAR_TAPADA_MAX = 0.25
 AUTONOMO_TAREA_MARGEN_PROPIO = 0.05          # m: cubos pegados al robot al planificar = el propio robot
 AUTONOMO_TAREA_MARGEN_MAPA_MALLA = 0.02      # m entre las mallas del brazo y el mapa (el brazo va desplazado de sus cápsulas)
 # Formas de coger la pelota, en orden de preferencia (13-nov): "pinza" (pulgar contra índice y medio,

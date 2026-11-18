@@ -71,13 +71,25 @@ def profundidad_en(prof_mm, u, v, r):
     return float(np.median(z)) * 0.001 if z.size >= 5 else None
 
 
-def candidatas(img_bgr, prof_mm, K, cat, min_area=60, min_redondez=0.6):
+def relleno(m, c):
+    """(18-nov) Parte del contorno c que es de verdad del color (píxeles de la máscara m dentro de c / su área).
+    Una pelota sale casi entera (≈1); un ARO (el anillo rojo de las tapas de las articulaciones del FR5) tiene el
+    mismo contorno exterior redondo pero está hueco por dentro (≈0,2-0,4)."""
+    x, y, w, h = cv2.boundingRect(c)
+    dentro = np.zeros((h, w), np.uint8)
+    cv2.drawContours(dentro, [c - np.array([x, y])], -1, 255, -1)
+    n = int(np.count_nonzero(dentro))
+    return float(np.count_nonzero(m[y:y + h, x:x + w][dentro > 0])) / max(n, 1)
+
+
+def candidatas(img_bgr, prof_mm, K, cat, min_area=60, min_redondez=0.6, min_relleno=0.7):
     """[(entrada del catálogo, centro 3D en la cámara, diámetro m, (u, v, r_px))] de una imagen."""
     hsv = cv2.cvtColor(cv2.GaussianBlur(img_bgr, (5, 5), 0), cv2.COLOR_BGR2HSV)
     f = 0.5 * (K[0, 0] + K[1, 1])
     out = []
     for e in cat:
-        cs, _ = cv2.findContours(mascara(hsv, e["colores"]), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        m = mascara(hsv, e["colores"])
+        cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for c in cs:
             area = cv2.contourArea(c)
             if area < min_area:
@@ -85,6 +97,8 @@ def candidatas(img_bgr, prof_mm, K, cat, min_area=60, min_redondez=0.6):
             (u, v), r = cv2.minEnclosingCircle(c)
             if r < 3 or area / (math.pi * r * r) < min_redondez:
                 continue
+            if min_relleno and relleno(m, c) < min_relleno:
+                continue                                        # (18-nov) hueco por dentro: un aro, no una pelota
             z = profundidad_en(prof_mm, u, v, r)
             if z is None:
                 continue
@@ -227,6 +241,11 @@ class DetectorPelotas(ConCorreccion):
         self.salto_m = float(salto_m)
         self.medir_apoyo = bool(g.get("AUTONOMO_PELOTAS_MEDIR_APOYO", True))
         self.mesa_m = float(g.get("AUTONOMO_PELOTAS_MESA_RADIO", 0.35))   # m alrededor donde se mide la mesa
+        self.min_relleno = float(g.get("AUTONOMO_PELOTAS_RELLENO_MIN", 0.7))   # (18-nov) aros fuera
+        # (18-nov) lo que se quita del mapa alrededor de cada pelota: solo ella (+ este margen); lo de alrededor cuenta
+        self.margen_mapa = float(g.get("AUTONOMO_MAPA_MARGEN_PELOTA", 0.01))
+        self.halo = dict(factor=1.1, extra_px=2, delante=0.02, detras=0.02)
+        self.halo.update(g.get("AUTONOMO_MAPA_HALO_PELOTA") or {})
         self.pistas = {}
         self._sig = ID_BASE
         self.T_mundo_cam, self._mtime, self._t_calib = None, None, 0.0
@@ -251,7 +270,7 @@ class DetectorPelotas(ConCorreccion):
     def paso(self, img_bgr, K, prof_mm, ahora=None):
         ahora = time.time() if ahora is None else ahora
         self._recargar(time.monotonic())
-        self.ultimas = candidatas(img_bgr, prof_mm, K, self.cat)
+        self.ultimas = candidatas(img_bgr, prof_mm, K, self.cat, min_relleno=self.min_relleno)
         usadas = set()
         for e, p, diam, uvr in sorted(self.ultimas, key=lambda c: c[1][2]):
             libres = [s for i, s in self.pistas.items() if s.e is e and i not in usadas
@@ -323,15 +342,23 @@ class DetectorPelotas(ConCorreccion):
         r = s.diam / 2.0
         # (17-nov) desde 1 cm por encima de su parte de abajo: la MESA de debajo no se quita del mapa (antes la
         # caja bajaba 2 cm por debajo de la pelota y dejaba un agujero en la mesa justo donde hay que cogerla)
-        z0, z1 = c[2] - r + 0.01, c[2] + r + 0.02
-        return [float(c[0]), float(c[1]), float(0.5 * (z0 + z1))], [r + 0.02, r + 0.02, float(0.5 * (z1 - z0))]
+        m = self.margen_mapa                              # (18-nov) antes 2 cm
+        z0, z1 = c[2] - r + 0.01, c[2] + r + m
+        return [float(c[0]), float(c[1]), float(0.5 * (z0 + z1))], [r + m, r + m, float(0.5 * (z1 - z0))]
 
-    def pixeles_halo(self, factor=1.4, extra_px=3, delante=0.05, detras=0.30):
+    def pixeles_halo(self, factor=None, extra_px=None, delante=None, detras=None):
         """(12-nov) Píxeles de la profundidad que NO van al mapa: alrededor de cada pelota vista en
         la última imagen (su círculo × factor) y desde un poco delante de ella hasta bastante
         detrás. En el borde de una pelota el estéreo mezcla la pelota con el fondo y salen puntos
         sueltos detrás y alrededor de ella: en el mapa la «envolvían» de cubos que no existen.
-        [(u, v, radio px, z mínima m, z máxima m)]."""
+        [(u, v, radio px, z mínima m, z máxima m)].
+        (18-nov) Por defecto ya solo la pelota: su círculo × 1,1 y de 2 cm delante de su cara a 2 cm detrás de su
+        fondo (AUTONOMO_MAPA_HALO_PELOTA); antes ×1,4 y hasta 30 cm detrás, y se comía lo que hubiera junto a ella."""
+        h = self.halo
+        factor = h["factor"] if factor is None else factor
+        extra_px = h["extra_px"] if extra_px is None else extra_px
+        delante = h["delante"] if delante is None else delante
+        detras = h["detras"] if detras is None else detras
         out = []
         for e, p, diam, (u, v, r) in self.ultimas:
             d = float(np.linalg.norm(p))
@@ -346,11 +373,12 @@ class DetectorPelotas(ConCorreccion):
                         float(v) + 0.5 * float(r), z_min))       # por debajo de esta fila, la mesa: no se toca
         return out
 
-    def cajas_mundo(self, margen=0.04):
+    def cajas_mundo(self, margen=None):
         """Caja (centro, semi) en el mundo alrededor de cada pelota vista: lo que hubiera marcado
         antes en el mapa ahí (el halo) se borra."""
         if self.T_mundo_cam is None:
             return []
+        margen = self.margen_mapa if margen is None else margen       # (18-nov) antes 4 cm
         out = []
         for e, p, diam, _ in self.ultimas:
             c = self.T_mundo_cam[:3, :3] @ p + self.T_mundo_cam[:3, 3]

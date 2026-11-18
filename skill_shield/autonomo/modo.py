@@ -232,9 +232,26 @@ def ejecutar(cfg):
                "--canal-estado", CANAL_ESTADO, "--canal-mando", CANAL_MANDO,
                "--canal-sim", CANAL_SIM, "--canal-simcam", CANAL_SIMCAM, "--padre", pid] \
         + (["--canal-herramientas", CANAL_HERRAMIENTAS] if con_herr else [])
-    proc_cam = _lanzar(cmd_cam, raiz, "cámara de cabeza")
-    proc_web = _lanzar(cmd_web, raiz, "web")
-    proc_render = None
+    # (18-nov) cada proceso, con su señal de vida: si se cae o se cuelga, el vigilante lo reinicia solo
+    from skill_shield.autonomo.vigilante import Vigilado, Vigilante, comprobar_http
+    vig_kw = dict(gracia_s=float(cfg.get("AUTONOMO_VIGILAR_GRACIA_S", 25.0)),
+                  sin_datos_s=float(cfg.get("AUTONOMO_VIGILAR_SIN_DATOS_S", 6.0)),
+                  espera_max_s=float(cfg.get("AUTONOMO_VIGILAR_ESPERA_MAX_S", 30.0)))
+    import secrets
+    # la web reiniciada reconoce las sesiones abiertas (firmadas con este secreto): no hay que volver a entrar
+    env_web = dict(os.environ, SKILL_SHIELD_WEB_SECRETO=secrets.token_hex(16))
+    if not cfg.get("AUTONOMO_WEB_CLAVE") and str(cfg.get("AUTONOMO_WEB_HOST", "0.0.0.0")) not in ("127.0.0.1", "localhost"):
+        # sin contraseña configurada, la web se inventaba una en cada arranque: con los reinicios cambiaría.
+        # Se inventa aquí UNA para toda la sesión y se le pasa a cada web que se lance
+        env_web["SKILL_SHIELD_WEB_CLAVE"] = secrets.token_urlsafe(6)
+        print(f"   🔑 Sin SKILL_SHIELD_WEB_CLAVE ni clave_web.txt: contraseña de esta sesión = "
+              f"{env_web['SKILL_SHIELD_WEB_CLAVE']}")
+    puerto_web = int(cfg.get("AUTONOMO_WEB_PUERTO", 8080))
+    vig_cam = Vigilado("cámara de cabeza", cmd_cam, raiz, senal=canal_img.tiempo, **vig_kw)
+    vig_web = Vigilado("web", cmd_web, raiz, senal=canal_mando.tiempo, env=env_web,
+                       extra=comprobar_http(f"http://127.0.0.1:{puerto_web}/api/estado"), **vig_kw)
+    vigilante = Vigilante([vig_cam, vig_web], activo=cfg.get("AUTONOMO_VIGILAR", True)).arrancar()
+    avisados = set()
 
     # ── 4. OrcaHand (solo lectura) y táctiles ──
     mano, tactil = None, None
@@ -303,12 +320,13 @@ def ejecutar(cfg):
         if cfg.get("AUTONOMO_SIM_WEB", True):
             canal_qpos = Canal(CANAL_QPOS, capacidad=8 * modelo.nq, crear=True)
             canal_qpos.escribir(datos.qpos.astype("float64").tobytes())
-            proc_render = _lanzar([sys.executable, "-m", "skill_shield.autonomo.render_gemelo",
-                                   "--canal-qpos", CANAL_QPOS, "--canal-sim", CANAL_SIM,
-                                   "--canal-simcam", CANAL_SIMCAM, "--canal-mando", CANAL_MANDO,
-                                   "--padre", pid] + (["--canal-mapa", CANAL_MAPA] if con_mapa else [])
-                                  + (["--canal-herramientas", CANAL_HERRAMIENTAS] if con_herr else []),
-                                  raiz, "gemelo para la web")
+            vigilante.agregar(Vigilado(
+                "gemelo para la web", [sys.executable, "-m", "skill_shield.autonomo.render_gemelo",
+                                       "--canal-qpos", CANAL_QPOS, "--canal-sim", CANAL_SIM,
+                                       "--canal-simcam", CANAL_SIMCAM, "--canal-mando", CANAL_MANDO,
+                                       "--padre", pid] + (["--canal-mapa", CANAL_MAPA] if con_mapa else [])
+                + (["--canal-herramientas", CANAL_HERRAMIENTAS] if con_herr else []),
+                raiz, senal=canal_sim.tiempo, **vig_kw))
         con_ventana = bool(cfg.get("AUTONOMO_VENTANA_MUJOCO", True))
         if con_ventana:
             visor = mujoco.viewer.launch_passive(modelo, datos)
@@ -316,8 +334,8 @@ def ejecutar(cfg):
             print("🧊 Sin ventana de MuJoCo (AUTONOMO_VENTANA_MUJOCO = False): el gemelo se ve en la web.")
 
         periodo = 1.0 / float(cfg.get("AUTONOMO_HZ", 60.0))
-        t_estado, avisado_cam, avisado_web, sincronizado, permitido_antes = 0.0, False, False, None, None
-        avisado_render, t_calib, calib_estado = False, 0.0, estado_calibracion(raiz, cfg)
+        t_estado, sincronizado, permitido_antes = 0.0, None, None
+        t_calib, calib_estado = 0.0, estado_calibracion(raiz, cfg)
         t_mapa = 0.0
         from skill_shield.autonomo.mapa import desempaquetar, dibujar_voxeles
         from skill_shield.autonomo.herramientas import dibujar_herramientas
@@ -401,10 +419,12 @@ def ejecutar(cfg):
             if tarea is not None:
                 def _contexto():
                     b_h, t_h = canal_herr.leer() if canal_herr is not None else (None, None)
-                    lista = []
+                    lista, T_mundo_cam = [], None
                     if b_h and t_h and time.time() - t_h < 2.0:
                         try:
-                            lista = json.loads(b_h).get("lista", [])
+                            d_h = json.loads(b_h)
+                            lista = d_h.get("lista", [])
+                            T_mundo_cam = d_h.get("T_mundo_cam")    # (18-nov) con la autocorrección de ahora
                         except ValueError:
                             pass
                     b_mp, t_mp = canal_mapa.leer() if canal_mapa is not None else (None, None)
@@ -418,7 +438,7 @@ def ejecutar(cfg):
                         b_v, t_v = canal_visto.leer()
                         visto = desempaquetar_visto(b_v) if b_v and t_v and time.time() - t_v < 3.0 else None
                     return dict(q_real=q, herramientas=lista, objetivo_id=(mando or {}).get("objetivo_id"), mapa=mp,
-                                visto=visto)
+                                visto=visto, T_mundo_cam=T_mundo_cam)
                 tarea.orden(mando, _contexto)
                 q_tarea_sim = tarea.paso(dt_vuelta, q, control.web_viva and control.pedal_pisado, _contexto)
             robot_listo = fr5 is not None and fr5.conectado
@@ -442,27 +462,18 @@ def ejecutar(cfg):
                     control=control.estado(robot_listo, mueve=tarea is not None and not simulacro),
                     calibracion=calib_estado,
                     tarea=tarea.estado_web() if tarea is not None else None,
+                    procesos=vigilante.estado(),            # (18-nov) cámara, web y gemelo: vivos / reinicios
                 )).encode())
                 if t0 - t_calib >= 2.0:                 # por si se recalibra con el modo en marcha
                     t_calib, calib_estado = t0, estado_calibracion(raiz, cfg)
-                if proc_render is not None and proc_render.poll() is not None and not avisado_render:
-                    avisado_render = True
-                    print(f"⚠️  El render del gemelo para la web terminó (código {proc_render.returncode}).")
-                if proc_cam is not None and proc_cam.poll() is not None and not avisado_cam:
-                    avisado_cam = True
-                    print(f"⚠️  El proceso de cámara terminó (código {proc_cam.returncode}). "
-                          f"El gemelo y la web siguen.")
-                if proc_web is not None and proc_web.poll() is not None and not avisado_web:
-                    avisado_web = True
-                    print(f"⚠️  El proceso web terminó (código {proc_web.returncode}).")
+                if not vigilante.activo:                # (con el vigilante, los reinicia él en su hilo)
+                    vigilante.avisos_sin_vigilar(avisados)
             time.sleep(max(0.0, periodo - (time.monotonic() - t0)))
     except KeyboardInterrupt:
         print("\n⏹  Ctrl+C")
     finally:
         print("🧹 Cerrando el modo autónomo…")
-        _cerrar(proc_web, "web")
-        _cerrar(proc_render, "gemelo web")
-        _cerrar(proc_cam, "cámara")
+        vigilante.parar()                               # (18-nov) web, gemelo y cámara
         if tactil is not None:
             tactil.cerrar()
         if tarea is not None:

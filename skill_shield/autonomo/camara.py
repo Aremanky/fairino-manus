@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 
 import cv2
@@ -52,6 +53,47 @@ def _ultimo(cola):
     while q is not None:
         p, q = q, cola.tryGet()
     return p
+
+
+class _HiloMapa:
+    """(18-nov) El mapa de obstáculos en su PROPIO hilo. Antes iba en el mismo bucle que el vídeo y cada
+    actualización (TSDF, quitar el robot, autocorrección con el brazo…: 100-250 ms, AUTONOMO_MAPA_HZ veces por
+    segundo) dejaba la imagen congelada: la web se veía a tirones (~5 fps). Ahora el bucle de la cámara solo le
+    pasa la última profundidad y sigue; el hilo coge siempre la más reciente (las intermedias se saltan, como
+    antes con el límite de Hz). La mayor parte del trabajo es numpy, que suelta el GIL."""
+
+    def __init__(self, constructor):
+        self.c = constructor
+        self._lock = threading.Lock()
+        self._hay = threading.Event()
+        self._datos = None
+        self.ms = None                                    # lo que tarda una actualización (media)
+        self.vivo = True
+        threading.Thread(target=self._bucle, daemon=True, name="mapa").start()
+
+    def dar(self, prof, K, img, halos):
+        with self._lock:
+            self._datos = (prof, K, img, halos)
+        self._hay.set()
+
+    def _bucle(self):
+        while self.vivo:
+            if not self._hay.wait(0.5):
+                continue
+            self._hay.clear()
+            with self._lock:
+                d, self._datos = self._datos, None
+            if d is None:
+                continue
+            t0 = time.perf_counter()
+            try:
+                hecho = self.c.paso(d[0], d[1], d[2], halos=d[3])
+            except Exception as e:                        # el mapa nunca debe tirar la cámara
+                print(f"⚠️  [autónomo] Mapa de obstáculos: {e}")
+                continue
+            if hecho:
+                ms = 1000.0 * (time.perf_counter() - t0)
+                self.ms = ms if self.ms is None else 0.8 * self.ms + 0.2 * ms
 
 
 def _prof_centro_mm(prof, r=6):
@@ -170,14 +212,27 @@ def main():
         if args.grabar:
             return _grabar(dev, K, args.grabar)
         prof, n, t_fps, fps, t_info = None, 0, time.monotonic(), 0.0, 0.0
+        # (18-nov) corrección de escala de la profundidad del estéreo (1.0 = tal cual). Con una cinta: un cartón
+        # plano en el centro de la imagen a D mm medidos; si «centro:» marca M, ESCALA = D / M
+        escala_prof = float(getattr(cfg_, "AUTONOMO_CAM_ESCALA_PROF", 1.0) or 1.0)
+        if abs(escala_prof - 1.0) > 1e-6:
+            print(f"📏 [autónomo] Profundidad del estéreo × {escala_prof:.4f} (AUTONOMO_CAM_ESCALA_PROF)")
         img_ult = None                                    # último color (el mapa descarta lo saturado)
+        hilo_mapa = _HiloMapa(constructor) if constructor is not None else None      # (18-nov) aparte
+        ms_det, ms_jpg, t_tiempos = None, None, time.monotonic()
+
+        def _media(m, v):
+            return v if m is None else 0.9 * m + 0.1 * v
         while True:
             pd = _ultimo(qd)
             if pd is not None:
                 prof = pd.getFrame()
-                if constructor is not None:
+                if abs(escala_prof - 1.0) > 1e-6:
+                    prof = np.clip(prof.astype(np.float32) * escala_prof, 0, 65535).astype(np.uint16)
+                if hilo_mapa is not None:
                     try:
-                        constructor.paso(prof, K, img_ult, halos=(
+                        # los halos se calculan aquí (las pelotas cambian en este hilo) y el mapa, en el suyo
+                        hilo_mapa.dar(prof, K, img_ult, (
                             pelotas.pixeles_halo() if pelotas is not None and getattr(cfg_, "AUTONOMO_MAPA_SIN_HALO_PELOTAS", True)
                             else None))
                         # lo que corrige el brazo vale para todo lo que ve la cámara (12-nov)
@@ -203,9 +258,11 @@ def main():
                     try:
                         if ahora - t_herr >= 1.0 / 15:          # detección a ~15 Hz
                             t_herr = ahora
+                            t_d = time.perf_counter()
                             detector.paso(img, K, dist, prof_mm=prof)
                             if pelotas is not None:
                                 pelotas.paso(img, K, prof)
+                            ms_det = _media(ms_det, 1000.0 * (time.perf_counter() - t_d))
                         detector.dibujar(img, K, dist)
                         if pelotas is not None:
                             pelotas.dibujar(img)
@@ -216,8 +273,11 @@ def main():
                                 b_m, _ = canal_mando_h.leer()
                                 objetivo = json.loads(b_m).get("objetivo_id") if b_m else None
                             lista = detector.lista() + (pelotas.lista() if pelotas is not None else [])
+                            T_mc = detector.T_mundo_cam          # (18-nov) con la autocorrección: para afinar
                             canal_herr.escribir(json.dumps(dict(lista=lista, objetivo=objetivo,
-                                                                calibrada=detector.T_mundo_cam is not None)).encode())
+                                                                calibrada=T_mc is not None,
+                                                                T_mundo_cam=None if T_mc is None else
+                                                                np.round(np.asarray(T_mc, float), 6).tolist())).encode())
                             if constructor is not None:          # la herramienta a coger no es obstáculo
                                 caja = None
                                 if objetivo is not None:
@@ -226,7 +286,9 @@ def main():
                                 constructor.excluir_extra = ([caja] if caja else []) + (
                                     pelotas.cajas_mundo() if pelotas is not None and getattr(cfg, "AUTONOMO_MAPA_SIN_HALO_PELOTAS", True)
                                     else []) + (
-                                    detector.cajas_hojas(hoja=tuple(getattr(cfg, "AUTONOMO_MAPA_HOJA", (1.2, 1.3, 1.3))))
+                                    detector.cajas_hojas(hoja=tuple(getattr(cfg, "AUTONOMO_MAPA_HOJA", (0.6, 0.6, 0.6))),
+                                                         margen=tuple(getattr(cfg, "AUTONOMO_MAPA_HOJA_MARGEN",
+                                                                              (0.005, 0.005, 0.03))))
                                     if getattr(cfg, "AUTONOMO_MAPA_QUITAR_HOJAS", True) else [])
                     except Exception as e:                        # nunca debe tirar la cámara
                         print(f"⚠️  [autónomo] Herramientas: {e}")
@@ -238,19 +300,33 @@ def main():
                 cv2.putText(img, f"{fps:4.1f} fps   centro: " + (f"{z:.0f} mm" if z else "sin profundidad"),
                             (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
                 if canal_img is not None:
+                    t_j = time.perf_counter()
                     ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, args.calidad])
                     if ok and len(jpg) <= canal_img.capacidad:
                         canal_img.escribir(jpg.tobytes())
+                    ms_jpg = _media(ms_jpg, 1000.0 * (time.perf_counter() - t_j))
                 if ahora - t_info >= 0.5:
                     t_info = ahora
+                    try:
+                        est_mapa = constructor.estado() if constructor is not None else None
+                    except Exception:                     # (lo está cambiando el hilo del mapa: a la próxima)
+                        est_mapa = None
+                    tiempos = dict(mapa_ms=None if hilo_mapa is None or hilo_mapa.ms is None else round(hilo_mapa.ms),
+                                   deteccion_ms=None if ms_det is None else round(ms_det),
+                                   jpeg_ms=None if ms_jpg is None else round(ms_jpg, 1))
                     _info(ok=True, mxid=mxid, usb=getattr(usb, "name", str(usb)), fps=round(fps, 1),
                           ancho=w, alto=h, K=K.tolist(), dist=np.asarray(dist).ravel().tolist(),
-                          prof_centro_mm=z, t=time.time(),
-                          mapa=constructor.estado() if constructor is not None else None)
+                          prof_centro_mm=z, t=time.time(), mapa=est_mapa, tiempos=tiempos)
+                    if ahora - t_tiempos >= 10.0:         # (18-nov) para ver qué frena el vídeo, si algo
+                        t_tiempos = ahora
+                        print(f"📷 [autónomo] Cámara: {fps:.1f} fps · mapa {tiempos['mapa_ms']} ms (en su hilo) · "
+                              f"detección {tiempos['deteccion_ms']} ms · jpeg {tiempos['jpeg_ms']} ms")
                 if args.ventana:
                     cv2.imshow("Autonomo - camara de cabeza", img)
                     if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
                         break
+        if hilo_mapa is not None:
+            hilo_mapa.vivo = False
     return 0
 
 

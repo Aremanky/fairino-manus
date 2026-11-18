@@ -487,10 +487,11 @@ def test_pelota_no_necesita_punto_de_uso_y_solo_excluye_la_pelota():
     T, d, _ = cap["pelota"]
     assert d == 0.08 and np.allclose(T[:3, 3], (0.3, -0.5, 0.0))
     radios = sorted(r for _, r in cap["excluir"])
-    assert radios[0] == pytest.approx(0.07) and radios[1] == pytest.approx(G["AUTONOMO_TAREA_EXCLUIR_RADIO"])
+    r_pel = 0.04 + G["AUTONOMO_TAREA_EXCLUIR_PELOTA_MARGEN"]          # (18-nov) la pelota +1 cm (antes +3)
+    assert radios[0] == pytest.approx(r_pel) and radios[1] == pytest.approx(G["AUTONOMO_TAREA_EXCLUIR_RADIO"])
     # la verde está a 9 cm de la roja (antes se ignoraba todo a 15 cm): ahora sigue siendo obstáculo
-    c_roja = next(c for c, r in cap["excluir"] if r == pytest.approx(0.07))
-    assert np.linalg.norm(np.array((0.42, -0.5, 0.0)) - c_roja) - 0.0225 > 0.07
+    c_roja = next(c for c, r in cap["excluir"] if r == pytest.approx(r_pel))
+    assert np.linalg.norm(np.array((0.42, -0.5, 0.0)) - c_roja) - 0.0225 > r_pel
 
 
 def test_si_los_tactiles_no_notan_la_pelota_se_para():
@@ -840,3 +841,13 @@ def test_las_mesas_del_mapa_son_suelo_y_no_estorban_si_el_robot_esta_debajo(cade
     assert len(pl._superficies) == 1 and pl._superficies[0][0] == pytest.approx(-0.25)
     pl.poner_visto(None)
     pl.poner_mapa(None, 0.02)
+
+
+def test_correccion_fija_de_la_pelota_vista_desde_la_camara():
+    """(18-nov) AUTONOMO_TAREA_PELOTA_CORRECCION_M = (derecha, lejos, arriba) en la imagen de la cámara."""
+    t = TA.Tarea(dict(G, AUTONOMO_TAREA_PELOTA_CORRECCION_M=(-0.015, 0.02, 0.005), AUTONOMO_TAREA_PRECALENTAR=False),
+                 ".", None, simulacro=True, fabrica_planificador=lambda: None)
+    Tc = np.eye(4)
+    Tc[:3, :3] = np.array([[-1.0, 0, 0], [0, 0, -1.0], [0, -1.0, 0]])  # mira hacia -y (x de la imagen = -x del mundo)
+    T = t._corregir_pelota(np.eye(4), Tc)
+    assert np.allclose(T[:3, 3], (0.015, -0.02, 0.005))               # 1,5 cm a la izquierda de la imagen, 2 cm más lejos
