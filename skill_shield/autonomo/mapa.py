@@ -74,9 +74,25 @@ def distancia_a_segmentos(P, A, B):
     return d
 
 
+def _en_capsula(P, z):
+    """(18-nov, tarde) Puntos a menos de z["r"] del segmento z["a"]-z["b"] y, si se da, por encima de z["z_min"]
+    (la zona de una pelota: pelotas.zona_propia; lo de debajo de z_min, la mesa, se queda)."""
+    a, b, r = np.asarray(z["a"], float), np.asarray(z["b"], float), float(z["r"])
+    out = np.zeros(len(P), bool)
+    lo, hi = np.minimum(a, b) - r, np.maximum(a, b) + r
+    if z.get("z_min") is not None:
+        lo[2] = max(lo[2], float(z["z_min"]))
+    sel = np.nonzero(np.all((P >= lo) & (P <= hi), axis=1))[0]
+    if len(sel):
+        out[sel[distancia_a_segmentos(P[sel], [a], [b]) <= r]] = True
+    return out
+
+
 def _en_caja(P, caja):
     """Puntos dentro de una caja (centro, semiejes) alineada con el mundo o (centro, semiejes, R)
-    orientada (R: columnas = ejes de la caja en el mundo)."""
+    orientada (R: columnas = ejes de la caja en el mundo). (18-nov) O de una cápsula: dict (_en_capsula)."""
+    if isinstance(caja, dict):
+        return _en_capsula(P, caja)
     c, semi = np.asarray(caja[0], float), np.asarray(caja[1], float)
     lo, hi = c - np.linalg.norm(semi), c + np.linalg.norm(semi)
     sel = np.nonzero(np.all((P >= lo) & (P <= hi), axis=1))[0]
@@ -101,7 +117,7 @@ class MapaOcupacion:
 
     def __init__(self, limites, resolucion=0.02, olvido_s=30.0, z_suelo=None, margen_robot=0.03,
                  margen_suelo=0.015, min_puntos=4, min_grupo=4, z_min=0.35, metodo="impactos",
-                 dist_max=None, k_trunc=0.02, w_max=20.0, motor="auto", superficies=False, banda_mesa=None):
+                 dist_max=None, k_trunc=0.02, w_max=20.0, motor="auto", superficies=False):
         """metodo (17-nov): "impactos" (contar puntos por cubo, el de siempre) o "tsdf" (fusión de
         la distancia a la superficie: el ruido se promedia; ver tsdf.py). dist_max: más lejos de esto
         (m) la profundidad no pone obstáculos. superficies: buscar mesas como planos."""
@@ -121,8 +137,7 @@ class MapaOcupacion:
         ix, iy, iz = np.meshgrid(*[np.arange(k) for k in self.n], indexing="ij")
         self._centros = (np.stack([ix, iy, iz], -1).reshape(-1, 3) + 0.5) * self.res + self.origen
         self._dist = None                                         # transformada de distancia (caché)
-        self._dist_desc = None
-        self.excluir = []                                         # cajas (centro, semi) a ignorar
+        self.excluir = []                                         # cajas (centro, semi) o cápsulas (dict) a ignorar
         self.ultima = dict(puntos=0, robot=0, suelo=0, ms=0.0)
         self.ultimos_puntos = None
         # (17-nov) TSDF, distancia máxima y mesas como planos
@@ -134,7 +149,6 @@ class MapaOcupacion:
         self._motor, self.motor = str(motor), None
         self._observar = None
         self.buscar_superficies = bool(superficies)
-        self.banda_mesa = banda_mesa                              # m sobre la tapa que se limpian (None: según ruido)
         from skill_shield.autonomo.tsdf import SeguidorSuperficies
         self.seguidor = SeguidorSuperficies(olvido_s=self.olvido_s)
         self._t_planos = 0.0
@@ -150,7 +164,7 @@ class MapaOcupacion:
             self.margen_fijo = float(margen)
         self._mascara_fija = (en_cajas(self._centros, self.fijo, self.margen_fijo).reshape(self.L.shape)
                               if self.fijo else None)
-        self._dist = self._dist_desc = None
+        self._dist = None
 
     def _puntos_fijos(self, P):
         if not self.fijo or not len(P):
@@ -165,7 +179,7 @@ class MapaOcupacion:
         self.D[:] = 1.0
         self.W[:] = 0.0
         self.seguidor.borrar()
-        self._dist = self._dist_desc = None
+        self._dist = None
 
     def _ocupado_bruto(self):
         """Cubos con evidencia de estar ocupados (sin mirar si son recientes ni el tamaño del grupo)."""
@@ -302,7 +316,7 @@ class MapaOcupacion:
         # olvido_s, la mesa de debajo de la mano desaparecía del mapa y el plan la atravesaba.
         self.t_visto[tapado & (self.L >= self.UMBRAL_OCUPADO)] = ahora
         self._superficies(P[~quitar] if len(P) else P, T_mundo_cam, ahora)
-        self._dist = self._dist_desc = None
+        self._dist = None
         self.ultima = dict(puntos=n_total, robot=n_robot, suelo=n_suelo,
                            ms=round((time.perf_counter() - t0) * 1000, 1))
 
@@ -365,14 +379,17 @@ class MapaOcupacion:
             dentro = _en_caja(self._centros, caja)
             self.W[dentro] = 0.0
         self._superficies(P[sup], T_mundo_cam, ahora)
-        self._dist = self._dist_desc = None
+        self._dist = None
         self.ultima = dict(puntos=int(len(P)), robot=int(robot.sum()), suelo=int(suelo.sum()),
                            ms=round((time.perf_counter() - t0) * 1000, 1))
 
     # ── (17-nov) mesas como planos ──
     def _superficies(self, P, T_mundo_cam, ahora):
-        """Busca planos horizontales (como mucho 2 veces por segundo) y, en las mesas estables, deja
-        la tapa como UNA capa a su altura y limpia el ruido que queda justo encima."""
+        """Busca planos horizontales (como mucho 2 veces por segundo) y sigue las mesas estables. Solo se
+        PUBLICAN (superficies(): el planificador las usa como losas y la escena fija como tapas); el mapa no se
+        toca. (18-nov, tarde) Antes la tapa se RELLENABA en toda su envolvente (también donde la cámara no veía
+        nada) y se borraba lo que hubiera hasta ~6 cm por encima (2 cubos + el ruido): desaparecían del mapa la
+        pelota, una caja baja al lado o una herramienta tumbada. El mapa es solo lo que mide la cámara."""
         if not self.buscar_superficies:
             return
         from skill_shield.autonomo.tsdf import planos_horizontales
@@ -380,41 +397,10 @@ class MapaOcupacion:
             self._t_planos = ahora
             alto = P[:, 2] > ((self.z_suelo if self.z_suelo is not None else -np.inf) + 0.10)
             self.seguidor.actualizar(planos_horizontales(P[alto], self.res), ahora)
-        self.aplicar_superficies(T_mundo_cam)
 
     def superficies(self):
         """Mesas estables: [(z, vértices xy del contorno)]."""
         return self.seguidor.estables()
-
-    def aplicar_superficies(self, T_mundo_cam=None):
-        from skill_shield.autonomo.tsdf import dentro_poligono
-        sup = self.superficies()
-        if not sup:
-            return
-        nx, ny, nz = self.n
-        xy = self._centros.reshape(nx, ny, nz, 3)[:, :, 0, :2].reshape(-1, 2)
-        Dg, Wg = self.D.reshape(self.L.shape), self.W.reshape(self.L.shape)
-        for z, poli in sup:
-            en = dentro_poligono(poli, xy).reshape(nx, ny)
-            if not en.any():
-                continue
-            kz = int(math.floor((z - self.origen[2]) / self.res))
-            if not 0 <= kz < nz:
-                continue
-            banda = self.banda_mesa
-            if banda is None:                            # ruido del estéreo a esa distancia
-                d = 1.0
-                if T_mundo_cam is not None:
-                    d = float(np.linalg.norm(np.r_[np.asarray(poli).mean(0), z] - T_mundo_cam[:3, 3]))
-                banda = 2.0 * self.res + self.k_trunc * d * d
-            k1 = min(nz, kz + 1 + int(math.ceil(banda / self.res)))
-            if self.metodo == "tsdf":
-                Dg[en, kz], Wg[en, kz] = 0.0, np.maximum(Wg[en, kz], self.W_MIN)
-                for k in range(kz + 1, k1):
-                    Dg[en, k], Wg[en, k] = 1.0, np.maximum(Wg[en, k], self.W_MIN)
-            else:
-                self.L[en, kz] = np.maximum(self.L[en, kz], self.UMBRAL_OCUPADO)
-                self.L[en, kz + 1:k1] = np.minimum(self.L[en, kz + 1:k1], self.UMBRAL_LIBRE)
 
     @staticmethod
     def _cerca_nube(P, nube, margen):
@@ -445,7 +431,7 @@ class MapaOcupacion:
             self.D[dentro] = 1.0                         # (TSDF) el robot estaba ahí: libre
             self.W[dentro] = np.maximum(self.W[dentro], self.W_MIN)
             self.t_visto.reshape(-1)[dentro] = time.time()   # (17-nov) y eso se SABE: no es desconocido
-            self._dist = self._dist_desc = None
+            self._dist = None
         return int(dentro.sum())
 
     def _visibilidad(self, prof_mm, K, T_mundo_cam):
@@ -472,30 +458,19 @@ class MapaOcupacion:
         return visto.reshape(self.L.shape), libre.reshape(self.L.shape), tapado.reshape(self.L.shape)
 
     # ── distancias para las colisiones ──
-    def distancias(self, desconocido_ocupado=False, ahora=None):
-        """Distancia (m) de cada vóxel al obstáculo más cercano (0 dentro de uno)."""
-        cache = "_dist_desc" if desconocido_ocupado else "_dist"
-        if getattr(self, cache) is None:
+    def distancias(self, ahora=None):
+        """Distancia (m) de cada vóxel al obstáculo más cercano (0 dentro de uno). Solo lo OCUPADO (lo que
+        mide la cámara): (18-nov, tarde) ya no hay opción de rellenar lo desconocido de debajo/detrás."""
+        if self._dist is None:
             from scipy.ndimage import distance_transform_edt
-            e = self.estado(ahora)
-            obst = e == OCUPADO
-            if desconocido_ocupado:
-                obst |= self._tapados(e)
+            obst = self.estado(ahora) == OCUPADO
             d = distance_transform_edt(~obst) * self.res if obst.any() else np.full(self.L.shape, np.inf, np.float32)
-            setattr(self, cache, d.astype(np.float32))
-        return getattr(self, cache)
+            self._dist = d.astype(np.float32)
+        return self._dist
 
-    def _tapados(self, e):
-        """Vóxeles desconocidos que están DEBAJO/DETRÁS de algo ocupado en la misma columna
-        vertical (lo más probable: el interior o la sombra de un objeto). No se marcan como
-        obstáculo las zonas que simplemente quedan fuera de la vista."""
-        ocup = e == OCUPADO
-        encima = np.flip(np.maximum.accumulate(np.flip(ocup, axis=2), axis=2), axis=2)   # hay algo ocupado más arriba
-        return (e == DESCONOCIDO) & encima
-
-    def distancia_en(self, P, desconocido_ocupado=False):
+    def distancia_en(self, P):
         """Distancia al obstáculo más cercano en los puntos P (fuera de la rejilla: infinito)."""
-        d = self.distancias(desconocido_ocupado)
+        d = self.distancias()
         idx, dentro = self.indices(np.asarray(P, float))
         out = np.full(len(P), np.inf, np.float32)
         out[dentro] = d[idx[dentro, 0], idx[dentro, 1], idx[dentro, 2]]
@@ -506,11 +481,10 @@ class ColisionMapa:
     """Choques de las cápsulas del robot (ModeloColision) contra el mapa de obstáculos.
     Misma interfaz que ModeloColision.colisiones: lista de (cápsula, "mapa", penetración)."""
 
-    def __init__(self, modelo, mapa, margen=0.02, desconocido_ocupado=True, paso=0.01):
+    def __init__(self, modelo, mapa, margen=0.02, paso=0.01):
         self.m = modelo
         self.mapa = mapa
         self.margen = float(margen)
-        self.desc = bool(desconocido_ocupado)
         self.paso = float(paso)
 
     def colisiones(self, q, marcos=None):
@@ -520,7 +494,7 @@ class ColisionMapa:
                 continue
             n = max(2, int(math.ceil(np.linalg.norm(c.b - c.a) / self.paso)) + 1)
             pts = c.a + np.linspace(0.0, 1.0, n)[:, None] * (c.b - c.a)
-            d = float(np.min(self.mapa.distancia_en(pts, self.desc)))
+            d = float(np.min(self.mapa.distancia_en(pts)))
             # la distancia es al CENTRO del vóxel ocupado más cercano: se resta medio vóxel
             pen = c.r + self.margen + 0.5 * self.mapa.res - d
             if pen > 0:
@@ -936,6 +910,21 @@ class ConstructorMapa:
         return (q, caps) if real else (None, None)
 
     @staticmethod
+    def zonas(lista):
+        """Lo que se pide excluir del mapa, listo para MapaOcupacion.excluir: cajas (centro, semi[, R]) o
+        cápsulas dict(a, b, r[, z_min]) (las pelotas, 18-nov)."""
+        out = []
+        for z in lista or []:
+            if z is None:
+                continue
+            if isinstance(z, dict):
+                out.append(dict(a=np.asarray(z["a"], float), b=np.asarray(z["b"], float), r=float(z["r"]),
+                                z_min=None if z.get("z_min") is None else float(z["z_min"])))
+            else:
+                out.append(tuple(np.asarray(x, float) for x in z))
+        return out
+
+    @staticmethod
     def quitar_pixeles(prof_mm, halos, K=None, T_mundo_cam=None):
         """Copia de la profundidad sin los píxeles de los halos [(u, v, radio px, z mín, z máx[, fila, z mundo mín])].
         Con K y T_mundo_cam, lo que esté por debajo de «z mundo mín» (la mesa) no se quita (17-nov)."""
@@ -975,8 +964,7 @@ class ConstructorMapa:
         if self.T is None:
             self.aviso = "sin calibrar (camara_robot.json)"
             return False
-        self.mapa.excluir = list(self._excluir_web) + [tuple(np.asarray(x, float) for x in caja)
-                                                       for caja in self.excluir_extra]
+        self.mapa.excluir = list(self._excluir_web) + self.zonas(self.excluir_extra)
         q, caps_mano = self._q_real()
         self.robot_quitado = q is not None
         self.mano_real = caps_mano is not None

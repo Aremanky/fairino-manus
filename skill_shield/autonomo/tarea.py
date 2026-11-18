@@ -92,6 +92,23 @@ class ErrorPlan(Exception):
     pass
 
 
+def zona_excluida(h, T_mundo_cam, g):
+    """Lo que NO cuenta como obstáculo para el sitio h (herramienta, pelota o marcador de la lista de la cámara):
+    [(centro, radio)]. Marcadores: sus esquinas (AUTONOMO_TAREA_EXCLUIR_RADIO). La pelota, donde la ve la cámara
+    (sin la corrección: es lo que hay en el mapa): (18-nov, tarde) TODOS sus cubos, que caen en una cápsula a lo
+    largo del rayo de la cámara (pelotas.zona_propia, la misma que se quita del mapa), como esferas seguidas. Antes,
+    r + 1 cm alrededor del centro: con el centro desviado por el estéreo, su cara salía como obstáculo («lo que
+    estorba, a unos 3 cm de la pelota, de unos 8 cm de alto») y no había forma de bajar a cogerla."""
+    from skill_shield.autonomo.pelotas import esferas_capsula, params_zona, zona_propia
+    c = np.asarray(h["T_mundo"], float)[:3, 3]
+    if h.get("tipo") != "pelota":
+        return [(c, float(_g(g, "AUTONOMO_TAREA_EXCLUIR_RADIO", 0.09)))]
+    r = float(h.get("diametro_m") or 0.07) / 2
+    a, b, radio = zona_propia(c, r, T_mundo_cam, margen=float(_g(g, "AUTONOMO_TAREA_EXCLUIR_PELOTA_MARGEN", 0.0)),
+                              **params_zona(g))
+    return esferas_capsula(a, b, radio)
+
+
 def _rot_eje(eje, ang):
     x, y, z = _unit(eje)
     K = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
@@ -300,19 +317,15 @@ class Planificador:
         self._superficies = []                    # (17-nov) mesas del mapa [(z, vértices xy)]
         self._zonas_actuales = ()
         self.zona_extra = float(_g(g, "AUTONOMO_TAREA_PELOTA_ZONA_MESA_EXTRA", 0.15))   # dónde se busca la mesa
-        # (17-nov) la cámara solo ve la SUPERFICIE de las cosas (la tapa y el frente de la cajonera): lo que
-        # hay debajo de cada cubo ocupado, hasta el suelo, se trata como macizo
-        # (17-nov, tarde) desactivado por defecto: convertía cualquier grupo de cubos suelto (ruido flotando a
-        # 70 cm) en una columna hasta el suelo, y además triplicaba el tiempo de planificar. Lo macizo ahora son
-        # las MESAS detectadas como plano (AUTONOMO_TAREA_MESA_HASTA_SUELO)
-        self.macizo = bool(_g(g, "AUTONOMO_TAREA_MAPA_MACIZO", False))
+        # (18-nov, tarde) quitado el relleno de columnas hasta el suelo bajo cada cubo (AUTONOMO_TAREA_MAPA_MACIZO,
+        # ya apagado desde el 17-nov): los cubos del mapa son solo lo que mide la cámara. Las MESAS detectadas como
+        # plano siguen siendo losas (AUTONOMO_TAREA_MESA_HASTA_SUELO: hasta dónde llega su fondo)
         self.mesa_hasta_suelo = bool(_g(g, "AUTONOMO_TAREA_MESA_HASTA_SUELO", True))
         self.grupo_min = int(_g(g, "AUTONOMO_TAREA_MAPA_GRUPO_MIN", 12))   # grupos de cubos más pequeños: ruido
         ent = getattr(self.modelo, "entorno", None)
         self.z_suelo_mapa = getattr(ent, "z_suelo", None)
         if self.z_suelo_mapa is None:
             self.z_suelo_mapa = g.get("SOPORTE_SUELO_Z")
-        self._macizo_hecho = False
         # (17-nov) ir de un sitio a otro POR ARRIBA: subir en vertical hasta pasar por encima de lo que
         # haya en el camino, trasladarse a esa altura y bajar en vertical (como se hace en pick-and-place)
         self.por_alto = bool(_g(g, "AUTONOMO_TAREA_POR_ALTO", True))
@@ -442,7 +455,6 @@ class Planificador:
         self._C = C
         self._C_quitado = np.vstack(quitado) if quitado else np.zeros((0, 3))
         self._res = float(res or 0.02)
-        self._macizo_hecho = False
         self._mesa = None                         # (17-nov) la mesa medida (z, envolvente): la pone el plan
         self.zonas_apoyo(())
         return len(C)
@@ -460,27 +472,6 @@ class Planificador:
         e = etq[tuple(idx.T)]
         tam = np.bincount(e)
         return C[tam[e] >= self.grupo_min]
-
-    def rellenar_macizo(self, C):
-        """(17-nov) Cada columna de cubos ocupados se rellena desde su cubo más alto hasta el suelo: la
-        cámara solo ve la superficie (la tapa y el frente de una cajonera) y por dentro quedaba hueco,
-        así que el brazo podía «meterse» en la cajonera sin tocar ningún cubo."""
-        C = np.asarray(C, float).reshape(-1, 3)
-        if not len(C) or self.z_suelo_mapa is None:
-            return C
-        res = self._res
-        xy, inv = np.unique(np.round(C[:, :2], 4), axis=0, return_inverse=True)
-        inv = np.asarray(inv).ravel()
-        alto = np.full(len(xy), -np.inf)
-        np.maximum.at(alto, inv, C[:, 2])
-        z0 = float(self.z_suelo_mapa) + 0.5 * res
-        n = np.maximum(np.floor((alto - z0) / res).astype(int), 0)       # cubos por debajo del más alto
-        if not n.sum():
-            return C
-        k = np.repeat(np.arange(len(xy)), n)
-        paso = np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n) + 1
-        R = np.column_stack([xy[k], alto[k] - paso * res])
-        return np.vstack([C, R])
 
     def zonas_apoyo(self, zonas):
         """(18-nov) Con el mundo simple: mesas = losas y, de los cubos del mapa, fuera la capa de la mesa.
@@ -1153,7 +1144,7 @@ class Planificador:
         Ts = [self.c.fk_marcos(np.asarray(op[0], float))[6] for op in opciones]
         try:
             with self.con_mano(*(mano or (None, None))):
-                cu.actualizar_mundo(self, clave=(id(self), getattr(self, "_version_mundo", 0), self._macizo_hecho,
+                cu.actualizar_mundo(self, clave=(id(self), getattr(self, "_version_mundo", 0),
                                                  id(self._arbol), id(self._visto)))
                 r = cu.plan_goalset(q0, Ts)
                 if r is None:
@@ -1194,7 +1185,7 @@ class Planificador:
         y su carga, suelo de las mesas, J4…) y entre medias. ErrorPlan si no hay o no vale."""
         try:
             self.curobo.actualizar_mundo(self, clave=(id(self), getattr(self, "_version_mundo", 0),
-                                                      self._macizo_hecho, id(self._arbol), id(self._visto)))
+                                                      id(self._arbol), id(self._visto)))
             qs = self.curobo.plan(q0, q1)
         except Exception as e:                           # la GPU nunca debe tumbar el plan
             self._pausar_curobo(e)
@@ -1636,9 +1627,6 @@ class Planificador:
                 lejos &= ~np.isfinite(d)
             self.quitados_propios = int((~lejos).sum())
             self._C = self._C[lejos]
-        if self.macizo and not self._macizo_hecho:        # (17-nov) después de quitar lo que es el propio brazo
-            self._C = self.rellenar_macizo(self._C)
-            self._macizo_hecho = True
         self.zonas_apoyo(())
         if self._superficies:
             # (17-nov) una mesa del mapa bajo la que está AHORA el robot no puede ser maciza ahí (o está mal
@@ -2526,7 +2514,7 @@ class Tarea:
         self.bajada_tactil_n = float(_g(self.cfg, "AUTONOMO_TAREA_BAJADA_TACTIL_N", 0.5))
         self._fase_vigilada, self._base_bajada = None, None
         self.cierre_tactil = bool(_g(self.cfg, "AUTONOMO_TAREA_CIERRE_TACTIL", True))
-        # (18-nov) tramos articulares con TOPP-RA (si está instalado: bash instalar_toppra.sh)
+        # (18-nov) tramos articulares con TOPP-RA (si está instalado: lo instala ./arrancar_nivel6.sh)
         self.toppra = bool(_g(self.cfg, "AUTONOMO_TAREA_TOPPRA", True))
         self.toppra_tol = math.radians(float(_g(self.cfg, "AUTONOMO_TAREA_TOPPRA_TOL_DEG", 0.5)))
         # (18-nov) el afinado (rehacer la bajada) en un hilo: el bucle de 60 Hz no se queda parado
@@ -2534,8 +2522,6 @@ class Tarea:
         self._hilo_afinar, self._res_afinar = None, None
         # (18-nov) la autocorrección de la calibración, congelada mientras hay una tarea (modo.py la avisa)
         self.congelar_autocalib_cfg = bool(_g(self.cfg, "AUTONOMO_AUTOCALIB_CONGELAR_EN_TAREA", True))
-        self.excluir_r = float(_g(self.cfg, "AUTONOMO_TAREA_EXCLUIR_RADIO", 0.09))
-        self.excluir_pelota = float(_g(self.cfg, "AUTONOMO_TAREA_EXCLUIR_PELOTA_MARGEN", 0.01))
         # (18-nov) corrección fija de dónde se coge la pelota (derecha, lejos, arriba) vista desde la cámara
         self.corr_pelota = np.asarray(_g(self.cfg, "AUTONOMO_TAREA_PELOTA_CORRECCION_M", (0.0, 0.0, 0.0)), float)
         self.usar_mapa = bool(_g(self.cfg, "AUTONOMO_TAREA_USAR_MAPA", True))
@@ -2658,13 +2644,8 @@ class Tarea:
             datos = dict(volver=False, q=np.asarray(q, float), pelota=pelota,
                          T=T_sitios,
                          nombres=[h["nombre"] for h in sitios],
-                         # lo que NO cuenta como obstáculo: la pelota justo ella (+3 cm: vóxeles y ruido); de los
-                         # marcadores, su hoja y su soporte (AUTONOMO_TAREA_EXCLUIR_RADIO)
-                         # (18-nov) solo el objeto: la pelota (+1 cm) y el marcador (sus esquinas); lo de alrededor
-                         # cuenta. La pelota, donde la ve la cámara (sin la corrección: es lo que hay en el mapa)
-                         excluir=[(np.asarray(h["T_mundo"], float)[:3, 3],
-                                   float(h.get("diametro_m") or 0.07) / 2 + self.excluir_pelota
-                                   if h.get("tipo") == "pelota" else self.excluir_r) for h in sitios],
+                         # lo que NO cuenta como obstáculo: solo el objeto (zona_excluida)
+                         excluir=[z for h in sitios for z in zona_excluida(h, tc, self.cfg)],
                          diametro=float(herr.get("diametro_m") or 0.07) if pelota else None,
                          # (17-nov) altura de la mesa medida con un plano alrededor de la pelota (pelotas.py)
                          apoyo_z=herr.get("apoyo_z") if pelota else None,

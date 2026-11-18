@@ -35,6 +35,9 @@ matplotlib                    # solo skill_shield/teleop_fr5/simulador.py --plot
 pytest==7.4.4
 
 # Sistema (no van por pip): sudo apt install zenity python3.12-tk
-curobo
-# (18-nov) opcional: tramos articulares del modo autónomo con TOPP-RA (bash instalar_toppra.sh)
-# toppra
+
+# NO van aquí (los instala ./arrancar_nivel6.sh si faltan):
+#  · cuRobo de NVIDIA: desde su repositorio, versión fija, en ./externos/curobo. OJO: el paquete «curobo» de
+#    PyPI NO es el de NVIDIA (es un paquete vacío de otra persona): con él, «import curobo» funcionaba y el de
+#    verdad no llegaba a instalarse.
+#  · toppra (opcional): tramos articulares del modo autónomo.

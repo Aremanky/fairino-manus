@@ -4,7 +4,7 @@ cuRobo en la GPU, contra el mundo del planificador del proyecto (mundo.py).
 
 Solo PROPONE: tarea.Planificador.conectar() comprueba cada postura del tramo con sus propias
 comprobaciones y, si no vale, usa su camino de siempre. Necesita cuRobo V2 instalado
-(instalar_curobo.sh) y la configuración del robot (python -m skill_shield.autonomo.curobo_fr5.robot).
+(lo instala ./arrancar_nivel6.sh) y la configuración del robot (python -m skill_shield.autonomo.curobo_fr5.robot).
 """
 import os
 import time

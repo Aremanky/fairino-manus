@@ -93,7 +93,7 @@ def tiempos_toppra(qs, v_joint, a_joint, tol_rad=math.radians(0.5)):
     except Exception as e:
         if _AVISO_TOPPRA is None:
             _AVISO_TOPPRA = str(e)
-            print(f"ℹ️  TOPP-RA no está instalado ({e}): tramos articulares con el trapecio (bash instalar_toppra.sh).")
+            print(f"ℹ️  TOPP-RA no está instalado ({e}): tramos articulares con el trapecio (./arrancar_nivel6.sh lo instala).")
         return None
     qs = np.asarray(qs, float).reshape(-1, 6)
     if len(qs) < 2:

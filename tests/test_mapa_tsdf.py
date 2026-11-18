@@ -120,7 +120,7 @@ def test_las_mesas_salen_como_planos_y_se_publican():
     assert dentro_poligono(poli, np.array([[0.35, -0.95]]))[0]
     v = desempaquetar_visto(empaquetar_visto(m, 1008.0))
     assert v["superficies"] and abs(v["superficies"][0][0] - z) < 1e-3
-    # encima de la tapa, nada (la capa de ruido se limpia)
+    # encima de la tapa, nada (la TSDF promedia el ruido; 18-nov: ya no se borra a mano lo de encima)
     O = m._centros[(m.estado(1008.0) == OCUPADO).reshape(-1)]
     en = dentro_poligono(poli, O[:, :2])
     assert not np.any(en & (O[:, 2] > z + 0.03))
@@ -180,7 +180,7 @@ def test_la_mesa_debajo_y_alrededor_de_la_pelota_no_desaparece():
     # como en el modo autónomo (AUTONOMO_MAPA_MESAS = True): la tapa como plano. Justo DEBAJO de la pelota la
     # cámara no ve la mesa (la tapa la propia pelota): ahí la pone el plano
     m = MapaOcupacion(LIM, 0.02, z_suelo=-0.975, metodo="tsdf", motor="numpy", dist_max=1.7, superficies=True)
-    m.excluir = [tuple(np.asarray(x, float) for x in det.caja_mundo(100))] + det.cajas_mundo()
+    m.excluir = ConstructorMapa.zonas([det.caja_mundo(100)] + det.cajas_mundo())
     for i in range(10):
         prof = (np.clip(z + rng.normal(0, 0.003, z.shape) * z * z, 0, 10) * 1000).astype(np.uint16)
         prof = ConstructorMapa.quitar_pixeles(prof, det.pixeles_halo(), K, T)

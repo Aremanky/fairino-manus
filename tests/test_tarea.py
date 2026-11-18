@@ -486,12 +486,15 @@ def test_pelota_no_necesita_punto_de_uso_y_solo_excluye_la_pelota():
     assert t.estado == "terminada"
     T, d, _ = cap["pelota"]
     assert d == 0.08 and np.allclose(T[:3, 3], (0.3, -0.5, 0.0))
-    radios = sorted(r for _, r in cap["excluir"])
-    r_pel = 0.04 + G["AUTONOMO_TAREA_EXCLUIR_PELOTA_MARGEN"]          # (18-nov) la pelota +1 cm (antes +3)
-    assert radios[0] == pytest.approx(r_pel) and radios[1] == pytest.approx(G["AUTONOMO_TAREA_EXCLUIR_RADIO"])
-    # la verde está a 9 cm de la roja (antes se ignoraba todo a 15 cm): ahora sigue siendo obstáculo
-    c_roja = next(c for c, r in cap["excluir"] if r == pytest.approx(r_pel))
-    assert np.linalg.norm(np.array((0.42, -0.5, 0.0)) - c_roja) - 0.0225 > r_pel
+    exc = [(np.asarray(c, float), float(r)) for c, r in cap["excluir"]]
+    marcador = [(c, r) for c, r in exc if np.linalg.norm(c) < 1e-9]
+    roja = [(c, r) for c, r in exc if np.linalg.norm(c) >= 1e-9]
+    assert len(marcador) == 1 and marcador[0][1] == pytest.approx(G["AUTONOMO_TAREA_EXCLUIR_RADIO"])
+    # (18-nov, tarde) la roja: su zona (pelotas.zona_propia) la cubre entera, y nada más que alrededor de ella
+    assert roja and any(np.linalg.norm(c - (0.3, -0.5, 0.0)) + 0.04 <= r for c, r in roja)
+    assert all(np.linalg.norm(c - (0.3, -0.5, 0.0)) < 0.05 for c, _ in roja)
+    # la verde está a 9,75 cm de la roja (antes se ignoraba todo a 15 cm): sigue siendo obstáculo
+    assert all(np.linalg.norm(np.array((0.42, -0.5, 0.0)) - c) - 0.0225 > r for c, r in roja)
 
 
 def test_si_los_tactiles_no_notan_la_pelota_se_para():

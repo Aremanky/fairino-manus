@@ -252,5 +252,5 @@ diagnosticos/*.npz
 # NUNCA al repo: git rm --cached clave_web.txt (y cambiadla: sigue en el historial)
 clave_web.txt
 
-# cuRobo (instalar_curobo.sh)
+# cuRobo (lo instala arrancar_nivel6.sh)
 externos/

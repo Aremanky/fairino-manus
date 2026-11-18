@@ -266,6 +266,47 @@ def _mesa_en_plano(prof_mm, K, T_mundo_cam, u, v, centro_cam, plano, radio_m, to
         return None
 
 
+def zona_propia(c, r, T_mundo_cam=None, res=0.02, k_ruido=0.02, k_trunc=0.02, banda=0.35, margen=0.0):
+    """(18-nov, tarde) Dónde pueden caer los cubos de la PROPIA pelota (centro c y radio r, en el mundo): una
+    cápsula a lo largo del rayo de la cámara → (a, b, radio). Es lo que se quita del mapa y del planificador.
+      · radio = r + medio cubo en diagonal (√3/2 · res: un cubo que toca la pelota tiene su centro hasta ahí fuera
+        de ella) + margen. De LADO no se quita nada más: lo que haya al lado de la pelota sigue contando;
+      · a lo largo del rayo, el ruido de la profundidad a esa distancia (k_ruido · d²) hacia los dos lados: el
+        centro estimado y la superficie medida se desvían a lo largo del rayo, no de lado;
+      · hacia la cámara, además, lo que la TSDF engorda cada superficie (banda · truncado: ~2 cm a 1 m).
+    Antes era una esfera o una caja de r + 1 cm alrededor del centro estimado: con el centro 2 cm desviado por el
+    estéreo (a ~1 m es lo normal), la cara de la pelota que mira a la cámara quedaba fuera y salía como obstáculo
+    justo donde tiene que bajar la mano. Sin cámara: una esfera (a = b = c) con el ruido a 1 m."""
+    c = np.asarray(c, float).reshape(3)
+    radio = float(r) + 0.5 * math.sqrt(3.0) * float(res) + float(margen)
+    if T_mundo_cam is None:
+        return c.copy(), c.copy(), radio + float(k_ruido)
+    hacia = np.asarray(T_mundo_cam, float)[:3, 3] - c
+    d = float(np.linalg.norm(hacia))
+    if d < 1e-6:
+        return c.copy(), c.copy(), radio
+    u = hacia / d
+    ruido = float(k_ruido) * d * d
+    delante = ruido + float(banda) * (2.0 * float(res) + float(k_trunc) * d * d)
+    return c + u * delante, c - u * ruido, radio
+
+
+def esferas_capsula(a, b, radio, paso=0.01):
+    """La cápsula a-b como esferas [(centro, radio)] seguidas (cada paso m): el formato de «excluir» del
+    planificador. Con paso 1 cm y radio ≥ 4 cm, entre dos esferas falta menos de 0,3 mm de la cápsula."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    n = max(int(math.ceil(float(np.linalg.norm(b - a)) / float(paso))), 0) + 1
+    return [(a + (b - a) * t, float(radio)) for t in (np.linspace(0.0, 1.0, n) if n > 1 else [0.0])]
+
+
+def params_zona(g):
+    """Parámetros de zona_propia sacados de la configuración (los mismos para el mapa y el planificador)."""
+    from skill_shield.autonomo.mapa import MapaOcupacion
+    tsdf = str(g.get("AUTONOMO_MAPA_METODO", "tsdf")) == "tsdf"
+    return dict(res=float(g.get("AUTONOMO_MAPA_RES", 0.02)), k_ruido=float(g.get("AUTONOMO_TAREA_RUIDO_PROF_K", 0.02)),
+                k_trunc=float(g.get("AUTONOMO_MAPA_TSDF_K", 0.02)), banda=MapaOcupacion.D_OCUPADO if tsdf else 0.0)
+
+
 class _Pista:
     def __init__(self, id_, e, p, diam, ahora):
         self.id, self.e, self.p, self.diam = id_, e, p.copy(), diam
@@ -303,8 +344,10 @@ class DetectorPelotas(ConCorreccion):
         self.mesa_m = float(g.get("AUTONOMO_PELOTAS_MESA_RADIO", 0.35))   # m alrededor donde se mide la mesa
         self.min_relleno = float(g.get("AUTONOMO_PELOTAS_RELLENO_MIN", 0.7))   # (18-nov) aros fuera
         self.ajuste = bool(g.get("AUTONOMO_PELOTAS_AJUSTE_SILUETA", True))      # (18-nov) centro por la silueta
-        # (18-nov) lo que se quita del mapa alrededor de cada pelota: solo ella (+ este margen); lo de alrededor cuenta
-        self.margen_mapa = float(g.get("AUTONOMO_MAPA_MARGEN_PELOTA", 0.01))
+        # (18-nov) lo que se quita del mapa alrededor de cada pelota: solo ella (zona_propia, + este margen EXTRA);
+        # lo de alrededor cuenta
+        self.margen_mapa = float(g.get("AUTONOMO_MAPA_MARGEN_PELOTA", 0.0))
+        self.zona = params_zona(g)
         self.halo = dict(factor=1.1, extra_px=2, delante=0.02, detras=0.02)
         self.halo.update(g.get("AUTONOMO_MAPA_HALO_PELOTA") or {})
         self.pistas = {}
@@ -396,17 +439,22 @@ class DetectorPelotas(ConCorreccion):
                             else None))
         return out
 
+    def _zona_mundo(self, p, diam):
+        """Lo que se quita del mapa por una pelota (centro p en la cámara): su zona_propia (cápsula a lo largo
+        del rayo) desde medio cubo por encima de su parte de abajo: la MESA de debajo no se quita (17-nov: antes
+        quedaba un agujero en la mesa justo donde hay que cogerla). dict(a, b, r, z_min) para MapaOcupacion."""
+        T = self.T_mundo_cam
+        c = T[:3, :3] @ np.asarray(p, float) + T[:3, 3]
+        r = float(diam) / 2.0
+        a, b, radio = zona_propia(c, r, T, margen=self.margen_mapa, **self.zona)
+        return dict(a=a, b=b, r=radio, z_min=float(c[2] - r + 0.5 * self.zona["res"]))
+
     def caja_mundo(self, id_):
+        """La zona de la pelota id_ (la elegida) que se quita del mapa, o None (ver _zona_mundo)."""
         s = self.pistas.get(id_) if id_ is not None else None
         if s is None or self.T_mundo_cam is None or time.time() - s.t > self.olvido_s:
             return None
-        c = self.T_mundo_cam[:3, :3] @ s.p + self.T_mundo_cam[:3, 3]
-        r = s.diam / 2.0
-        # (17-nov) desde 1 cm por encima de su parte de abajo: la MESA de debajo no se quita del mapa (antes la
-        # caja bajaba 2 cm por debajo de la pelota y dejaba un agujero en la mesa justo donde hay que cogerla)
-        m = self.margen_mapa                              # (18-nov) antes 2 cm
-        z0, z1 = c[2] - r + 0.01, c[2] + r + m
-        return [float(c[0]), float(c[1]), float(0.5 * (z0 + z1))], [r + m, r + m, float(0.5 * (z1 - z0))]
+        return self._zona_mundo(s.p, s.diam)
 
     def pixeles_halo(self, factor=None, extra_px=None, delante=None, detras=None):
         """(12-nov) Píxeles de la profundidad que NO van al mapa: alrededor de cada pelota vista en
@@ -415,7 +463,9 @@ class DetectorPelotas(ConCorreccion):
         sueltos detrás y alrededor de ella: en el mapa la «envolvían» de cubos que no existen.
         [(u, v, radio px, z mínima m, z máxima m)].
         (18-nov) Por defecto ya solo la pelota: su círculo × 1,1 y de 2 cm delante de su cara a 2 cm detrás de su
-        fondo (AUTONOMO_MAPA_HALO_PELOTA); antes ×1,4 y hasta 30 cm detrás, y se comía lo que hubiera junto a ella."""
+        fondo (AUTONOMO_MAPA_HALO_PELOTA); antes ×1,4 y hasta 30 cm detrás, y se comía lo que hubiera junto a ella.
+        (18-nov, tarde) Más el ruido de la profundidad a esa distancia hacia los dos lados (la cara estimada se
+        desvía eso): solo cambia qué píxeles DENTRO de su círculo se quitan."""
         h = self.halo
         factor = h["factor"] if factor is None else factor
         extra_px = h["extra_px"] if extra_px is None else extra_px
@@ -425,30 +475,26 @@ class DetectorPelotas(ConCorreccion):
         for e, p, diam, (u, v, r) in self.ultimas:
             d = float(np.linalg.norm(p))
             z_sup = float(p[2]) * max(d - diam / 2.0, 0.05) / max(d, 1e-6)       # profundidad (Z) de su cara
+            # (18-nov, tarde) + el ruido de la profundidad a esa distancia: la cara estimada se desvía tanto como eso
+            # y, con solo ±2 cm, a ~1 m los píxeles de la propia pelota se colaban en el mapa
+            ruido = self.zona["k_ruido"] * d * d
             # (17-nov) 7º: altura (mundo) por debajo de la cual NO se quita nada: la mesa en la que está apoyada
             # (antes el halo se llevaba también la mesa de detrás de la pelota)
             z_min = None
             if self.T_mundo_cam is not None:
                 c = self.T_mundo_cam[:3, :3] @ p + self.T_mundo_cam[:3, 3]
                 z_min = float(c[2] - diam / 2.0 + 0.01)
-            out.append((float(u), float(v), float(r) * factor + extra_px, z_sup - delante, z_sup + diam + detras,
+            out.append((float(u), float(v), float(r) * factor + extra_px, z_sup - delante - ruido,
+                        z_sup + diam + detras + ruido,
                         float(v) + 0.5 * float(r), z_min))       # por debajo de esta fila, la mesa: no se toca
         return out
 
-    def cajas_mundo(self, margen=None):
-        """Caja (centro, semi) en el mundo alrededor de cada pelota vista: lo que hubiera marcado
-        antes en el mapa ahí (el halo) se borra."""
+    def cajas_mundo(self):
+        """La zona (_zona_mundo) de cada pelota vista en la última imagen: lo que se hubiera marcado antes en el
+        mapa ahí se borra. Las pelotas no son obstáculo (la mesa de debajo, sí)."""
         if self.T_mundo_cam is None:
             return []
-        margen = self.margen_mapa if margen is None else margen       # (18-nov) antes 4 cm
-        out = []
-        for e, p, diam, _ in self.ultimas:
-            c = self.T_mundo_cam[:3, :3] @ p + self.T_mundo_cam[:3, 3]
-            r = diam / 2.0
-            # de 1 cm por encima de su parte de abajo hacia arriba: lo que la sujeta (la mesa) se queda
-            z0, z1 = c[2] - r + 0.01, c[2] + r + margen
-            out.append((np.array([c[0], c[1], (z0 + z1) / 2]), np.array([r + margen, r + margen, (z1 - z0) / 2])))
-        return out
+        return [self._zona_mundo(p, diam) for e, p, diam, _ in self.ultimas]
 
     def dibujar(self, img):
         for e, p, diam, (u, v, r) in self.ultimas:

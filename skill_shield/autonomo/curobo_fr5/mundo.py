@@ -3,7 +3,7 @@ El mundo del planificador → mundo de cuRobo (17-nov). Sin cuRobo ni GPU (numpy
 puede probar en cualquier PC.
 
   · Rejilla de DISTANCIA CON SIGNO (ESDF, metros; negativo dentro de un obstáculo) con los cubos
-    ocupados del planificador (ya sin lo excluido, con el macizo) y el «suelo» de las mesas y de las
+    ocupados del planificador (ya sin lo excluido) y el «suelo» de las mesas y de las
     zonas de apoyo marcado como ocupado. cuRobo la usa como un VoxelGrid.
   · El entorno fijo del modelo de colisión: cápsulas (columna y cabezal del soporte…) y cajas
     (TELEOP_FR5_OBSTACULOS, cámaras…), y el suelo como una caja.

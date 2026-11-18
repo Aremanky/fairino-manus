@@ -30,6 +30,15 @@ O simplemente arrancar con la opción
 ```bash
 ./arrancar_nivel6.sh
 ```
+Cada vez que se lanza comprueba e instala **solo lo que falte**: el submódulo de los táctiles, el entorno
+`venv_nivel6` (y `requirements.txt` si ha cambiado), **cuRobo** (PyTorch para la GPU, cuRobo V2 en
+`externos/curobo` y la configuración del robot) y **TOPP-RA**; luego arranca. cuRobo y TOPP-RA son opcionales: si no
+se pueden instalar, avisa y arranca igual.
+```bash
+./arrancar_nivel6.sh --comprobar     # solo dice qué falta (no instala ni arranca)
+./arrancar_nivel6.sh --instalar      # instala lo que falte, sin arrancar
+./arrancar_nivel6.sh --probar        # además prueba cuRobo y TOPP-RA (sin mover el robot)
+```
 
 Paquetes del sistema (no van por pip): `sudo apt install zenity python3.12-tk`
 
@@ -87,7 +96,7 @@ Cambios de la revisión (todos con su clave en el bloque «(18-nov) Revisión de
 - **cuRobo** con la misma geometría y márgenes (mano + pelota cogida, mundo inflado); un fallo de la GPU ya no la apaga para toda la sesión (aviso en la web); sin RRT en CPU cuando está cuRobo.
 - **Agarre:** cierre con los **táctiles** (cada dedo hasta que toca, y desde ahí aprieta), **bajada vigilada** y **reintentos** (abre, sube y vuelve a planificar; `AUTONOMO_TAREA_REINTENTOS`).
 - **Ejecución:** tramos rectos a velocidad de la **palma** (lenta en los últimos 3 cm); desvío máximo 4° / 2 cm en la palma (comparado con lo mandado en los últimos 0,5 s); el afinado va en un hilo; ServoJ por UDP en este modo (vuelve solo a XML-RPC si no va); aviso si falta `FR5_CARGA_CDM_MM` (`python diagnosticos/estimar_cdm_mano.py` da una primera estimación).
-- **TOPP-RA** (opcional, `bash instalar_toppra.sh`): tramos articulares lo más rápidos posible respetando velocidad y aceleración de cada joint; sin él, el trapecio de siempre.
+- **TOPP-RA** (opcional; lo instala `./arrancar_nivel6.sh` si falta): tramos articulares lo más rápidos posible respetando velocidad y aceleración de cada joint; sin él, el trapecio de siempre.
 - **cuRobo con goalset:** en cada sitio, una sola llamada a la GPU elige la mejor de varias formas de llegar (`AUTONOMO_TAREA_OPCIONES_GPU`) y su camino (`MotionPlanner.plan_pose` con varias poses).
 - **Carga de la brida:** `python diagnosticos/identificar_carga.py --leer` (la que tiene la controladora) y sin `--leer` la mide con el robot (pares de J4-J6 en ~12 posturas de la muñeca, con el pedal) → `FR5_CARGA_CDM_MM`.
 - **Código:** `ejecucion.py` (Ejecutor, ManoActiva) y `mundo_tarea.py` salen de `tarea.py`. **Banco de pruebas** con los planes guardados: `python diagnosticos/banco_planes.py --guardar antes.json` y, tras un cambio, `--comparar antes.json`.

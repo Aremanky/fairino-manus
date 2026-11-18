@@ -1312,8 +1312,9 @@ AUTONOMO_MAPA_DIST_MAX = 1.7             # m de distancia REAL a la cámara: má
                                          # (el estéreo ahí tiene ruido de varios cm); sí dice que hasta ahí está libre
 AUTONOMO_MAPA_TSDF_K   = 0.02            # truncado = 2 cubos + K·distancia² (m): el ruido crece con la distancia²
 AUTONOMO_MAPA_TSDF_PESO_MAX = 20.0       # medidas que se promedian como mucho (más: más suave pero más lento en cambiar)
-# Mesas como PLANOS: se buscan planos horizontales (RANSAC), la tapa queda como una sola capa a su altura,
-# se limpia el ruido de justo encima y el planificador la usa de suelo para la mano y el brazo
+# Mesas como PLANOS: se buscan planos horizontales (RANSAC) y se publican; el planificador las usa de suelo para
+# la mano y el brazo (losas). (18-nov, tarde) El mapa ya NO se toca con ellas: antes la tapa se rellenaba en toda
+# su envolvente y se borraba lo que hubiera hasta ~6 cm por encima (la pelota, una caja baja, una herramienta)
 AUTONOMO_MAPA_MESAS    = True
                                          # del robot: x -1.0…0.6, y -1.1…0.4, z suelo…0.6
 AUTONOMO_MAPA_HZ       = 4.0             # actualizaciones por segundo
@@ -1344,9 +1345,8 @@ AUTONOMO_MAPA_MIN_PUNTOS = 4         # puntos en un cubo en una misma imagen par
 AUTONOMO_MAPA_MIN_GRUPO  = 4         # cubos ocupados juntos como mínimo (los sueltos son ruido)
 AUTONOMO_MAPA_OLVIDO_S = 30.0            # lo que no se ve en este tiempo vuelve a «desconocido»
 AUTONOMO_MAPA_MARGEN_ROBOT = 0.03        # m extra alrededor de las cápsulas del robot (se quita del mapa)
-AUTONOMO_MAPA_DESCONOCIDO_OCUPADO = True # para esquivar: lo tapado (debajo/detrás de algo) cuenta como obstáculo
-                                         # ⚠ AÚN SIN EFECTO: tarea.py no lo lee (hoja de ruta, límite «lo de
-                                         #   detrás se trata como ocupado»): hay que cablearlo en el planificador
+# (18-nov, tarde) quitado AUTONOMO_MAPA_DESCONOCIDO_OCUPADO (rellenar como obstáculo lo desconocido de debajo/detrás
+# de lo visto): no lo usaba nada. Los obstáculos son solo lo que mide la cámara.
 AUTONOMO_MAPA_VER_VISOR = True           # dibujar los obstáculos también en la ventana de MuJoCo
 AUTONOMO_MAPA_MAX_DIBUJO = 6000          # máx. de vóxeles que se dibujan (el mapa completo no tiene límite)
 # ── (17-nov) ESCENA FIJA: separar lo que NO se mueve de lo que cambia (skill_shield/autonomo/escena_fija.py) ──
@@ -1397,8 +1397,15 @@ AUTONOMO_MAPA_SIN_HALO_PELOTAS = True
 # hubiera alrededor). En lados del marcador desde su centro (medio ancho, hasta arriba, hasta abajo) + margen (m)
 AUTONOMO_MAPA_HOJA = (0.6, 0.6, 0.6)
 AUTONOMO_MAPA_HOJA_MARGEN = (0.005, 0.005, 0.03)   # (x, y, grosor): el grosor cubre el ruido de la profundidad
-# (18-nov) alrededor de cada pelota se quita del mapa solo ELLA (antes: su círculo ×1,4 hasta 30 cm por detrás + 4 cm)
-AUTONOMO_MAPA_MARGEN_PELOTA = 0.01
+# (18-nov) alrededor de cada pelota se quita del mapa solo ELLA (antes: su círculo ×1,4 hasta 30 cm por detrás + 4 cm).
+# (18-nov, tarde) «Ella» es dónde pueden caer SUS cubos (pelotas.zona_propia): una cápsula a lo largo del rayo de la
+# cámara con radio r + medio cubo en diagonal (1,7 cm con cubos de 2 cm) y larga como el ruido de la profundidad a
+# esa distancia (RUIDO_PROF_K · d²) + lo que la TSDF engorda las superficies hacia la cámara. Con r + 1 cm, a ~1 m la
+# cara de la pelota que mira a la cámara salía como obstáculo y la mano no podía bajar a cogerla. De lado no se quita
+# nada más: lo que haya al lado de la pelota sigue contando. Este margen se SUMA a eso (0 = solo lo calculado)
+AUTONOMO_MAPA_MARGEN_PELOTA = 0.0
+# píxeles de la pelota que no van al mapa: su círculo × factor (+ extra_px) y de «delante» m delante de su cara a
+# «detras» m detrás de su fondo, más el ruido de la profundidad a esa distancia (se suma solo)
 AUTONOMO_MAPA_HALO_PELOTA = dict(factor=1.1, extra_px=2, delante=0.02, detras=0.02)
 AUTONOMO_HERRAMIENTAS_N_ESTABLE = 5      # imágenes seguidas antes de darla por buena
 AUTONOMO_HERRAMIENTAS_OLVIDO_S  = 2.0    # sin verla este tiempo → deja de aparecer
@@ -1467,7 +1474,8 @@ AUTONOMO_TAREA_OPCIONES    = 3      # formas de llegar a cada sitio que se guard
 AUTONOMO_TAREA_USAR_MAPA  = True     # esquivar (comprobar) también el mapa de obstáculos de la cámara
 AUTONOMO_TAREA_EXCLUIR_RADIO = 0.09   # (18-nov) m alrededor del centro de cada MARCADOR que no cuentan (antes 0.15):
                                      # lo justo para sus esquinas (marcador de 12,4 cm); lo de alrededor cuenta
-AUTONOMO_TAREA_EXCLUIR_PELOTA_MARGEN = 0.01   # (18-nov) la pelota (+1 cm, antes +3 cm) no cuenta como obstáculo
+AUTONOMO_TAREA_EXCLUIR_PELOTA_MARGEN = 0.0    # (18-nov, tarde) margen EXTRA sobre la zona de la pelota que no cuenta
+                                     # como obstáculo (la misma que se quita del mapa: AUTONOMO_MAPA_MARGEN_PELOTA)
 # (18-nov) Corrección FIJA de dónde se coge la pelota, en m, vista en la imagen de la cámara de cabeza (la de la web):
 # (derecha, lejos, arriba). La mano la cogía ~1,5 cm a la DERECHA → derecha = -0.015. Si empeora, pon +0.015.
 AUTONOMO_TAREA_PELOTA_CORRECCION_M = (0.0, 0.0, 0.0)
@@ -1514,9 +1522,10 @@ AUTONOMO_TAREA_PELOTA_PREFERIR_DERECHO = 0.3      # coste extra por radián de i
 AUTONOMO_TAREA_PELOTA_DEDOS_EXTRA = 0.035         # m más lejos la palma «con los dedos» (0 = no probarlo)
 AUTONOMO_TAREA_PELOTA_APOYO_GRUESO = 0.06         # m bajo la pelota que aún son «la mesa con ruido»
 # ── (17-nov) camino hasta el objeto: pensado para escalar a herramientas (el agarre, luego, entrenado) ──
-# Mesa: la cámara solo ve la superficie de las cosas; por debajo de lo visto, macizo hasta el suelo.
-AUTONOMO_TAREA_MAPA_MACIZO = False     # (tarde) NO: volvía columnas hasta el suelo el ruido suelto y era lento
-AUTONOMO_TAREA_MESA_HASTA_SUELO = True # lo macizo son las MESAS detectadas como plano (de su tapa al suelo)
+# (18-nov, tarde) quitado AUTONOMO_TAREA_MAPA_MACIZO (rellenar hasta el suelo lo que hay bajo cada cubo; apagado
+# desde el 17-nov). Las MESAS detectadas como plano son losas para el planificador (no se dibujan en el gemelo):
+AUTONOMO_TAREA_MESA_HASTA_SUELO = True # True: la losa llega de su tapa al suelo (el brazo no se mete en una cajonera
+                                       # vista solo por arriba) · False: losa de AUTONOMO_TAREA_PELOTA_GROSOR_SUELO_ZONA
 AUTONOMO_TAREA_MAPA_GRUPO_MIN = 12     # grupos de cubos sueltos más pequeños que esto: ruido, no cuentan
 # Zona de la pelota: el «suelo» cubre la mesa que se ve alrededor (también el hueco que deja la mano) y
 # vale para la mano Y el brazo hasta esta profundidad (antes solo la mano: el antebrazo se metía en la cajonera)
@@ -1556,7 +1565,7 @@ AUTONOMO_TAREA_PELOTA_APOYO_TOL = 0.04   # m que puede corregir (si la mesa medi
 # ── (17-nov) cuRobo (NVIDIA, GPU) para ir de un sitio a otro ──
 # "curobo": cuRobo PROPONE cada tramo en la GPU y el planificador de aquí lo VERIFICA con todas sus
 # comprobaciones (mano con su postura, lo que lleva, J4, mesas…); si no lo acepta, o si cuRobo no está
-# instalado o falla, se usa el camino propio. "propio": solo el de siempre. Instalar: bash instalar_curobo.sh
+# instalado o falla, se usa el camino propio. "propio": solo el de siempre. Lo instala ./arrancar_nivel6.sh si falta
 AUTONOMO_TAREA_PLANIFICADOR = "curobo"
 AUTONOMO_CUROBO_ROBOT = "curobo_fr5/fr5_orca.yml"   # la genera python -m skill_shield.autonomo.curobo_fr5.robot
 AUTONOMO_CUROBO_INTENTOS = 4               # intentos de cuRobo por tramo (con RRT a partir del 2º)
@@ -1651,7 +1660,7 @@ AUTONOMO_CUROBO_PELOTA_DIAMETRO = 0.07        # la pelota cogida, en las esferas
 AUTONOMO_CUROBO_MAX_GOALSET = 16              # poses alternativas por llamada (cuRobo reserva memoria para ellas)
 AUTONOMO_TAREA_OPCIONES_GPU = 8               # formas de llegar a cada sitio que se le pasan (sin cuRobo: OPCIONES)
 # Tramos ARTICULARES con TOPP-RA (el más rápido que respeta velocidad y aceleración de cada joint, también en las
-# esquinas). Si no está instalado (bash instalar_toppra.sh), el trapecio de siempre.
+# esquinas). Si no está instalado (lo instala ./arrancar_nivel6.sh si falta), el trapecio de siempre.
 AUTONOMO_TAREA_TOPPRA = True
 AUTONOMO_TAREA_TOPPRA_TOL_DEG = 0.5           # cuánto puede separarse el spline del camino comprobado
 # La autocorrección de la calibración con el brazo, CONGELADA mientras hay una tarea (de planificar a
