@@ -167,3 +167,43 @@ def test_hoja_y_analisis_guardado(tmp_path):
     board, det = MP.crear_tablero()
     corners, ids, _, _ = det.detectBoard(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
     assert ids is not None and len(ids) == 24                                # se lee entera
+
+
+# (19-nov) La hoja vista DE CANTO (como en la caja, ~60-70° respecto a su normal). solvePnPRansac (núcleo EPnP con
+# 5 puntos) se degeneraba con un tablero plano tan inclinado: se quedaba con UNA fila de esquinas alineadas
+# («8/24 esquinas; detectadas 24» en la ventana) y daba una pose falsa, a >10 cm, con «OK».
+def _esquinas_proyectadas(T, ruido_px=0.2, seed=0):
+    board, _ = MP.crear_tablero()
+    obj = board.getChessboardCorners().astype(np.float64)
+    uv = cv2.projectPoints(obj, cv2.Rodrigues(T[:3, :3])[0], T[:3, 3], K, DIST)[0].reshape(-1, 2)
+    return obj, uv + np.random.default_rng(seed).normal(0, ruido_px, uv.shape)
+
+
+@pytest.mark.parametrize("inclinacion", [8.0, 15.0, 25.0, 35.0])
+def test_pose_con_la_hoja_de_canto(inclinacion):
+    T = _pose_hoja(inclinacion_deg=inclinacion)
+    obj, uv = _esquinas_proyectadas(T)
+    r = MP._pose_robusta(obj, uv, K, DIST, 1.5, 0.035)
+    assert r is not None, "no da pose con las 24 esquinas exactas"
+    Ti, idx = r[0], r[1]
+    assert len(idx) == 24, f"solo {len(idx)}/24 esquinas como buenas"
+    err = np.linalg.norm((Ti[:3, :3] @ obj.T).T + Ti[:3, 3] - ((T[:3, :3] @ obj.T).T + T[:3, 3]), axis=1).max()
+    assert err < 0.003, f"pose a {err * 1000:.1f} mm"
+
+
+def test_pose_quita_esquinas_malas():
+    T = _pose_hoja(inclinacion_deg=15.0)
+    obj, uv = _esquinas_proyectadas(T)
+    malas = [3, 10, 17, 20]
+    uv[malas] += [[9, -6], [-7, 8], [8, 7], [-9, -5]]
+    r = MP._pose_robusta(obj, uv, K, DIST, 1.5, 0.035)
+    assert r is not None
+    assert not set(malas) & set(r[1].tolist()) and len(r[1]) == 20
+
+
+def test_una_fila_sola_no_da_pose():
+    """Esquinas alineadas (una fila) no fijan la inclinación de la hoja: mejor «NO DETECTADO» que una pose falsa."""
+    T = _pose_hoja(inclinacion_deg=15.0)
+    obj, uv = _esquinas_proyectadas(T)
+    fila = np.arange(6, 12)
+    assert MP._pose_robusta(obj[fila], uv[fila], K, DIST, 1.5, 0.035) is None

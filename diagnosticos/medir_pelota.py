@@ -175,22 +175,62 @@ def completar_esquinas(gris, board, K, dist, rvec, tvec, ids_det):
     return np.array(nuevos_ids, int), np.array(nuevos, np.float64).reshape(-1, 2)
 
 
-def _pose_robusta(obj, pts, K, dist, max_reproj_px):
-    """RANSAC + refinado con los inliers. (T 4x4, inliers, rvec, tvec, error rms px) o None."""
+_CRIT_SIN_DIST = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 100, 1e-12)
+
+
+def _bien_repartidas(obj, lado):
+    """(19-nov) Las esquinas tienen que cubrir un ÁREA de la hoja, no una fila: con una fila sola la inclinación
+    de la hoja queda sin fijar y sale una pose cualquiera que «cuadra» con esos puntos."""
+    xy = obj[:, :2] - obj[:, :2].mean(0)
+    s = np.linalg.svd(xy, compute_uv=False) / np.sqrt(max(len(xy), 1))
+    return bool(s[-1] >= 0.4 * lado)
+
+
+def _residuos(obj, pts, rvec, tvec, K, dist):
+    return np.linalg.norm(cv2.projectPoints(obj, rvec, tvec, K, dist)[0].reshape(-1, 2) - pts, axis=1)
+
+
+def _pose_robusta(obj, pts, K, dist, max_reproj_px, lado, umbral_px=2.0):
+    """Pose de la hoja: (T 4x4, índices de las esquinas buenas, rvec, tvec, error rms px) o None.
+    (19-nov) Antes era solvePnPRansac, cuyo núcleo (EPnP con 5 puntos) se DEGENERA con un tablero plano visto
+    de canto (la hoja en la caja, a 60-70° de su normal): se quedaba con UNA fila de esquinas alineadas
+    («8/24 esquinas; detectadas 24» en la ventana) y daba una pose falsa, a >10 cm, con «OK». Ahora: IPPE
+    (el método para objetos PLANOS, sin punto de partida) con TODAS las esquinas, se quitan las que se alejan
+    y se repite. Los ids del ChArUco ya emparejan cada esquina, así que casi nunca hay malas."""
+    obj, pts = np.asarray(obj, np.float64), np.asarray(pts, np.float64)
+    # la distorsión se quita una vez, con muchas iteraciones (el modelo racional de la OAK tiene coeficientes
+    # grandes), y se resuelve en coordenadas normalizadas
+    sin_dist = getattr(cv2, "undistortPointsIter", None)          # OpenCV 4.x (en 5.x lo hace undistortPoints)
     try:
-        ok, rvec, tvec, inl = cv2.solvePnPRansac(obj, pts, K, dist, iterationsCount=100, reprojectionError=2.5,
-                                                 confidence=0.99, flags=cv2.SOLVEPNP_ITERATIVE)
-        if not ok or inl is None:
-            return None
-        idx = inl.ravel()
-        ok, rvec, tvec = cv2.solvePnP(obj[idx], pts[idx], K, dist, rvec, tvec, True, flags=cv2.SOLVEPNP_ITERATIVE)
-        if not ok:
-            return None
-        rvec, tvec = cv2.solvePnPRefineLM(obj[idx], pts[idx], K, dist, rvec, tvec)
+        un = (sin_dist(pts.reshape(-1, 1, 2), K, dist, None, None, _CRIT_SIN_DIST) if sin_dist else
+              cv2.undistortPoints(pts.reshape(-1, 1, 2), K, dist, None, None, None, _CRIT_SIN_DIST)).reshape(-1, 2)
     except cv2.error:
         return None
-    proy = cv2.projectPoints(obj[idx], rvec, tvec, K, dist)[0].reshape(-1, 2)
-    error = float(np.sqrt(np.mean(np.sum((proy - pts[idx]) ** 2, axis=1))))
+    idx = np.arange(len(obj))
+    r = None
+    for _ in range(4):
+        if len(idx) < 6 or not _bien_repartidas(obj[idx], lado):
+            return None
+        try:
+            ok, rvec, tvec = cv2.solvePnP(obj[idx], un[idx], np.eye(3), None, flags=cv2.SOLVEPNP_IPPE)
+        except cv2.error:
+            return None
+        if not ok:
+            return None
+        r = _residuos(obj, pts, rvec, tvec, K, dist)
+        nuevo = np.flatnonzero(r < max(umbral_px, 3.0 * float(np.median(r[idx]))))
+        if np.array_equal(nuevo, idx):
+            break
+        idx = nuevo
+    if len(idx) < 6 or not _bien_repartidas(obj[idx], lado):
+        return None
+    try:                         # afinado final con la distorsión de verdad; solo si mejora
+        rv2, tv2 = cv2.solvePnPRefineLM(obj[idx], pts[idx], K, dist, rvec.copy(), tvec.copy())
+        if np.sqrt(np.mean(_residuos(obj[idx], pts[idx], rv2, tv2, K, dist) ** 2)) < np.sqrt(np.mean(r[idx] ** 2)):
+            rvec, tvec = rv2, tv2
+    except cv2.error:
+        pass
+    error = float(np.sqrt(np.mean(_residuos(obj[idx], pts[idx], rvec, tvec, K, dist) ** 2)))
     if not np.isfinite(error) or error > max_reproj_px:
         return None
     T = np.eye(4)
@@ -209,6 +249,7 @@ def pose_tablero(detector, board, img, K, dist, min_esquinas=8, max_reproj_px=1.
     gris = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
     obj_completo = board.getChessboardCorners().astype(np.float64)
     total = len(obj_completo)
+    lado = float(board.getSquareLength())
     # (19-nov) los parámetros del detector (crear_tablero) son para ~ANCHO_DETECCION px de ancho: se escala
     # la imagen a eso (640 → x3, 1352 → x1,42); con los parámetros de antes, AMPLIAR quitaba marcadores
     e = max(1.0, ANCHO_DETECCION / float(gris.shape[1]))
@@ -230,7 +271,7 @@ def pose_tablero(detector, board, img, K, dist, min_esquinas=8, max_reproj_px=1.
         n_det = max(n_det, len(ids))
         if len(ids) < 6:
             continue
-        r = _pose_robusta(obj_completo[ids], pts, K, dist, max_reproj_px)
+        r = _pose_robusta(obj_completo[ids], pts, K, dist, max_reproj_px, lado)
         if r is None:
             continue
         T, idx, rvec, tvec, error = r
@@ -239,7 +280,7 @@ def pose_tablero(detector, board, img, K, dist, min_esquinas=8, max_reproj_px=1.
             ids2, pts2 = completar_esquinas(gris, board, K, dist, rvec, tvec, ids)
             if len(ids2):
                 ids_t, pts_t = np.concatenate([ids, ids2]), np.vstack([pts, pts2])
-                r2 = _pose_robusta(obj_completo[ids_t], pts_t, K, dist, max_reproj_px)
+                r2 = _pose_robusta(obj_completo[ids_t], pts_t, K, dist, max_reproj_px, lado)
                 if r2 is not None and len(r2[1]) > len(ids):
                     T, idx, _, _, error = r2
                     ids, pts = ids_t[idx], pts_t[idx]
