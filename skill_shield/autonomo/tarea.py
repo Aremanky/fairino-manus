@@ -2538,6 +2538,8 @@ class Tarea:
         self._fabrica_plan = fabrica_planificador
         self._fabrica_mano = fabrica_mano
         self._planificador = None
+        # (18-nov) registro de cada intento (diagnosticos/intentos.jsonl; resumen: diagnosticos/resumen_intentos.py)
+        self._intento, self._intento_info = None, {}
         self.estado, self.texto = "libre", "Elige la herramienta y pulsa «Planificar»."
         self.plan, self.ejec = None, None
         self._q_inicio = None
@@ -2604,12 +2606,70 @@ class Tarea:
         elif a == "volver":
             self._pedir_plan(contexto, volver=True)
 
+    # ── (18-nov) registro de intentos ──
+    def _ruta_registro(self):
+        import os
+        if os.environ.get("SKILL_SHIELD_REGISTRO_INTENTOS") == "0":          # las pruebas
+            return None
+        r = str(_g(self.cfg, "AUTONOMO_TAREA_REGISTRO", "diagnosticos/intentos.jsonl") or "")
+        return (r if os.path.isabs(r) else os.path.join(self.raiz, r)) if r else None
+
+    def _registrar(self, evento, **campos):
+        """Una línea JSON por evento del intento en curso. Nunca para la tarea si falla."""
+        if self._intento is None:
+            return
+        ruta = self._ruta_registro()
+        if ruta is None:
+            return
+        try:
+            import json
+            import os
+            os.makedirs(os.path.dirname(ruta), exist_ok=True)
+            fila = dict(t=time.strftime("%Y-%m-%dT%H:%M:%S"), intento=self._intento, evento=evento,
+                        simulacro=bool(self.simulacro), **campos)
+            if evento == "fin":
+                fila.update(self._intento_info)
+                fila["reintentos"] = int(self._reintentos)
+            with open(ruta, "a", encoding="utf-8") as f:
+                f.write(json.dumps(fila, ensure_ascii=False, default=lambda o: np.asarray(o).tolist()) + "\n")
+        except Exception as e:
+            print(f"⚠️  Tarea: no se pudo apuntar el intento ({e})")
+        if evento == "fin":
+            self._intento, self._intento_info = None, {}
+
+    def _empezar_intento(self, h):
+        if self._intento is not None:                    # el anterior se quedó a medias (otro «Planificar»)
+            self._registrar("fin", ok=False, cancelada=True, motivo="otro «Planificar» antes de acabar")
+        self._intento = time.strftime("%Y%m%d_%H%M%S") + f"_{id(self) % 1000:03d}"
+        T = np.asarray(h["T_mundo"], float)
+        info = dict(objetivo=h.get("nombre"), tipo=h.get("tipo"), centro_mundo=np.round(T[:3, 3], 4).tolist(),
+                    distancia_camara_m=h.get("distancia_m"), temblor_mm=h.get("temblor_mm"),
+                    diametro_m=h.get("diametro_m"), apoyo_z=h.get("apoyo_z"))
+        if h.get("T_cam") is not None:                   # dónde está en la imagen (para ver si influye)
+            c = np.asarray(h["T_cam"], float)[:3, 3]
+            info["centro_camara"] = np.round(c, 4).tolist()
+        self._intento_info = info
+
+    def _registrar_plan(self, r, x, seg, n_vox):
+        pl = self._planificador
+        campos = dict(ok=r == "ok", segundos=round(float(seg), 2), reintento=int(self._reintentos))
+        if r == "ok":
+            campos.update(nombre=getattr(x, "nombre", None), cubos=int(n_vox),
+                          apartarse=bool(getattr(x, "replanificar", False)),
+                          modo=getattr(pl, "modo_pelota", None), inclinaciones=getattr(pl, "inclinaciones", None),
+                          rodeos=getattr(pl, "rodeos", 0), tramos_curobo=getattr(pl, "tramos_curobo", 0),
+                          curobo_rechazos=getattr(pl, "curobo_rechazos", 0))
+        else:
+            campos["motivo"] = str(x)
+        self._registrar("plan", **campos)
+
     def _puede_planificar(self):
         return self.estado in ("libre", "lista", "terminada", "error", "pausada")
 
-    def _pedir_plan(self, ctx, volver, mirar=True, reintento=False):
+    def _pedir_plan(self, ctx, volver, mirar=True, reintento=False, nuevo_intento=True):
         """reintento (18-nov): lo pide la propia tarea tras subir para reintentar el agarre (o tras apartarse
-        a mirar durante un reintento): se ejecuta solo (con el pedal) y conserva la postura de inicio."""
+        a mirar durante un reintento): se ejecuta solo (con el pedal) y conserva la postura de inicio.
+        nuevo_intento=False: es la continuación del mismo intento (tras apartarse a mirar) para el registro."""
         if not self._puede_planificar():
             return
         if self.estado == "pausada":
@@ -2634,6 +2694,8 @@ class Tarea:
             dej = next((h for h in lista if h.get("tipo") == "punto_dejada"), None)
             pelota = herr is not None and herr.get("tipo") == "pelota"
             self._pelota_id = herr.get("id") if pelota else None
+            if not reintento and nuevo_intento and herr is not None:
+                self._empezar_intento(herr)
             # (18-nov) cámara→mundo con la que se midió la pelota (con la autocorrección de ese momento): al
             # afinar, si no se ve, se recoloca con la de entonces (ver _recolocar)
             tc = ctx.get("T_mundo_cam")
@@ -2820,6 +2882,8 @@ class Tarea:
         self._t_desvio = 0.0
 
     def _cancelar(self, texto):
+        if self.ejec is not None or self.estado in ("planificando", "lista"):
+            self._registrar("fin", ok=False, cancelada=True, motivo=texto or "cancelada")
         self._parar_fr5()
         self.ejec = None
         self.plan = None
@@ -2837,6 +2901,7 @@ class Tarea:
         self._conservar_inicio = False
         self.estado, self.texto = "error", texto
         print(f"⚠️  Tarea: {texto}")
+        self._registrar("fin", ok=False, motivo=texto)
 
     def _parar_fr5(self):
         if self._enviando and self.fr5 is not None:
@@ -2861,6 +2926,7 @@ class Tarea:
         if self.estado == "planificando" and self._resultado is not None:
             r, x, seg, n_vox = self._resultado
             self._resultado = None
+            self._registrar_plan(r, x, seg, n_vox)
             if r == "ok":
                 self.plan = x
                 apartarse = bool(getattr(x, "replanificar", False))
@@ -2992,7 +3058,8 @@ class Tarea:
             except Exception:
                 ctx = None
             if ctx:
-                self._pedir_plan(ctx, volver=False, mirar=reintento, reintento=self._conservar_inicio)
+                self._pedir_plan(ctx, volver=False, mirar=reintento, reintento=self._conservar_inicio,
+                                 nuevo_intento=False)
             else:
                 self.texto = "Ya veo la mesa: pulsa «Planificar»."
             return q if self.simulacro else None
@@ -3003,6 +3070,8 @@ class Tarea:
             self.estado, self.texto = "terminada", f"Hecho: {nombre}." + (
                 f" Cerró con los táctiles ({', '.join(info['tocados']) or 'ningún dedo notó la pelota'})." if info else "")
             self._conservar_inicio = False
+            if nombre != "volver al inicio":
+                self._registrar("fin", ok=True, texto=self.texto)
             print(f"✅ Tarea: {self.texto}")
             q = self.ejec.q()
             self.ejec = None
@@ -3058,6 +3127,7 @@ class Tarea:
                                   f" (tras {self._reintentos} reintentos): tarea parada.") + " La mano se queda como está.")
             return None
         self._reintentos += 1
+        self._registrar("reintento", n=self._reintentos, motivo=motivo)
         q = self.ejec.q()
         bajada = np.asarray(self.plan.fases[pz["i_bajar"]].qs, float)
         k = int(np.argmin(np.max(np.abs(bajada - q), axis=1)))
@@ -3091,8 +3161,11 @@ class Tarea:
             e = {}
         if e.get("estado") != "ok" or not e.get("dedos"):
             print("⚠️  Tarea: sin táctiles, no se comprueba si se ha cogido la pelota.")
+            self._registrar("agarre", ok=None, motivo="sin táctiles")
             return None
         n = sum(1 for d in e["dedos"] if (d.get("fz") or 0.0) >= self.tactil_n)
+        self._registrar("agarre", ok=n >= self.tactil_dedos, dedos=n,
+                        fuerzas=[round(float(d.get("fz") or 0.0), 2) for d in e["dedos"]])
         if n < self.tactil_dedos:
             return f"No noto la pelota en los dedos (solo {n} con más de {self.tactil_n:g} N)"
         print(f"✋ Tarea: pelota cogida ({n} dedos la notan).")
@@ -3133,6 +3206,8 @@ class Tarea:
         dc = np.asarray(c2, float) - pz["c"]
         pz["c"] = np.asarray(c2, float)
         self.afinado_cm = round(n * 100, 1)
+        self._registrar("afinado", cm=self.afinado_cm, recolocado=bool(recolocado),
+                        desplazamiento_cm=[round(100 * float(v), 1) for v in dc])
         if recolocado:
             print(f"🎯 Tarea: afinado sin verla: con la corrección de la cámara junto al brazo, la pelota está "
                   f"{n * 100:.1f} cm desplazada (x, y, z: {', '.join(f'{100 * v:+.1f}' for v in dc)} cm) → bajada corregida.")

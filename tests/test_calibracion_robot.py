@@ -7,6 +7,7 @@ Las distancias «de verdad» de estas pruebas se calculan aquí mismo, por fuerz
 piezas del gemelo (mallas del MJCF) y con medidas escritas a mano, sin pasar por el comprobador
 de choques que se está probando.
 """
+import json
 import math
 import os
 import sys
@@ -938,6 +939,109 @@ def test_verificar_recorre_las_posturas_guardadas_y_mide_el_error(calib, cadena,
     assert max(visitadas) < 0.3, visitadas                         # ha pasado por las cuatro
     with open(os.path.splitext(archivos.ARCHIVO)[0] + "_verificacion.json", encoding="utf-8") as f:
         assert max(json.load(f)["errores_mm"]) < 1.5
+
+
+def _guardar_verificacion(archivos, q0, giros):
+    import json
+    guardadas = [dict(q=(q0 + np.radians(g)).tolist(), capturar=True) for g in giros]
+    with open(archivos.POSTURAS, "w", encoding="utf-8") as f:
+        json.dump(guardadas, f)
+    C.guardar(archivos.ARCHIVO, dict(T_mundo_cam=T_MUNDO_CAM, T_brida_tablero=T_BRIDA_TABLERO_20, metodo="a mano",
+                                     error_medio_mm=0.0, error_max_mm=0.0),
+              mxid="SIMULADA", K=K_CAM, dist=np.zeros(5), ancho=ANCHO, alto=ALTO, tablero=TABLERO_20,
+              n_muestras=0, usadas=[])
+    return guardadas
+
+
+def test_verificar_sin_pedal_entra_por_la_ultima_postura_y_ataja(calib, cadena, reloj, archivos, capsys, monkeypatch):
+    """(19-nov) Rotura que caza: --verificar solo sabía empezar por la PRIMERA postura guardada (tras
+    --auto el robot está en la última; si el trayecto no valía, la ventana se cerraba al poco) y
+    recorría todas las posturas hasta la última medida. Con --sin, entra por la más cercana, ataja
+    y mide sin que nadie pise nada."""
+    crc_ = calib()
+    monkeypatch.setattr(crc_, "SIN_PEDAL", True)
+    q0 = np.radians(Q0_DEG)
+    giros = [[0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 5], [0, 0, 0, 0, 0, 10], [0, 0, 0, 0, 0, 15],
+             [0, 0, 0, 4, 0, 15], [0, 0, 0, 8, 0, 15], [0, 0, 0, 8, 0, 8], [0, 0, 0, 8, 0, 0]]
+    guardadas = _guardar_verificacion(archivos, q0, giros)
+    fr5 = FR5Simulado(np.array(guardadas[-1]["q"]) + np.radians([0.5, 0, 0, 0, 0, 0]))   # donde acaba --auto
+    s = SesionSimulada(cadena, reloj, fr5, T_BRIDA_TABLERO_20, TABLERO_20, tope_s=300.0)
+    s.pedal = crc_.SinPedal()
+
+    ok = crc_.modo_repetir_o_verificar(True, s=s)
+
+    salida = capsys.readouterr().out
+    assert ok is True, salida[-800:]
+    assert "SIN PEDAL" in salida and "entra por la postura guardada 8" in salida, salida[-800:]
+    with open(os.path.splitext(archivos.ARCHIVO)[0] + "_verificacion.json", encoding="utf-8") as f:
+        assert len(json.load(f)["errores_mm"]) == 4
+
+
+def test_verificar_sin_entrada_segura_no_mueve_y_lo_dice_en_la_ventana(calib, cadena, reloj, archivos, monkeypatch):
+    """(19-nov) Si desde donde está el robot no se puede ir a ninguna postura guardada: no se mueve,
+    el motivo se queda en la ventana (no se cierra sin más) y el programa acaba con ese mensaje."""
+    crc_ = calib()
+    monkeypatch.setattr(crc_, "SIN_PEDAL", True)
+    q0 = np.radians(Q0_DEG)
+    _guardar_verificacion(archivos, q0, [[0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 15]])
+    fr5 = FR5Simulado(q0 + np.radians([0, 0, 0, 0, 0, 40]))
+    s = SesionSimulada(cadena, reloj, fr5, T_BRIDA_TABLERO_20, TABLERO_20, tope_s=300.0)
+    s.pedal = crc_.SinPedal()
+    monkeypatch.setattr(crc_, "_entrada", lambda *a, **k: None)
+    huds = []
+    real = s.vuelta
+    monkeypatch.setattr(s, "vuelta", lambda objetivo=None, hud=(): (huds.append(list(hud)), real(objetivo, hud))[1])
+
+    with pytest.raises(SystemExit) as salida:
+        crc_.modo_repetir_o_verificar(True, s=s)
+
+    assert "no hay un trayecto seguro" in str(salida.value)
+    assert any(h and h[0].startswith("NO SE PUEDE SEGUIR") for h in huds)
+    assert fr5.publicados == [] and fr5.habilitado is False
+
+
+class FR5QueTiembla(FR5Simulado):
+    """El FR5 real con la mano + el tablero: llega, pero su lectura no baja de ±0,08° (más que QUIETO_DEG)."""
+
+    def q_real_rad(self, max_edad_s=0.3):
+        t = len(self.recorrido) * PASO_S
+        return np.radians(self.q + 0.08 * np.sin(2 * math.pi * 3.0 * t + np.arange(6)))
+
+
+def test_verificar_no_se_queda_pillado_si_el_robot_tiembla_al_llegar(calib, cadena, reloj, archivos, capsys,
+                                                                    monkeypatch):
+    """(19-nov) Rotura que caza: «va a una pose y se queda pillado». ir_a solo daba por llegada la
+    postura con el robot por debajo de QUIETO_DEG (0,05°) y no tenía tiempo máximo: un brazo que
+    tiembla un poco al llegar lo dejaba esperando para siempre. Ahora sigue y mide."""
+    crc_ = calib()
+    monkeypatch.setattr(crc_, "SIN_PEDAL", True)
+    q0 = np.radians(Q0_DEG)
+    guardadas = _guardar_verificacion(archivos, q0, [[0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 15], [0, 0, 0, 8, 0, 15]])
+    fr5 = FR5QueTiembla(np.array(guardadas[0]["q"]))
+    s = SesionSimulada(cadena, reloj, fr5, T_BRIDA_TABLERO_20, TABLERO_20, tope_s=300.0)
+    s.pedal = crc_.SinPedal()
+
+    ok = crc_.modo_repetir_o_verificar(True, s=s)
+
+    salida = capsys.readouterr().out
+    assert ok is True, salida[-800:]
+    with open(os.path.splitext(archivos.ARCHIVO)[0] + "_verificacion.json", encoding="utf-8") as f:
+        assert len(json.load(f)["errores_mm"]) == 3
+
+
+def test_capturar_no_espera_para_siempre_si_la_camara_no_manda_imagenes(calib, cadena, reloj):
+    """(19-nov) Sin imágenes nuevas, capturar esperaba para siempre: ahora lo deja y dice por qué."""
+    crc_ = calib()
+    q0 = np.radians(Q0_DEG)
+    s = SesionSimulada(cadena, reloj, FR5Simulado(q0), T_BRIDA_TABLERO_20, TABLERO_20, tope_s=60.0)
+
+    def sin_imagen(hud=()):
+        reloj.t += PASO_S
+        return False
+    s._mirar = sin_imagen
+
+    assert s.capturar() is None
+    assert "sin mandar imágenes" in s.motivo_captura
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════════════

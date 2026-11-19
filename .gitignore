@@ -239,6 +239,11 @@ __marimo__/
 *.correccion.json
 
 diagnosticos/*.npz
+# (18-nov) registro de intentos y medidas de la pelota (se mandan aparte, no van al repo)
+diagnosticos/intentos.jsonl
+diagnosticos/medidas_pelota/
+diagnosticos/hoja_medir_pelota.png
+diagnosticos/estorbo_*.png
 
 # Resultados que genera cada puesto al calibrar / verificar
 *_verificacion.json

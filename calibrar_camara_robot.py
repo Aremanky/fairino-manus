@@ -15,6 +15,8 @@ Uso (cierra antes el modo autónomo / la teleoperación: la cámara y el robot t
                                                       #   elige las posturas, las recorre y calibra
   python calibrar_camara_robot.py --repetir           # repite las posturas guardadas y recalibra
   python calibrar_camara_robot.py --verificar         # va a unas pocas posturas y comprueba el error
+  python calibrar_camara_robot.py --verificar --sin   # (19-nov) igual pero SIN PEDAL: entra por la postura
+                                                      #   guardada más cercana y va sola a ~4 posturas
   python calibrar_camara_robot.py --verificar --aqui  # comprueba en la postura actual, sin moverlo
   python calibrar_camara_robot.py --manual            # MANUAL: mueves tú el robot (arrastre en la
                                                       #   WebApp) y pulsas ESPACIO en cada postura
@@ -110,6 +112,16 @@ TEMBLOR_ESPERA_MAX_S = float(getattr(cfg, "CALIB_ROBOT_TEMBLOR_ESPERA_S", 8.0))
 PERDIDAS_MAX = int(getattr(cfg, "CALIB_ROBOT_PERDIDAS_MAX", 2))   # imágenes seguidas sin tablero que se toleran al capturar
 QUIETO_DEG = 0.05               # el robot cuenta como quieto si en 0,6 s se mueve menos que esto
 LLEGADA_DEG = 0.3               # postura alcanzada
+# (19-nov) ninguna espera sin fin: antes, si el robot llegaba pero no bajaba de QUIETO_DEG (tiembla con
+# la mano + tablero), si la cámara dejaba de mandar imágenes o si la controladora se quedaba en error,
+# el programa se quedaba esperando para siempre en esa postura («se queda pillado»)
+CASI_QUIETO_DEG = float(getattr(cfg, "CALIB_ROBOT_CASI_QUIETO_DEG", 0.3))   # tras ESPERA_S + LLEGADA_TOLERANCIA_S, basta con esto
+LLEGADA_TOLERANCIA_S = float(getattr(cfg, "CALIB_ROBOT_LLEGADA_TOLERANCIA_S", 4.0))
+LLEGADA_MAX_S = float(getattr(cfg, "CALIB_ROBOT_LLEGADA_MAX_S", 15.0))   # llegado pero sin quedarse quieto → se salta
+POSTURA_MARGEN_S = float(getattr(cfg, "CALIB_ROBOT_POSTURA_MARGEN_S", 25.0))   # sobre lo que dura el trayecto
+ERROR_PERSISTENTE_S = float(getattr(cfg, "CALIB_ROBOT_ERROR_MAX_S", 30.0))      # controladora en error tanto → se para
+SIN_IMAGEN_S = float(getattr(cfg, "CALIB_ROBOT_SIN_IMAGEN_S", 3.0))            # cámara sin imágenes tanto → no se captura
+SIN_LECTURA_S = 10.0            # sin pose real del robot tanto → se para
 
 
 class Cancelado(Exception):
@@ -501,11 +513,17 @@ class Robot:
         return q
 
     @property
-    def quieto(self):
+    def movimiento_deg(self):
+        """Lo máximo que se ha movido un joint en los últimos 0,6 s (°), o None si no hay historial."""
         if len(self._hist) < 5 or self._hist[-1][0] - self._hist[0][0] < 0.45:
-            return False
+            return None
         Q = np.array([q for _, q in self._hist])
-        return float(np.degrees(np.max(Q.max(0) - Q.min(0)))) < QUIETO_DEG
+        return float(np.degrees(np.max(Q.max(0) - Q.min(0))))
+
+    @property
+    def quieto(self):
+        m = self.movimiento_deg
+        return m is not None and m < QUIETO_DEG
 
 
 # ═════════════ sesión: ventana + cámara + robot ═════════════
@@ -554,11 +572,13 @@ class Sesion:
         self.dev, self.cola, self.info = abrir_camara()
         self.K, self.dist = self.info["K"], self.info["dist"]
         self.P = C.puntos_tablero(TABLERO["cuadros"], TABLERO["lado"])
+        # (19-nov) la mano ANTES de abrir la ventana: su espera de 3 s (time.sleep) dejaba la ventana
+        # recién creada congelada («no responde»)
+        self.mano_recta = abrir_mano_recta()             # (12-nov) la mano con par, recta, sujetando el tablero
         self.ventana = "Calibracion camara-robot"
         cv2.namedWindow(self.ventana, cv2.WINDOW_NORMAL)
         _f = min(0.75, 1400.0 / float(self.info["ancho"]))   # (16-nov) a 2028x1520 no cabe en pantalla
         cv2.resizeWindow(self.ventana, int(self.info["ancho"] * _f), int(self.info["alto"] * _f))
-        self.mano_recta = abrir_mano_recta()             # (12-nov) la mano con par, recta, sujetando el tablero
 
     def _estado_inicial(self):
         """El estado que no es hardware (el mismo en la sesión real y en la simulada de las pruebas)."""
@@ -590,6 +610,25 @@ class Sesion:
     def avisar(self, txt):
         self.mensaje, self.t_mensaje = txt, time.monotonic()
         print("   " + txt)
+
+    def mostrar_error(self, texto, segundos=None):
+        """(19-nov) Antes, un sys.exit con la ventana abierta la cerraba sin más y el porqué solo
+        salía en la terminal. Ahora el robot se queda quieto y el motivo se ve EN LA VENTANA hasta
+        pulsar Q/Esc/ESPACIO o pasar CALIB_ERROR_VISIBLE_S (para que con --sin no se quede esperando)."""
+        import textwrap
+        print("✗ " + texto)
+        self.fr5.habilitar(False)
+        self.armado = False
+        seg = float(getattr(cfg, "CALIB_ERROR_VISIBLE_S", 20.0) if segundos is None else segundos)
+        lineas = ["NO SE PUEDE SEGUIR (Q / ESPACIO = cerrar)"] + textwrap.wrap(texto, 80)
+        t0 = time.monotonic()
+        try:
+            while time.monotonic() - t0 < seg:
+                key, _ = self.vuelta(None, hud=lineas)
+                if key in (13, 32):
+                    break
+        except Cancelado:
+            pass
 
     def _parar(self):
         """Quieto ya: deja de mandar al FR5; para seguir hay que soltar y volver a pisar el pedal."""
@@ -758,20 +797,32 @@ class Sesion:
         t0 = time.monotonic()
         self.motivo_captura = ""
         quietas, temblor, movs, perdidas = 0, False, [], 0
+        t_img = t0
         while len(fotos) < FOTOS_POR_MUESTRA:
             _, nueva = self.vuelta(objetivo, hud=list(hud) + ["capturando..." if quietas >= QUIETO_IMAGENES
                                                               else "esperando a que el tablero deje de temblar..."])
             if not nueva:
+                # (19-nov) antes, sin imágenes nuevas se esperaba para siempre
+                if time.monotonic() - t_img > SIN_IMAGEN_S:
+                    self.motivo_captura = f"la cámara lleva {SIN_IMAGEN_S:.0f} s sin mandar imágenes"
+                    return None
                 continue
-            if not self.listo:
+            t_img = time.monotonic()
+            # (19-nov) como en ir_a: pasado LLEGADA_TOLERANCIA_S basta con «casi quieto» (la mano con el
+            # tablero tiembla algo más que QUIETO_DEG); lo que manda es que el TABLERO esté quieto en la imagen
+            mov = self.robot.movimiento_deg
+            robot_ok = self.robot.quieto or (mov is not None and mov < CASI_QUIETO_DEG
+                                              and time.monotonic() - t0 > LLEGADA_TOLERANCIA_S)
+            if not (self.q is not None and self.T_ct is not None and robot_ok):
                 # (17-nov) con el robot quieto, 1-2 imágenes sueltas sin tablero no reinician la espera
-                if self.q is not None and self.robot.quieto and self.T_ct is None and perdidas < PERDIDAS_MAX:
+                if self.q is not None and robot_ok and self.T_ct is None and perdidas < PERDIDAS_MAX:
                     perdidas += 1
                     continue
-                if time.monotonic() - t0 > 3.0 + (TEMBLOR_ESPERA_MAX_S if movs else 0.0):
+                if time.monotonic() - t0 > max(3.0, LLEGADA_TOLERANCIA_S + 1.0) + (TEMBLOR_ESPERA_MAX_S if movs else 0.0):
                     # (12-nov) por qué: para saber qué arreglar (tablero, luz, robot que no se para…)
-                    self.motivo_captura = ("el robot no se queda quieto" if self.q is not None and
-                                           not self.robot.quieto else "tablero: " + (self.txt_tab or "no se ve"))
+                    self.motivo_captura = (f"el robot no se queda quieto (se mueve {mov or 0:.2f}°)"
+                                           if self.q is not None and not robot_ok
+                                           else "tablero: " + (self.txt_tab or "no se ve"))
                     return None
                 quietas, fotos = 0, []
                 continue
@@ -813,8 +864,12 @@ class Sesion:
             # Última barrera: el trayecto se comprueba ENTERO (mano, tablero, brazo, soporte…) desde
             # donde está el robot AHORA, que no siempre es donde el plan creía (postura saltada,
             # colisión a medio camino, pedal soltado…). Si no vale, el robot no se mueve.
+            t0 = time.monotonic()
             while self.q is None:
-                self.vuelta(None, hud=hud)
+                self.vuelta(None, hud=list(hud) + ["esperando la postura real del robot..."])
+                if time.monotonic() - t0 > SIN_LECTURA_S:
+                    self._parar()
+                    raise Detenido(f"lleva {SIN_LECTURA_S:.0f} s sin leer la postura del robot (¿conexión con el FR5?)")
             if not self._comprobar_trayecto(q_obj):
                 return False
         try:
@@ -840,12 +895,20 @@ class Sesion:
         n_desvios = 0                                    # veces que se ha salido del trayecto con el pedal pisado
         n0 = self.n_colisiones
         q_ref, t_ref = None, time.monotonic()           # para notar que el robot, armado, no avanza
+        # (19-nov) tiempo máximo para llegar: lo que dura el trayecto comprobado + margen, sin contar
+        # el rato en pausa / con el pedal suelto (eso es cosa del operario)
+        t0 = t_prev = time.monotonic()
+        t_parado = 0.0
+        dura = 0.0 if self._trayecto is None else len(self._trayecto) * 0.04
+        limite = 1.5 * dura + POSTURA_MARGEN_S
+        t_error, estado = None, ""
+        sin_pedal = isinstance(self.pedal, SinPedal)
         while True:
             if self.n_colisiones - n0 >= 3:
                 self.motivo_salto = "3 colisiones seguidas yendo a ella"
                 return False
             try:
-                self.vuelta(q_obj, hud=hud)              # (vigila la postura real: puede lanzar Detenido)
+                self.vuelta(q_obj, hud=list(hud) + ([estado] if estado else []))   # (puede lanzar Detenido)
             except FueraDeTrayecto as e:
                 # Con el pedal suelto lo han movido a mano: se comprueba desde donde está y, si no
                 # vale, se salta la postura. Con el pedal pisado se ha desviado él: se le deja
@@ -863,10 +926,44 @@ class Sesion:
                     return False
                 continue
             ahora = time.monotonic()
-            cerca = self.q is not None and float(np.degrees(np.max(np.abs(self.q - q_obj)))) < LLEGADA_DEG
+            dt, t_prev = ahora - t_prev, ahora
+            en_pausa = (sin_pedal and self.pedal.pausa) or (not sin_pedal and not self.armado
+                                                             and not self.fr5.en_error)
+            if en_pausa:
+                t_parado += dt
+            # controladora en error que no se borra: con --sin nadie pulsa X → se reintenta solo
+            if self.fr5.en_error:
+                t_error = t_error or ahora
+                if sin_pedal and ahora - self._t_reset > 8.0:
+                    self._reiniciar("Sigue en error")
+                if ahora - t_error > ERROR_PERSISTENTE_S:
+                    self._parar()
+                    raise Detenido(f"la controladora lleva {ERROR_PERSISTENTE_S:.0f} s en error y no se borra: "
+                                   "bórralo en la WebApp (Clear, Disable, Enable) y vuelve a empezar")
+            else:
+                t_error = None
+            dist = None if self.q is None else float(np.degrees(np.max(np.abs(self.q - q_obj))))
+            mov = self.robot.movimiento_deg
+            cerca = dist is not None and dist < LLEGADA_DEG
             t_llegada = (t_llegada or ahora) if cerca else None
+            estado = ("sin lectura del robot" if dist is None else
+                      f"llegado, esperando a que se quede quieto (se mueve {mov:.2f} deg)" if cerca and mov is not None
+                      else f"a {dist:.1f} deg del objetivo")
             if t_llegada and ahora - t_llegada >= ESPERA_S and self.robot.quieto:
                 return True
+            if t_llegada and ahora - t_llegada >= ESPERA_S + LLEGADA_TOLERANCIA_S \
+                    and mov is not None and mov < CASI_QUIETO_DEG:
+                # tiembla algo más que QUIETO_DEG (mano + tablero), pero está ahí: la captura ya
+                # espera a que el TABLERO esté quieto en la imagen
+                return True
+            if t_llegada and ahora - t_llegada > LLEGADA_MAX_S:
+                self.motivo_salto = (f"llega pero no se queda quieto (se mueve {mov or 0:.2f}° en 0,6 s; "
+                                     f"CALIB_ROBOT_CASI_QUIETO_DEG = {CASI_QUIETO_DEG})")
+                return False
+            if ahora - t0 - t_parado > limite:
+                self.motivo_salto = (f"lleva {limite:.0f} s sin llegar"
+                                     + ("" if dist is None else f" (se ha quedado a {dist:.1f}° del objetivo)"))
+                return False
             # Con el pedal pisado el robot tiene que avanzar. Si se queda parado lejos del objetivo
             # es que alguien ha recortado lo pedido (límites blandos de la controladora más estrechos
             # que los de config…): esa postura no se alcanza nunca → se deja, no se espera más.
@@ -1014,20 +1111,100 @@ def modo_auto(s=None):
     return calcular_y_guardar(muestras, s.cadena, s.info)[1]
 
 
+def _ruta_verificacion(posturas, col, i0, n, latido=None):
+    """(19-nov) Ruta corta para --verificar desde la postura guardada i0 (a la que se entra desde
+    donde esté el robot). Antes se recorrían TODAS las posturas hasta la última elegida (con 4
+    capturas, las ~50 de la calibración). Ahora: se va hacia el lado con más posturas de captura,
+    se eligen n de ellas repartidas y entre una y otra se ataja por las posturas guardadas: de cada
+    una se salta a la más lejana (sin pasar la siguiente captura) cuyo trayecto DIRECTO vale con
+    el mismo comprobador que --auto (col.motivo_camino); si ninguno vale, al paso siguiente. Así
+    los atajos nunca son menos seguros que el plan, e ir_a lo vuelve a comprobar desde la postura
+    real antes de moverse. latido(): se llama antes de cada comprobación (mantiene viva la ventana).
+    Devuelve la lista de {q, capturar} o None si no se puede trazar."""
+    q = [np.asarray(p["q"], float) for p in posturas]
+    cap = [i for i, p in enumerate(posturas) if p["capturar"]]
+    adelante, atras = [i for i in cap if i >= i0], [i for i in cap if i <= i0]
+    if len(adelante) >= len(atras):
+        orden, caps = list(range(i0, len(posturas))), adelante
+    else:
+        orden, caps = list(range(i0, -1, -1)), atras[::-1]
+    if not caps:
+        return None
+    sel = {caps[k] for k in np.unique(np.linspace(0, len(caps) - 1, min(n, len(caps))).round().astype(int))}
+    pos_de = {idx: k for k, idx in enumerate(orden)}
+    ruta = [dict(q=q[orden[0]].tolist(), capturar=orden[0] in sel)]
+    pos = 0
+    for t in sorted(pos_de[i] for i in sel):
+        while pos < t:
+            for j in range(t, pos, -1):
+                if latido is not None:
+                    latido()
+                if col.motivo_camino(q[orden[pos]], q[orden[j]], VEL_MAX) is None:
+                    break
+            else:
+                return None                               # ni el paso a la siguiente postura vale
+            ruta.append(dict(q=q[orden[j]].tolist(), capturar=orden[j] in sel))
+            pos = j
+    return ruta
+
+
+def _entrada(posturas, col, q_act, latido=None, candidatas=12):
+    """(19-nov) Índice de la postura guardada más cercana (en joints) a la que se puede ir desde donde
+    está el robot AHORA (trayecto comprobado con la manga de la postura real), o None. Antes solo
+    valía la primera postura guardada: tras un --auto el robot se queda en la última, y si lo habían
+    movido después (modo autónomo, WebApp…) el programa se cerraba al poco de abrir la ventana."""
+    q_act = np.asarray(q_act, float)
+    dist = [float(np.max(np.abs(np.asarray(p["q"], float) - q_act))) for p in posturas]
+    for k in np.argsort(dist)[:candidatas]:
+        if latido is not None:
+            latido()
+        if col.motivo_camino(q_act, posturas[int(k)]["q"], VEL_MAX, margen=MARGEN_TRAYECTO) is None:
+            return int(k)
+    return None
+
+
 def modo_repetir_o_verificar(verificar, aqui=False, s=None):
-    posturas = []
+    from skill_shield.teleop_fr5.cinematica import cargar_cadena
+    titulo = "VERIFICAR" if verificar else "REPETIR"
+    if SIN_PEDAL and not aqui:
+        titulo += " (SIN PEDAL: P = pausa, Q = salir)"
+    elif not aqui:
+        titulo += " (MANTEN EL PEDAL: P)"
+    if aqui and SIN_PEDAL:
+        print("ℹ️  --sin no hace nada con --aqui: el robot no se mueve.")
+    calib = C.cargar(ARCHIVO) if verificar else None
+    posturas, col = [], None
     if not aqui:
         posturas = _normalizar_posturas(_leer_json(POSTURAS, []))
         if not posturas:
             sys.exit(f"✗ No hay posturas en {POSTURAS}: calibra primero con --auto (o --manual).")
-        if verificar:                                    # unas pocas de captura, con sus pasos intermedios
-            idx_cap = [i for i, p in enumerate(posturas) if p["capturar"]]
-            sel = set(np.array(idx_cap)[np.unique(np.linspace(0, len(idx_cap) - 1,
-                                                              min(N_VERIFICAR, len(idx_cap))).round().astype(int))])
-            posturas = [dict(p, capturar=(i in sel)) for i, p in enumerate(posturas) if i <= max(sel)]
-    calib = C.cargar(ARCHIVO) if verificar else None
+        # (19-nov) Todo lo que no necesita el robot se comprueba ANTES de abrir la cámara y la
+        # ventana: antes se hacía con la ventana ya abierta y sin atenderla (≈10 s congelada) y,
+        # si algo no valía, sys.exit la cerraba sin decir nada en ella.
+        print("🔎 Comprobando las posturas guardadas con el modelo de choques (unos segundos)…")
+        cadena = s.cadena if s is not None else cargar_cadena(getattr(cfg, "RUTA_XML", None))
+        try:                                             # para contar con el tablero y con la cámara
+            guardada = calib if calib is not None else C.cargar(ARCHIVO)
+            T_bt, T_mc = guardada["T_brida_tablero"], guardada["T_mundo_cam"]
+        except Exception:
+            T_bt = T_mc = None
+        # Mismas reglas que en --auto, con la primera postura guardada (la de inicio de aquella
+        # calibración) como referencia de los huecos.
+        col = crear_seguridad(cadena, posturas[0]["q"], T_bt, T_mc)
+        malas = [f"{k + 1} ({col.motivo(p['q'])})" for k, p in enumerate(posturas) if not col.libre(p["q"])]
+        if malas:
+            sys.exit("✗ Hay posturas guardadas que ya no valen: " + "; ".join(malas[:4])
+                     + (f"… y {len(malas) - 4} más" if len(malas) > 4 else "")
+                     + ". Vuelve a calibrar con --auto (elige posturas nuevas y seguras).")
+        if not verificar:                                # --repetir recorre TODOS los trayectos guardados
+            malos = [k + 1 for k in range(len(posturas) - 1)
+                     if col.motivo_camino(posturas[k]["q"], posturas[k + 1]["q"], VEL_MAX) is not None]
+            if malos:
+                sys.exit(f"✗ Los trayectos que salen de las posturas guardadas {malos} no valen. "
+                         "Vuelve a calibrar con --auto (planifica trayectos seguros).")
     s = s or Sesion(mover=not aqui)
     muestras = []
+    error = None
     try:
         if aqui:
             try:
@@ -1047,49 +1224,53 @@ def modo_repetir_o_verificar(verificar, aqui=False, s=None):
                 pass                                     # Q = terminar
         else:
             while s.q is None:
-                s.vuelta(None, hud=["leyendo la postura del robot..."])
-            q_act = np.array(s.q)
-            try:                                         # para contar con el tablero y con la cámara
-                guardada = C.cargar(ARCHIVO)
-                T_bt, T_mc = guardada["T_brida_tablero"], guardada["T_mundo_cam"]
-            except Exception:
-                T_bt = T_mc = None
-            # Mismas reglas que en --auto, con la primera postura guardada (la de inicio de aquella
-            # calibración) como referencia: se revisan las posturas, los trayectos entre ellas y el
-            # trayecto desde donde está el robot ahora. Si algo no vale, no se mueve.
-            col = crear_seguridad(s.cadena, posturas[0]["q"], T_bt, T_mc)
-            malas = [f"{k + 1} ({col.motivo(p['q'])})" for k, p in enumerate(posturas) if not col.libre(p["q"])]
-            if malas:
-                sys.exit("✗ Hay posturas guardadas que ya no valen: " + "; ".join(malas[:4])
-                         + (f"… y {len(malas) - 4} más" if len(malas) > 4 else "")
-                         + ". Vuelve a calibrar con --auto (elige posturas nuevas y seguras).")
-            malos = [k + 1 for k in range(len(posturas) - 1)
-                     if col.motivo_camino(posturas[k]["q"], posturas[k + 1]["q"], VEL_MAX) is not None]
-            if malos:
-                sys.exit(f"✗ Los trayectos que salen de las posturas guardadas {malos} no valen. "
-                         "Vuelve a calibrar con --auto (planifica trayectos seguros).")
-            motivo = col.motivo_camino(q_act, posturas[0]["q"], VEL_MAX, margen=MARGEN_TRAYECTO)
-            if motivo is not None:
-                sys.exit(f"✗ Desde donde está ahora el robot no puedo ir a la primera postura guardada: {motivo}. "
-                         "Llévalo (arrastre en la WebApp) cerca de la postura de inicio de la calibración.")
-            s.seguridad = col                            # ir_a: trayecto desde la postura real + vigilancia
-            muestras = s.recorrer(posturas, "VERIFICAR" if verificar else "REPETIR",
-                                  cada=None if verificar else (lambda m: _guardar_muestras(s, m)))
+                s.vuelta(None, hud=[titulo, "leyendo la postura del robot..."])
+            hud_prep = [titulo, "preparando la ruta (el robot no se mueve)..."]
+            latido = lambda: s.vuelta(None, hud=hud_prep)    # la ventana sigue viva mientras se comprueba
+            if verificar:
+                i0 = _entrada(posturas, col, s.q, latido)
+                ruta = None if i0 is None else _ruta_verificacion(posturas, col, i0, N_VERIFICAR, latido)
+                if i0 is None:
+                    error = ("Desde donde está ahora el robot no hay un trayecto seguro a ninguna de las posturas "
+                             "guardadas cercanas. Llévalo (arrastre en la WebApp) cerca de la postura de inicio "
+                             "de la calibración y vuelve a lanzar --verificar.")
+                elif ruta is None:
+                    error = "No se puede trazar una ruta segura por las posturas guardadas. Recalibra con --auto."
+                else:
+                    print(f"   Ruta de verificación: entra por la postura guardada {i0 + 1}, "
+                          f"{len(ruta)} posturas, {sum(p['capturar'] for p in ruta)} medidas.")
+            else:
+                ruta = posturas
+                motivo = col.motivo_camino(s.q, posturas[0]["q"], VEL_MAX, margen=MARGEN_TRAYECTO)
+                if motivo is not None:
+                    error = (f"Desde donde está ahora el robot no puedo ir a la primera postura guardada: {motivo}. "
+                             "Llévalo (arrastre en la WebApp) cerca de la postura de inicio de la calibración.")
+            if error is None:
+                print("   " + ("SIN PEDAL: el robot va solo (P = pausa, Q/Esc = parar)." if SIN_PEDAL
+                               else "MANTÉN EL PEDAL (P) con la ventana delante."))
+                s.seguridad = col                        # ir_a: trayecto desde la postura real + vigilancia
+                muestras = s.recorrer(ruta, titulo,
+                                      cada=None if verificar else (lambda m: _guardar_muestras(s, m)))
+            else:
+                s.mostrar_error(error)
     except Cancelado:
         print("⏹  Cancelado.")
         return None
     except Detenido as e:
+        s.mostrar_error(f"Calibración detenida: {e}")
         sys.exit(f"⛔ Calibración detenida: {e}")
     finally:
         s.cerrar()
+    if error is not None:
+        sys.exit("✗ " + error)
     if not verificar:
         if len(muestras) < 3:
             sys.exit("✗ Muy pocas muestras para recalibrar.")
         _guardar_muestras(s, muestras)
         return calcular_y_guardar(muestras, s.cadena, s.info)[1]
     if not muestras:
-        print("Sin medidas.")
-        return None
+        print("❌ Verificación sin medidas: no se pudo capturar en ninguna postura (mira arriba el motivo de cada una).")
+        return False
     Tb = [s.cadena.fk_marcos(np.array(m["q"]))[5] for m in muestras]
     Tc = [np.array(m["T_cam_tablero"]) for m in muestras]
     e_guardado = C.verificar(calib, Tb, Tc, s.P)
