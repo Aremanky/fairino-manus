@@ -28,13 +28,17 @@ def _salida_sin_retraso(xout):
 
 def crear_pipeline_oak(ancho: int = ANCHO_CAM, alto: int = ALTO_CAM,
                        con_hd: bool = True, rellenar_huecos=None, temporal=None,
-                       confianza=None) -> dai.Pipeline:
+                       confianza=None, salida_hd=None, isp_escala=None) -> dai.Pipeline:
     """con_hd=False: no se crea la salida 'color_hd' (recorte de mano). Lo usa la cámara
     SECUNDARIA para ahorrar ~2/3 del ancho de banda USB (ver multicamara.py).
     rellenar_huecos / temporal / confianza (11-nov): None = los de la teleoperación
     (STEREO_HOLE_FILLING, STEREO_TEMPORAL, la del preset). El mapa de obstáculos pide 0 / False /
     más estricta: rellenar huecos y el filtro temporal se INVENTAN profundidad (paredes blancas,
-    ventanas, estelas) y eso sale como obstáculos flotando."""
+    ventanas, estelas) y eso sale como obstáculos flotando.
+    salida_hd (19-nov): True = saca SIEMPRE 'color_hd' (la imagen entera del ISP, mismo fotograma y
+    mismo número de secuencia que el preview), aunque MANO_RECORTE/MANO_RECORTE_HD estén apagados;
+    None = como antes (con_hd y esos flags). isp_escala: reducción del ISP con CAM_FOV_COMPLETO,
+    (1, 3) por defecto → 1352x1014; (1, 2) → 2028x1520 (el preview sigue siendo ancho x alto)."""
     huecos = STEREO_HOLE_FILLING if rellenar_huecos is None else int(rellenar_huecos)
     con_temporal = STEREO_TEMPORAL if temporal is None else bool(temporal)
     pipeline = dai.Pipeline()
@@ -52,7 +56,7 @@ def crear_pipeline_oak(ancho: int = ANCHO_CAM, alto: int = ALTO_CAM,
         # 1352x1014 y 640x480 tienen exactamente la misma relación 4:3, así que
         # el preview es un reescalado limpio, SIN recorte adicional.
         cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_12_MP)
-        cam_rgb.setIspScale(1, 3)
+        cam_rgb.setIspScale(*(tuple(isp_escala) if isp_escala else (1, 3)))
     else:
         cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
 
@@ -118,7 +122,7 @@ def crear_pipeline_oak(ancho: int = ANCHO_CAM, alto: int = ALTO_CAM,
 
     # Imagen del ISP (1352x1014 con CAM_FOV_COMPLETO): mismo campo de visión que el
     # preview pero 2,1x más píxeles. Solo se usa para recortar la mano (MANO_RECORTE_HD).
-    if con_hd and MANO_RECORTE and MANO_RECORTE_HD and CAM_FOV_COMPLETO:
+    if salida_hd or (salida_hd is None and con_hd and MANO_RECORTE and MANO_RECORTE_HD and CAM_FOV_COMPLETO):
         xout_hd = pipeline.create(dai.node.XLinkOut)
         xout_hd.setStreamName("color_hd")
         cam_rgb.isp.link(xout_hd.input)

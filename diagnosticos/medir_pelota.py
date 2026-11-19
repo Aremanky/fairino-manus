@@ -64,47 +64,35 @@ def crear_tablero(h=HOJA):
         np.arange(h["id0"], h["id0"] + n)
     )
 
+    # (19-nov) Parámetros ajustados con imágenes REALES de la hoja en la caja (vídeos del 19-nov): muy de canto
+    # (~60°), cuadros grises en vez de negros y algo desenfocados → los bits del marcador salen borrosos.
+    # Lo que más ayuda: leer los bits ignorando más borde de cada celda (IgnoredMargin 0,25 y 4 px por
+    # celda), umbral adaptativo con constante baja (3) y aceptar marcadores con poco contraste (Otsu 2).
+    # Con ellos: 14,9/17 marcadores y 20,7/24 esquinas (antes 9,8 y 8,1). OJO: los tamaños de ventana van
+    # en píxeles y están pensados para la imagen a ~1920 px de ancho: pose_tablero la escala a eso.
     dp = cv2.aruco.DetectorParameters()
-
-    # Permitir marcadores pequeños.
-    dp.minMarkerPerimeterRate = 0.005
+    dp.minMarkerPerimeterRate = 0.01
     dp.maxMarkerPerimeterRate = 0.5
-
-    # Probar distintas ventanas de umbralización.
     dp.adaptiveThreshWinSizeMin = 3
-    dp.adaptiveThreshWinSizeMax = 35
-    dp.adaptiveThreshWinSizeStep = 8
-    dp.adaptiveThreshConstant = 7
-
-    # Mejorar la detección de los contornos.
-    dp.polygonalApproxAccuracyRate = 0.03
+    dp.adaptiveThreshWinSizeMax = 34
+    dp.adaptiveThreshWinSizeStep = 6
+    dp.adaptiveThreshConstant = 3
+    dp.polygonalApproxAccuracyRate = 0.05
     dp.minCornerDistanceRate = 0.03
-
-    # Mejorar la reconstrucción de los marcadores.
-    dp.perspectiveRemovePixelPerCell = 8
-    dp.perspectiveRemoveIgnoredMarginPerCell = 0.13
-
-    # Evitar aceptar marcadores con muy poco contraste interno.
-    dp.minOtsuStdDev = 3.0
-
-    # Refinamiento subpíxel de las esquinas de los marcadores.
-    if hasattr(dp, "cornerRefinementMethod"):
-        dp.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-        dp.cornerRefinementWinSize = 5
-        dp.cornerRefinementMaxIterations = 30
-        dp.cornerRefinementMinAccuracy = 0.01
-
+    dp.perspectiveRemovePixelPerCell = 4
+    dp.perspectiveRemoveIgnoredMarginPerCell = 0.25
+    dp.minOtsuStdDev = 2.0
+    dp.errorCorrectionRate = 0.6
+    dp.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+    dp.cornerRefinementWinSize = 5
+    dp.cornerRefinementMaxIterations = 30
+    dp.cornerRefinementMinAccuracy = 0.01
     cp = cv2.aruco.CharucoParameters()
-
-    if hasattr(cp, "tryRefineMarkers"):
-        cp.tryRefineMarkers = True
-
-    detector = cv2.aruco.CharucoDetector(
-        board,
-        cp,
-        dp
-    )
-
+    cp.tryRefineMarkers = True
+    # una esquina vale con UN marcador vecino (por defecto, dos): con la mitad de marcadores leídos se
+    # perdían la mayoría de esquinas. Las que salgan mal las quita el RANSAC de pose_tablero.
+    cp.minMarkers = 1
+    detector = cv2.aruco.CharucoDetector(board, cp, dp)
     return board, detector
 
 
@@ -130,163 +118,145 @@ def generar_hoja(ruta, h=HOJA):
 
 
 
-def pose_tablero(detector, board, img, K, dist,
-                 min_esquinas=8, max_reproj_px=1.5):
+ANCHO_DETECCION = 1920     # (19-nov) ancho (px) al que se escala la imagen para buscar la hoja
 
-    gris = (
-        cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        if img.ndim == 3 else img
-    )
 
-    # Mejorar el contraste local sin alterar la imagen original.
-    clahe = cv2.createCLAHE(
-        clipLimit=2.0,
-        tileGridSize=(8, 8)
-    )
-    gris_clahe = clahe.apply(gris)
+def _esquina_de_verdad(gris, proyectar, c_obj, lado, min_contraste=15.0):
+    """(19-nov) ¿Hay de verdad una esquina de ajedrez en c_obj? Los dos cuadros de una diagonal tienen que
+    parecerse entre sí y diferenciarse de los de la otra (claro/oscuro en aspa)."""
+    offs = ((+1, +1), (-1, -1), (+1, -1), (-1, +1))
+    P = np.array([[c_obj[0] + sx * 0.3 * lado, c_obj[1] + sy * 0.3 * lado, 0.0] for sx, sy in offs])
+    h, w = gris.shape
+    vals = []
+    for u, v in proyectar(P):
+        x, y = int(round(u)), int(round(v))
+        if not (1 <= x < w - 1 and 1 <= y < h - 1):
+            return False
+        vals.append(float(gris[y - 1:y + 2, x - 1:x + 2].mean()))
+    a, b, c, d = vals                                   # a, b: una diagonal · c, d: la otra
+    dif = abs((a + b) - (c + d)) / 2
+    return dif > min_contraste and abs(a - b) < dif and abs(c - d) < dif
 
-    # Distintas escalas y tratamientos de imagen.
-    variantes = [
-        (gris, 1.0, "original"),
-        (gris_clahe, 1.0, "clahe"),
-    ]
 
-    for escala in (1.5, 2.0):
-        tam = (
-            int(gris.shape[1] * escala),
-            int(gris.shape[0] * escala)
-        )
+def completar_esquinas(gris, board, K, dist, rvec, tvec, ids_det):
+    """(19-nov) Con la pose inicial se proyectan las esquinas que el detector no ha dado (muy de canto, el
+    ChArUco solo interpola una esquina si ve los marcadores de al lado) y se afinan con cornerSubPix. Se
+    acepta una si se queda cerca de donde se esperaba y la imagen tiene ahí una esquina de ajedrez de
+    verdad. Devuelve (ids, puntos) de las nuevas."""
+    obj = board.getChessboardCorners().astype(np.float64)
+    lado = float(board.getSquareLength())
 
-        original_ampliada = cv2.resize(
-            gris, tam, interpolation=cv2.INTER_CUBIC
-        )
+    def proyectar(P):
+        return cv2.projectPoints(np.asarray(P, np.float64), rvec, tvec, K, dist)[0].reshape(-1, 2)
 
-        clahe_ampliada = cv2.resize(
-            gris_clahe, tam, interpolation=cv2.INTER_CUBIC
-        )
+    uv = proyectar(obj)
+    h, w = gris.shape
+    ya = set(int(i) for i in np.ravel(ids_det))
+    nuevos_ids, nuevos = [], []
+    for i in range(len(obj)):
+        if i in ya:
+            continue
+        u, v = uv[i]
+        if not (6 <= u < w - 6 and 6 <= v < h - 6):
+            continue
+        vec = proyectar(obj[i] + np.array([[lado, 0, 0], [0, lado, 0]]))
+        s = float(np.min(np.linalg.norm(vec - uv[i], axis=1)))     # cuadro (px) en la dirección más corta
+        if s < 5:
+            continue
+        win = int(max(2, min(10, round(0.35 * s))))
+        p = np.array([[[u, v]]], np.float32)
+        cv2.cornerSubPix(gris, p, (win, win), (-1, -1),
+                         (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.01))
+        p = p.reshape(2).astype(np.float64)
+        if np.linalg.norm(p - uv[i]) > 0.25 * s or not _esquina_de_verdad(gris, proyectar, obj[i], lado):
+            continue
+        nuevos_ids.append(i)
+        nuevos.append(p)
+    return np.array(nuevos_ids, int), np.array(nuevos, np.float64).reshape(-1, 2)
 
-        variantes.append(
-            (original_ampliada, escala, f"original_{escala}")
-        )
-        variantes.append(
-            (clahe_ampliada, escala, f"clahe_{escala}")
-        )
 
+def _pose_robusta(obj, pts, K, dist, max_reproj_px):
+    """RANSAC + refinado con los inliers. (T 4x4, inliers, rvec, tvec, error rms px) o None."""
+    try:
+        ok, rvec, tvec, inl = cv2.solvePnPRansac(obj, pts, K, dist, iterationsCount=100, reprojectionError=2.5,
+                                                 confidence=0.99, flags=cv2.SOLVEPNP_ITERATIVE)
+        if not ok or inl is None:
+            return None
+        idx = inl.ravel()
+        ok, rvec, tvec = cv2.solvePnP(obj[idx], pts[idx], K, dist, rvec, tvec, True, flags=cv2.SOLVEPNP_ITERATIVE)
+        if not ok:
+            return None
+        rvec, tvec = cv2.solvePnPRefineLM(obj[idx], pts[idx], K, dist, rvec, tvec)
+    except cv2.error:
+        return None
+    proy = cv2.projectPoints(obj[idx], rvec, tvec, K, dist)[0].reshape(-1, 2)
+    error = float(np.sqrt(np.mean(np.sum((proy - pts[idx]) ** 2, axis=1))))
+    if not np.isfinite(error) or error > max_reproj_px:
+        return None
+    T = np.eye(4)
+    T[:3, :3] = cv2.Rodrigues(rvec)[0]
+    T[:3, 3] = tvec.ravel()
+    return T, idx, rvec, tvec, error
+
+
+def pose_tablero(detector, board, img, K, dist, min_esquinas=8, max_reproj_px=1.5, completar=True, detalle=None):
+    """Pose de la hoja (T cámara←tablero, nº de esquinas usadas) o (None, 0).
+    (19-nov) Mejor con la imagen grande del ISP (1352x1014; ver capturar). Se escala a ANCHO_DETECCION
+    (los parámetros del detector van en px), se prueba tal cual y, si faltan esquinas, con CLAHE. Después
+    se COMPLETAN las esquinas que
+    falten proyectándolas con la pose inicial y afinándolas (completar_esquinas). detalle: dict donde
+    se dejan las esquinas usadas (ids, pts) para dibujarlas."""
+    gris = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    obj_completo = board.getChessboardCorners().astype(np.float64)
+    total = len(obj_completo)
+    # (19-nov) los parámetros del detector (crear_tablero) son para ~ANCHO_DETECCION px de ancho: se escala
+    # la imagen a eso (640 → x3, 1352 → x1,42); con los parámetros de antes, AMPLIAR quitaba marcadores
+    e = max(1.0, ANCHO_DETECCION / float(gris.shape[1]))
+    grande = gris if e == 1.0 else cv2.resize(gris, None, fx=e, fy=e, interpolation=cv2.INTER_CUBIC)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    variantes = [(lambda: grande, e), (lambda: clahe.apply(grande), e)]
     mejor = None
-    mejor_puntuacion = None
-
-    obj_completo = board.getChessboardCorners().astype(
-        np.float64
-    )
-
-    for imagen, escala, nombre in variantes:
-
+    n_det = 0
+    for hacer, escala in variantes:
         try:
-            corners, ids, _, _ = detector.detectBoard(imagen)
+            corners, ids, _, _ = detector.detectBoard(hacer())
         except cv2.error:
             continue
-
         if corners is None or ids is None:
             continue
-
-        ids = ids.flatten().astype(int)
-
+        ids = ids.ravel().astype(int)
+        validos = (ids >= 0) & (ids < total)
+        ids, pts = ids[validos], corners.reshape(-1, 2)[validos].astype(np.float64) / escala
+        n_det = max(n_det, len(ids))
+        if len(ids) < 6:
+            continue
+        r = _pose_robusta(obj_completo[ids], pts, K, dist, max_reproj_px)
+        if r is None:
+            continue
+        T, idx, rvec, tvec, error = r
+        ids, pts = ids[idx], pts[idx]
+        if completar and len(ids) < total:
+            ids2, pts2 = completar_esquinas(gris, board, K, dist, rvec, tvec, ids)
+            if len(ids2):
+                ids_t, pts_t = np.concatenate([ids, ids2]), np.vstack([pts, pts2])
+                r2 = _pose_robusta(obj_completo[ids_t], pts_t, K, dist, max_reproj_px)
+                if r2 is not None and len(r2[1]) > len(ids):
+                    T, idx, _, _, error = r2
+                    ids, pts = ids_t[idx], pts_t[idx]
         if len(ids) < min_esquinas:
             continue
-
-        # Descartar índices inválidos.
-        validos = (ids >= 0) & (ids < len(obj_completo))
-        ids = ids[validos]
-
-        pts = corners.reshape(-1, 2)[validos].astype(
-            np.float64
-        )
-
-        # Volver a las coordenadas de la imagen original.
-        pts /= escala
-
-        if len(ids) < min_esquinas:
-            continue
-
-        obj = obj_completo[ids]
-
-        # Estimación robusta inicial de la pose.
-        try:
-            ok, rvec, tvec, inliers = cv2.solvePnPRansac(
-                obj,
-                pts,
-                K,
-                dist,
-                iterationsCount=100,
-                reprojectionError=2.5,
-                confidence=0.99,
-                flags=cv2.SOLVEPNP_ITERATIVE
-            )
-        except cv2.error:
-            continue
-
-        if not ok or inliers is None:
-            continue
-
-        idx = inliers.flatten()
-
-        if len(idx) < min_esquinas:
-            continue
-
-        # Refinar usando únicamente los puntos consistentes.
-        try:
-            ok, rvec, tvec = cv2.solvePnP(
-                obj[idx],
-                pts[idx],
-                K,
-                dist,
-                rvec,
-                tvec,
-                True,
-                flags=cv2.SOLVEPNP_ITERATIVE
-            )
-        except cv2.error:
-            continue
-
-        if not ok:
-            continue
-
-        # Comprobar error de reproyección.
-        proy, _ = cv2.projectPoints(
-            obj[idx],
-            rvec,
-            tvec,
-            K,
-            dist
-        )
-
-        residuos = np.linalg.norm(
-            proy.reshape(-1, 2) - pts[idx],
-            axis=1
-        )
-
-        error = float(np.sqrt(np.mean(residuos ** 2)))
-
-        if not np.isfinite(error) or error > max_reproj_px:
-            continue
-
-        # La prioridad es obtener más esquinas válidas.
-        # En igualdad, gana la pose con menor error.
-        puntuacion = (len(idx), -error)
-
-        if mejor_puntuacion is None or puntuacion > mejor_puntuacion:
-            T = np.eye(4)
-            T[:3, :3] = cv2.Rodrigues(rvec)[0]
-            T[:3, 3] = tvec.ravel()
-
-            mejor = (T, len(idx))
-            mejor_puntuacion = puntuacion
-
+        punt = (len(ids), -error)
+        if mejor is None or punt > mejor[0]:
+            mejor = (punt, T, ids, pts)
+        if len(ids) == total:
+            break                                      # no se puede mejorar: no probar más variantes
+    if detalle is not None:
+        detalle["detectadas"] = n_det
     if mejor is None:
         return None, 0
-
-    return mejor
-
+    if detalle is not None:
+        detalle.update(ids=mejor[2], pts=mejor[3])
+    return mejor[1], len(mejor[2])
 
 
 def promediar_poses(Ts):
@@ -526,6 +496,57 @@ def resumen(medidas, umbral_mm=5.0):
 ORDEN_ESQUINAS = (8, 11, 14, 22, 19, 16, 9, 13, 21, 17)   # repartidas por la hoja (de las 24 interiores de 7x5)
 
 
+def _ascii(t):
+    """(19-nov) cv2.putText solo dibuja ASCII: «·», tildes y «ñ» salían como «??» en la ventana."""
+    import unicodedata
+    t = t.replace("·", "|").replace("→", "->").replace("±", "+-")
+    return unicodedata.normalize("NFKD", t).encode("ascii", "ignore").decode()
+
+
+class ParejaHD:
+    """(19-nov) Empareja cada imagen del preview (640x480, la de la profundidad y la pelota) con la imagen
+    GRANDE del ISP del mismo fotograma (mismo número de secuencia), donde se busca la hoja. La pose de la
+    hoja sale en el marco de la cámara, que es el mismo para las dos imágenes (mismo sensor), así que no
+    hay que convertir nada: solo usar la K de cada tamaño."""
+
+    def __init__(self, cola, dev):
+        self.cola, self.dev = cola, dev
+        self.buf = {}
+        self.K = self.dist = None
+        self.tam = None
+
+    def _leer(self):
+        if self.cola is None:
+            return
+        p = self.cola.tryGet()
+        while p is not None:
+            self.buf[p.getSequenceNum()] = p
+            p = self.cola.tryGet()
+        for k in sorted(self.buf)[:-6]:
+            del self.buf[k]
+
+    def de(self, pc, espera_s=0.06):
+        """Imagen ISP (BGR) del mismo fotograma que el paquete del preview pc, o None."""
+        if self.cola is None:
+            return None
+        seq = pc.getSequenceNum()
+        t0 = time.monotonic()
+        while True:
+            self._leer()
+            p = self.buf.pop(seq, None)
+            if p is not None:
+                img = p.getCvFrame()
+                if self.K is None:
+                    from skill_shield.vision.multicamara import intrinsecos_color
+                    self.tam = (img.shape[1], img.shape[0])
+                    self.K, self.dist = intrinsecos_color(self.dev, *self.tam)
+                    print(f"📷 Hoja buscada en la imagen del ISP de {self.tam[0]}x{self.tam[1]}")
+                return img
+            if time.monotonic() - t0 > espera_s or (self.buf and min(self.buf) > seq):
+                return None
+            time.sleep(0.002)
+
+
 def capturar(a, h):
     import config as cfg
     from config import ALTO_CAM, ANCHO_CAM
@@ -539,9 +560,11 @@ def capturar(a, h):
     escala = float(g.get("AUTONOMO_CAM_ESCALA_PROF", 1.0) or 1.0)
     esquinas = board.getChessboardCorners()
     # la MISMA profundidad que el modo autónomo (sin rellenar huecos ni filtro temporal), con su escala
+    # (19-nov) + la imagen grande del ISP para buscar la hoja (salida_hd); --sin-hd = como antes (640x480)
     dev = abrir_dispositivo(crear_pipeline_oak(
         con_hd=False, rellenar_huecos=g.get("AUTONOMO_CAM_RELLENAR_HUECOS", 0),
-        temporal=g.get("AUTONOMO_CAM_FILTRO_TEMPORAL", False), confianza=g.get("AUTONOMO_CAM_CONFIANZA", 200)),
+        temporal=g.get("AUTONOMO_CAM_FILTRO_TEMPORAL", False), confianza=g.get("AUTONOMO_CAM_CONFIANZA", 200),
+        salida_hd=not a.sin_hd, isp_escala=(1, a.isp)),
         a.mxid or g.get("AUTONOMO_CAM_MXID"))
     medidas, crudo, k_obj, txt = [], [], 0, ""
     with dev:
@@ -549,6 +572,32 @@ def capturar(a, h):
         K, dist = intrinsecos_color(dev, ANCHO_CAM, ALTO_CAM)
         qc = dev.getOutputQueue("color", maxSize=1, blocking=False)
         qd = dev.getOutputQueue("depth", maxSize=1, blocking=False)
+        hd = ParejaHD(None if a.sin_hd else dev.getOutputQueue("color_hd", maxSize=4, blocking=False), dev)
+        n_total = len(esquinas)
+        sin_pareja = 0
+
+        def buscar_hoja(pc, img, det_out=None):
+            """Pose de la hoja para el fotograma pc: en la imagen del ISP si llega, si no en el preview."""
+            nonlocal sin_pareja
+            im_hd = hd.de(pc)
+            if im_hd is not None:
+                sin_pareja = 0
+                d = {} if det_out is not None else None
+                T_, n_ = pose_tablero(det, board, im_hd, hd.K, hd.dist, detalle=d)
+                if det_out is not None:
+                    det_out["detectadas"] = d.get("detectadas", 0)
+                    det_out["img_hd"] = im_hd
+                    if "pts" in d:                          # esquinas pasadas al preview para dibujarlas
+                        sx, sy = img.shape[1] / im_hd.shape[1], img.shape[0] / im_hd.shape[0]
+                        det_out.update(pts=d["pts"] * [sx, sy])
+                return T_, n_, f"{im_hd.shape[1]}x{im_hd.shape[0]}"
+            if hd.cola is not None:
+                sin_pareja += 1
+                if sin_pareja == 30:
+                    print("⚠️  No llegan imágenes del ISP emparejadas: busco la hoja en el preview de 640x480 "
+                          "(peor). ¿USB2? Prueba --isp 3 o --sin-hd.")
+            T_, n_ = pose_tablero(det, board, img, K, dist, detalle=det_out)
+            return T_, n_, f"{img.shape[1]}x{img.shape[0]}"
         prof = None
         print("ESPACIO = medir la esquina marcada · N = otra esquina · Q/Esc = terminar")
         while True:
@@ -562,9 +611,12 @@ def capturar(a, h):
                 time.sleep(0.003)
                 continue
             img = pc.getCvFrame()
-            T, n_esq = pose_tablero(det, board, img, K, dist)
+            dib = {}
+            T, n_esq, fuente = buscar_hoja(pc, img, dib)
             obj = ORDEN_ESQUINAS[k_obj % len(ORDEN_ESQUINAS)]
             vis = img.copy()
+            for x, y in dib.get("pts", []):                  # esquinas encontradas (verde)
+                cv2.circle(vis, (int(round(x)), int(round(y))), 2, (0, 255, 0), -1, cv2.LINE_AA)
             if T is not None:
                 c = centro_verdad(T, esquinas[obj][:2], a.diametro / 2)
                 proyectados, _ = cv2.projectPoints(
@@ -581,9 +633,10 @@ def capturar(a, h):
                             (0, 255, 255), 1, cv2.LINE_AA)
             estado = (
                     f"ChArUco: {'OK' if T is not None else 'NO DETECTADO'} "
-                    f"({n_esq}/24 esquinas) · capturas {len(medidas)}"
+                    f"({n_esq}/{n_total} esquinas; detectadas {dib.get('detectadas', 0)}; {fuente}) · "
+                    f"capturas {len(medidas)} · G = guardar imagen"
                 )
-            for i, t_ in enumerate([estado] + txt.split("\n")):
+            for i, t_ in enumerate(_ascii(l) for l in [estado] + txt.split("\n")):
                 cv2.putText(vis, t_, (8, 18 + 18 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
                 cv2.putText(vis, t_, (8, 18 + 18 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
             cv2.imshow("medir_pelota", vis)
@@ -592,6 +645,18 @@ def capturar(a, h):
                 break
             if tecla == ord("n"):
                 k_obj += 1
+            if tecla == ord("g"):                          # (19-nov) imágenes para ajustar el detector
+                carpeta = os.path.join(RAIZ, "diagnosticos", "medidas_pelota")
+                os.makedirs(carpeta, exist_ok=True)
+                base = os.path.join(carpeta, time.strftime("hoja_%Y%m%d_%H%M%S"))
+                cv2.imwrite(base + "_preview.png", img)
+                if dib.get("img_hd") is not None:
+                    cv2.imwrite(base + "_isp.png", dib["img_hd"])
+                np.savez(base + "_K.npz", K=K, dist=dist,
+                         K_isp=hd.K if hd.K is not None else np.zeros((3, 3)),
+                         dist_isp=hd.dist if hd.dist is not None else np.zeros(5))
+                txt = f"guardado {os.path.basename(base)}_*.png"
+                print(f"💾 {base}_*.png (+ _K.npz): mándamelos para ajustar la detección")
             if tecla != ord(" ") or prof is None:
                 continue
             fotos, profs, Ts, t0 = [], [], [], time.monotonic()
@@ -605,7 +670,7 @@ def capturar(a, h):
                     time.sleep(0.003)
                     continue
                 im = pc.getCvFrame()
-                Ti, _ = pose_tablero(det, board, im, K, dist)
+                Ti, _, _ = buscar_hoja(pc, im)
                 if Ti is not None:
                     fotos.append(im)
                     profs.append(prof.copy())
@@ -671,6 +736,9 @@ def main():
     ap.add_argument("--lado", type=float, default=HOJA["lado"], help="lado del cuadro impreso en m (con calibre)")
     ap.add_argument("--fotos", type=int, default=20, help="imágenes por captura")
     ap.add_argument("--mxid", default=None)
+    ap.add_argument("--isp", type=int, default=3, choices=(2, 3),
+                    help="reducción del ISP para buscar la hoja: 3 → 1352x1014 (defecto), 2 → 2028x1520 (USB3)")
+    ap.add_argument("--sin-hd", action="store_true", help="buscar la hoja en el preview de 640x480 (como antes)")
     ap.add_argument("--analizar", default=None, help="archivo .npz de una medida anterior")
     a = ap.parse_args()
     h = dict(HOJA, lado=a.lado, marcador=a.lado * HOJA["marcador"] / HOJA["lado"])
