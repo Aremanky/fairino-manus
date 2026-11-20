@@ -1609,7 +1609,7 @@ AUTONOMO_TAREA_MARGEN_MAPA_MALLA = 0.02      # m entre las mallas del brazo y el
 # "con los dedos" (toda la mano, la palma algo más lejos). Se usa la primera que salga.
 AUTONOMO_TAREA_PELOTA_MODOS = ("pinza",)   # (17-nov) solo en pinza (antes: "pinza", "rodeándola", "con los dedos")
 AUTONOMO_TAREA_PINZA_DESDE_ARRIBA = True   # pinza desde arriba, pulgar e índice a los lados (a la altura del centro)
-AUTONOMO_TAREA_PINZA_INCLINACION_MAX_DEG = 20.0   # cuánto puede inclinarse la mano además (0 = solo vertical)
+AUTONOMO_TAREA_PINZA_INCLINACION_MAX_DEG = 60.0   # cuánto puede inclinarse la mano además (0 = solo vertical)
 # Pinza: abierta (yemas a ~13 cm) y cerrada (yema del pulgar contra la del índice); para cada pelota se
 # calcula con el modelo de la mano hasta dónde cerrar para tocarla, y se cierra un poco más para
 # apretarla: (al cerrar, al «apretar un poco»), en fracción del recorrido abierta → cerrada.
