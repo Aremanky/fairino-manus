@@ -1680,6 +1680,36 @@ AUTONOMO_PELOTAS_QUITAR_DISTORSION = True
 AUTONOMO_FR5_CMD_TYPE = 1
 
 # ═══════════════════════════════════════════════════════════════════════════
+# (19-nov) CÁMARA A del modo autónomo — OAK-D FIJA mirando la mesa de cerca (skill_shield/autonomo/camara_a.py)
+# ═══════════════════════════════════════════════════════════════════════════
+# La de cabeza ve todo, pero la pelota le queda a ~0,9 m (el error del estéreo crece con la distancia²) y, al
+# pararse encima a afinar, el antebrazo se la tapa. La A va fija en la mesa (o en la peana), a ~0,4-0,5 m de la
+# zona de agarre, mirándola desde OTRO lado (de frente o de lado al robot, inclinada ~45° hacia abajo).
+# Su proceso es el mismo camara.py con --rol a: pelotas y herramientas, SIN mapa (el mapa lo hace la cabeza).
+#   1. Montarla FIJA (si se mueve, hay que recalibrar). Mejor otro controlador USB3 que el de la cabeza.
+#   2. Calibrarla: python calibrar_camara_robot.py --camara a --auto  → AUTONOMO_CAM_A_CALIB_ARCHIVO
+#      (el mismo tablero en la mano y el mismo proceso que la de cabeza; el tablero, de cara a la cámara A)
+#      Comprobarla: python calibrar_camara_robot.py --camara a --verificar
+#   3. Probarla sola: python -m skill_shield.autonomo.camara --rol a --ventana
+#   4. AUTONOMO_CAM_A = True. En la web sale la pestaña «Cámara A».
+# Si la A ve la MISMA pelota que la cabeza (a ≤ MAX_DIF_M), estable y reciente, el plan y el afinado la usan; si
+# no, todo sigue con la cabeza, como antes. En la terminal y en diagnosticos/intentos.jsonl sale con cuál se midió.
+AUTONOMO_CAM_A          = False               # True cuando esté montada y calibrada
+AUTONOMO_CAM_A_MXID     = CAM_A_MXID          # la cámara A de la teleoperación (en este modo está libre)
+AUTONOMO_CAM_A_CALIB_ARCHIVO = "camara_a_robot.json"   # su T_mundo_cam (calibrar_camara_robot.py --camara a)
+AUTONOMO_CAM_A_POSTURAS = "calib_posturas_a.json"      # posturas de SU calibración (no pisan las de la cabeza)
+AUTONOMO_CAM_A_MUESTRAS = "calib_muestras_a.json"
+AUTONOMO_CAM_A_IR_MA    = 800                 # proyector IR; si las dos OAK-D Pro se molestan (huecos en la
+                                              # profundidad donde se cruzan los puntos), bajad una o ponedla a 0
+AUTONOMO_CAM_A_ESCALA_PROF = 1.0              # como AUTONOMO_CAM_ESCALA_PROF, para la A
+AUTONOMO_CAM_A_PARA_PLANIFICAR = True         # medir la pelota con la A al planificar (si la ve)
+AUTONOMO_CAM_A_PARA_AFINAR = True             # afinar con la A al pararse encima (si la ve y el brazo no se la tapa)
+AUTONOMO_CAM_A_MAX_DIF_M = 0.06               # m: más lejos de lo que ve la cabeza = no es la misma pelota (o
+                                              # alguna calibración está mal): no se usa la A
+AUTONOMO_CAM_A_EDAD_MAX_S = 0.5               # s: medida de la A más vieja = no vale
+AUTONOMO_CAM_A_PELOTA_CORRECCION_M = (0.0, 0.0, 0.0)   # como AUTONOMO_TAREA_PELOTA_CORRECCION_M, vista en la imagen de la A
+
+# ═══════════════════════════════════════════════════════════════════════════
 # CALIBRACIÓN CÁMARA DE CABEZA → ROBOT (10-nov, paso 4) — calibrar_camara_robot.py
 # ═══════════════════════════════════════════════════════════════════════════
 # Tablero ChArUco en la brida/mano: el de la calibración extrínseca (7x5, 4x4), medido el 10-nov:

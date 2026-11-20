@@ -82,7 +82,7 @@ La teleoperación de «Mano Física + Gemelo» (mismo pedal, mismo FR5 con `TELE
   - **Pedal de la web:** botón grande (o barra espaciadora) que hay que mantener pulsado. Si se suelta, se corta la red o se cierra la pestaña, en ≤ 0,35 s el pedal cuenta como suelto. Con «Pedal obligatorio» desactivado se permite moverse sin pedal (se puede bloquear con `AUTONOMO_PERMITIR_SIN_PEDAL = False`). Siempre arranca activado.
 - **Gemelo en la web:** pestañas *Cámara · Gemelo · Las dos*. El gemelo se dibuja sin ventana (`render_gemelo.py`, solo la escena, sin los menús del visor): arrastrar para girar, Mayús+arrastrar para mover, rueda o +/− para acercar, y vistas Inicial/Frente/Lado/Arriba. La vista la comparten todos los que miran. Con `AUTONOMO_VENTANA_MUJOCO = False` ya no se abre la ventana de MuJoCo en el PC. Necesita OpenGL sin ventana (`AUTONOMO_SIM_GL = "egl"`; si falla prueba osmesa y glfw).
 - **Superponer gemelo** (con la calibración del paso 4): el gemelo visto desde la cámara calibrada, encima de la imagen real. Si la calibración está bien, el robot virtual tapa al real.
-- Cámara de cabeza = la antigua cámara B (`AUTONOMO_CAM_MXID`).
+- Cámara de cabeza = la antigua cámara B (`AUTONOMO_CAM_MXID`). Cámara A de la mesa (opcional): ver «Cámara A fija mirando la mesa».
 - Para salir: cerrar la ventana de MuJoCo o Ctrl+C.
 - Pruebas por separado: `python -m skill_shield.autonomo.camara --ventana` · `python -m skill_shield.autonomo.web`
 - Cerrar el menú con la X o Esc equivale a pulsar este botón (es el «Cancelar» de zenity).
@@ -103,6 +103,18 @@ Cambios de la revisión (todos con su clave en el bloque «(18-nov) Revisión de
 - **Tasa de éxito:** cada intento se apunta solo en `diagnosticos/intentos.jsonl` (plan, afinado, táctiles, reintentos, final); `python diagnosticos/resumen_intentos.py [--desde AAAA-MM-DD]` da el % de éxito con su intervalo, por qué falla y si depende de la distancia o de la zona de la imagen.
 - **¿Qué no deja coger la pelota?** `python diagnosticos/ver_estorbo.py [plan_fallido_….npz]`: vuelve a planificar el plan fallido y dice qué cubos estorban (distancia, altura, lado visto desde la cámara) y deja una vista desde arriba en `diagnosticos/estorbo_*.png`.
 - **Código:** `ejecucion.py` (Ejecutor, ManoActiva) y `mundo_tarea.py` salen de `tarea.py`. **Banco de pruebas** con los planes guardados: `python diagnosticos/banco_planes.py --guardar antes.json` y, tras un cambio, `--comparar antes.json`.
+
+### Cámara A fija mirando la mesa (19-nov)
+Segunda OAK-D **fija** a ~0,4-0,5 m de la zona de agarre, mirándola desde otro lado que la cabeza (de frente o de lado al robot, inclinada hacia abajo). La cabeza sigue haciendo el mapa y viendo todo; la A solo mide la pelota de cerca. Bloque `AUTONOMO_CAM_A_*` de `config.py`.
+1. Montarla fija (si se mueve, recalibrar) y en otro controlador USB3 que la cabeza.
+2. `python calibrar_camara_robot.py --camara a --auto` (mismo tablero y mismo proceso; el tablero, de cara a la A) → `camara_a_robot.json`. Comprobar: `--camara a --verificar`.
+3. Probarla sola: `python -m skill_shield.autonomo.camara --rol a --ventana`.
+4. `AUTONOMO_CAM_A = True`. Se lanza su propio proceso (vigilado, como la cabeza) y en la web sale la pestaña **Cámara A**.
+- **Al planificar:** si la A ve la MISMA pelota que la cabeza (a ≤ `AUTONOMO_CAM_A_MAX_DIF_M`), estable y reciente, se usa su medida (y la mesa medida por ella, y se apoya por SU rayo). Si no la ve o no cuadra, la de cabeza, como antes.
+- **Al afinar** (parado encima): primero la A; si no la ve o el brazo se la tapa, la cabeza, como antes. El planificador elige la postura de encima para no taparle la pelota a la cámara con la que se va a afinar.
+- La A, calibrada y activa, cuenta como obstáculo (caja de 14 cm) para la tarea y para recalibrar la cabeza.
+- Con cuál se midió: en la terminal, en la tarjeta de la tarea y en `diagnosticos/intentos.jsonl` (`medida_pelota`, `afinado.fuente`).
+- Si con las dos OAK-D Pro aparecen huecos en la profundidad donde se cruzan los proyectores IR, baja `AUTONOMO_CAM_A_IR_MA` (o 0).
 
 ### Herramientas con marcadores ArUco (paso 5)
 `skill_shield/autonomo/herramientas.py` — cada herramienta (y el punto de uso y el de dejada) lleva un marcador ArUco 4x4. Catálogo en `AUTONOMO_HERRAMIENTAS` (id, nombre, tipo, lado impreso, dónde queda la herramienta respecto al marcador, tamaño).

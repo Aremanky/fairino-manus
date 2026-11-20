@@ -46,7 +46,7 @@ PREFIJO_SOPORTE = "sop_"            # geoms fijos del soporte del robot (decorac
 NOMBRES = {"shoulder_Link": "del hombro del robot", "upperarm_Link": "del brazo", "forearm_Link": "del antebrazo",
            "wrist1_Link": "del giro del J4", "soporte": "del soporte", "columna": "de la columna del soporte",
            "cabezal": "de la cabeza del soporte", "bastidor": "del bastidor del soporte", "suelo": "del suelo",
-           "camara_cabeza": "de la cámara de cabeza"}          # «queda a X cm …»
+           "camara_cabeza": "de la cámara de cabeza", "camara_a": "de la cámara A (mesa)"}          # «queda a X cm …»
 
 
 # ── geometría básica ──

@@ -63,7 +63,7 @@ main{max-width:var(--ancho);margin:0 auto;padding:var(--hueco) var(--margen) 8px
 .seg{display:inline-flex;background:var(--fondo);border-radius:999px;padding:3px;margin-left:12px}
 .seg button{border:0;background:transparent;color:var(--suave);font-size:12.5px;font-weight:600;padding:5px 12px;border-radius:999px}
 .seg button.act{background:#fff;color:var(--azul);box-shadow:0 1px 3px rgba(0,33,72,.15)}
-.paneles[data-modo=cam] .panel-sim,.paneles[data-modo=sim] .panel-cam{display:none}
+.paneles[data-modo=cam] .panel-sim,.paneles[data-modo=a] .panel-sim,.paneles[data-modo=sim] .panel-cam{display:none}
 .paneles[data-modo=dos]{display:grid;grid-template-columns:1fr 1fr;gap:2px;background:#0b1626}
 .paneles[data-modo=dos] .marco.gemelo{aspect-ratio:4/3}
 .marco.gemelo{aspect-ratio:16/9;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;background:#1d2a3a}
@@ -231,7 +231,7 @@ footer b{color:var(--azul)}
     <section class="tarjeta o1">
       <header><h2>Visión</h2>
         <div class="seg" role="tablist" aria-label="Qué ver">
-          <button type="button" data-modo="cam" class="act">Cámara</button><button type="button" data-modo="sim">Gemelo</button><button type="button" data-modo="dos">Las dos</button>
+          <button type="button" data-modo="cam" class="act">Cámara</button><button type="button" data-modo="sim">Gemelo</button><button type="button" data-modo="dos">Las dos</button><button type="button" data-modo="a" id="btnCamA" hidden title="OAK-D fija que mira la mesa de cerca: con ella se mide la pelota al cogerla">Cámara A</button>
         </div>
         <span class="meta" id="camMeta">—</span></header>
       <div class="paneles" id="paneles" data-modo="cam">
@@ -240,7 +240,7 @@ footer b{color:var(--azul)}
             <img id="video" alt="Imagen en directo de la cámara de cabeza">
             <img id="simcam" class="superpuesta" alt="">
             <div class="vacio"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h3l2-3h8l2 3h3v13H3z"/><circle cx="12" cy="13" r="4"/></svg><span id="camVacio">Esperando a la cámara…</span></div>
-            <span class="etq-marco">Cámara de cabeza</span>
+            <span class="etq-marco" id="etqCam">Cámara de cabeza</span>
           </div>
         </div>
         <div class="panel-sim">
@@ -397,6 +397,9 @@ function pintar(e){
   $("reiniciando").classList.toggle("ver", caidos.length > 0);
   const f = e.fr5 || {}, m = e.mano || {}, t = e.tactil || {}, c = e.camara || {}, k = e.control || {}, s = e.sesion || {};
   autorizado = !!s.autorizado; requiereClave = !!s.requiere_clave;
+  const hayA = !!(e.camara_a && e.camara_a.activa);            // (19-nov) cámara A (mesa)
+  $("btnCamA").hidden = !hayA;
+  if (!hayA && modoVision === "a"){ modoVision = "cam"; actualizarFuentes(); }
 
   // sesión
   $("btnSesion").classList.toggle("abierta", autorizado && requiereClave);
@@ -560,10 +563,13 @@ function fuente(img, url){
 function actualizarFuentes(){
   $("paneles").dataset.modo = modoVision;
   document.querySelectorAll(".seg button").forEach(b => b.classList.toggle("act", b.dataset.modo === modoVision));
-  const verCam = modoVision !== "sim", verSim = modoVision !== "cam";
-  fuente($("video"), verCam ? "/video.mjpg" : null);
+  // (19-nov) «Cámara A»: el mismo marco con la imagen de la cámara de la mesa (sin superponer el gemelo)
+  const camA = modoVision === "a";
+  const verCam = modoVision !== "sim", verSim = modoVision === "sim" || modoVision === "dos";
+  fuente($("video"), verCam ? (camA ? "/video_a.mjpg" : "/video.mjpg") : null);
   fuente($("sim"), verSim ? "/sim.mjpg" : null);
-  const sup = verCam && $("chkSup").checked;
+  $("etqCam").textContent = camA ? "Cámara A (mesa)" : "Cámara de cabeza";
+  const sup = verCam && !camA && $("chkSup").checked;
   fuente($("simcam"), sup ? "/simcam.mjpg" : null);
   $("simcam").style.display = sup ? "block" : "none";
 }
@@ -667,7 +673,8 @@ function pintarTarea(t, vivo){
   $("tareaTxt").textContent = !vivo ? "Sin datos del modo autónomo." : !t ? "La tarea está desactivada en config (AUTONOMO_TAREA)." : (t.texto || "")
     + (t.avisos && t.avisos.length && !(t.texto || "").includes("⚠️") ? " ⚠️ " + t.avisos.join(" · ") : "");
   $("tareaPaso").textContent = on && t.i && t.n ? `tramo ${t.i} de ${t.n}` : "";
-  $("tareaMeta").textContent = on ? (t.simulacro ? "simulacro · solo el gemelo" : `FR5 REAL · ${t.vel_deg_s}°/s`) : "";
+  $("tareaMeta").textContent = on ? (t.simulacro ? "simulacro · solo el gemelo" : `FR5 REAL · ${t.vel_deg_s}°/s`)
+    + (t.fuente_pelota === "a" ? " · pelota medida con la cámara A" : "") : "";
   $("tareaBarra").style.width = on ? Math.round((t.progreso || 0) * 100) + "%" : "0";
   $("tareaProg").classList.toggle("hecho", !!(on && t.estado === "terminada"));
   const p = (on && t.puede) || {};

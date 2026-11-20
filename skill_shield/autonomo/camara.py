@@ -11,8 +11,13 @@ cámara→robot, y detecta las HERRAMIENTAS con marcadores ArUco (herramientas.p
 sobre la imagen; cada cosa a su canal. (YOLO irá aquí mismo en el paso 12.) Va en su propio proceso para que, si hiciera falta, se
 pueda lanzar con OTRO entorno virtual (AUTONOMO_PYTHON_PERCEPCION en config.py).
 
+(19-nov) El mismo proceso sirve para la CÁMARA A (OAK-D fija mirando la mesa de cerca, camara_a.py): con
+--rol a, su MxId y su calibración (--calibracion camara_a_robot.json), sin mapa de obstáculos (el mapa lo hace solo
+la cabeza): solo imagen, pelotas y herramientas.
+
 Prueba aislada, sin robot ni MuJoCo (se ve en una ventana; Q o Esc para salir):
     python -m skill_shield.autonomo.camara --ventana
+    python -m skill_shield.autonomo.camara --ventana --rol a        (la cámara A, con lo de config.py)
 Guardar la escena (color + profundidad + calibración) para revisar el mapa sin el robot:
     python -m skill_shield.autonomo.camara --grabar 10
 """
@@ -29,14 +34,22 @@ import numpy as np
 
 def _parsear():
     import config as cfg
-    ap = argparse.ArgumentParser(description="Cámara de cabeza del modo autónomo")
-    ap.add_argument("--mxid", default=getattr(cfg, "AUTONOMO_CAM_MXID", None))
+    ap = argparse.ArgumentParser(description="Cámara de cabeza (o cámara A de la mesa) del modo autónomo")
+    ap.add_argument("--rol", choices=("cabeza", "a"), default="cabeza",
+                    help="(19-nov) cabeza = la de siempre · a = la OAK-D fija que mira la mesa de cerca")
+    ap.add_argument("--mxid", default=None, help="por defecto, AUTONOMO_CAM_MXID (cabeza) o AUTONOMO_CAM_A_MXID (a)")
+    ap.add_argument("--calibracion", default=None,
+                    help="(19-nov) calibración cámara→robot de ESTA cámara; por defecto, CALIB_ROBOT_ARCHIVO "
+                         "(cabeza) o AUTONOMO_CAM_A_CALIB_ARCHIVO (a)")
+    ap.add_argument("--escala-prof", type=float, default=None,
+                    help="corrección de escala del estéreo; por defecto AUTONOMO_CAM_ESCALA_PROF (cabeza) o "
+                         "AUTONOMO_CAM_A_ESCALA_PROF (a)")
     ap.add_argument("--canal-img", default=None, help="nombre del canal de imagen (None = no publicar)")
     ap.add_argument("--canal-info", default=None, help="nombre del canal de info (None = no publicar)")
     ap.add_argument("--ventana", action="store_true", help="enseñar la imagen en una ventana")
     ap.add_argument("--calidad", type=int, default=int(getattr(cfg, "AUTONOMO_JPEG_CALIDAD", 80)))
     ap.add_argument("--padre", type=int, default=0, help="PID del modo autónomo (si muere, salir)")
-    ap.add_argument("--ir-ma", type=int, default=int(getattr(cfg, "AUTONOMO_CAM_IR_MA", 800)))
+    ap.add_argument("--ir-ma", type=int, default=None)
     ap.add_argument("--canal-qbrazo", default=None, help="pose real del brazo (para quitarlo del mapa)")
     ap.add_argument("--canal-mapa", default=None, help="mapa de obstáculos (None = no calcularlo)")
     ap.add_argument("--canal-mando", default=None, help="mandos de la web (borrar mapa…)")
@@ -47,7 +60,20 @@ def _parsear():
     ap.add_argument("--grabar", type=int, default=0, metavar="N",
                     help="guardar N pares color+profundidad en diagnosticos/escena_*.npz y salir "
                          "(con el modo autónomo cerrado), para revisar el mapa fuera del robot")
-    return ap.parse_args()
+    args = ap.parse_args()
+    a = args.rol == "a"
+    if args.mxid is None:
+        args.mxid = getattr(cfg, "AUTONOMO_CAM_A_MXID" if a else "AUTONOMO_CAM_MXID", None)
+    if args.calibracion is None:
+        args.calibracion = (getattr(cfg, "AUTONOMO_CAM_A_CALIB_ARCHIVO", "camara_a_robot.json") if a
+                            else getattr(cfg, "CALIB_ROBOT_ARCHIVO", "camara_robot.json"))
+    if args.escala_prof is None:
+        args.escala_prof = float(getattr(cfg, "AUTONOMO_CAM_A_ESCALA_PROF" if a else "AUTONOMO_CAM_ESCALA_PROF",
+                                         1.0) or 1.0)
+    if args.ir_ma is None:
+        args.ir_ma = int(getattr(cfg, "AUTONOMO_CAM_A_IR_MA" if a else "AUTONOMO_CAM_IR_MA", 800))
+    args.nombre = "cámara A (mesa)" if a else "cámara de cabeza"
+    return args
 
 
 def _ultimo(cola):
@@ -108,7 +134,7 @@ def _prof_centro_mm(prof, r=6):
     return float(np.median(v)) if v.size else None
 
 
-def _grabar(dev, K, n):
+def _grabar(dev, K, n, ruta_calib=None):
     import config as cfg
     raiz = os.path.dirname(os.path.abspath(cfg.__file__))
     qc = dev.getOutputQueue("color", maxSize=1, blocking=False)
@@ -126,7 +152,8 @@ def _grabar(dev, K, n):
         profs.append(prof.copy())
         time.sleep(0.2)
     T = None
-    ruta_c = os.path.join(raiz, getattr(cfg, "CALIB_ROBOT_ARCHIVO", "camara_robot.json"))
+    ruta_c = ruta_calib or getattr(cfg, "CALIB_ROBOT_ARCHIVO", "camara_robot.json")
+    ruta_c = ruta_c if os.path.isabs(ruta_c) else os.path.join(raiz, ruta_c)
     if os.path.exists(ruta_c):
         from skill_shield.autonomo.calibracion import cargar
         T = cargar(ruta_c)["T_mundo_cam"]
@@ -155,7 +182,14 @@ def main():
 
     canal_img = Canal.esperar(args.canal_img) if args.canal_img else None
     canal_info = Canal.esperar(args.canal_info) if args.canal_info else None
+    import config as cfg_g
+    # (19-nov) los detectores leen la calibración de CALIB_ROBOT_ARCHIVO: aquí, la de ESTA cámara
+    g_det = {k: getattr(cfg_g, k) for k in dir(cfg_g) if k.isupper()}
+    g_det["CALIB_ROBOT_ARCHIVO"] = args.calibracion
     constructor = None
+    if args.canal_mapa and args.rol == "a":
+        print("ℹ️  [autónomo] Cámara A: sin mapa de obstáculos (lo hace la cámara de cabeza).")
+        args.canal_mapa = None
     if args.canal_mapa:                                  # mapa de obstáculos (paso 7)
         import config as cfg
         from skill_shield.autonomo.mapa import ConstructorMapa
@@ -172,7 +206,7 @@ def main():
     if args.canal_herramientas:                          # herramientas con ArUco (paso 5)
         import config as cfg
         from skill_shield.autonomo.herramientas import DetectorHerramientas
-        detector = DetectorHerramientas(cfg, os.path.dirname(os.path.abspath(cfg.__file__)))
+        detector = DetectorHerramientas(g_det, os.path.dirname(os.path.abspath(cfg.__file__)))
         canal_herr = Canal.esperar(args.canal_herramientas)
         canal_mando_h = Canal.esperar(args.canal_mando) if args.canal_mando else None
         print(f"🔧 [autónomo] Herramientas en el catálogo: "
@@ -182,8 +216,8 @@ def main():
         import config as cfg
         if getattr(cfg, "AUTONOMO_PELOTAS", None):
             from skill_shield.autonomo.pelotas import DetectorPelotas
-            pelotas = DetectorPelotas(cfg, os.path.dirname(os.path.abspath(cfg.__file__)))
-            print("⚽ [autónomo] Pelotas: " + ", ".join(e["nombre"] for e in pelotas.cat))
+            pelotas = DetectorPelotas(g_det, os.path.dirname(os.path.abspath(cfg.__file__)))
+            print(f"⚽ [autónomo] Pelotas ({args.nombre}): " + ", ".join(e["nombre"] for e in pelotas.cat))
     t_herr, t_pub = 0.0, 0.0
 
     def _info(**kw):
@@ -199,28 +233,28 @@ def main():
             temporal=getattr(cfg_, "AUTONOMO_CAM_FILTRO_TEMPORAL", False),
             confianza=getattr(cfg_, "AUTONOMO_CAM_CONFIANZA", 200)), args.mxid)
     except Exception as e:
-        print(f"✗ [autónomo] No se pudo abrir la cámara de cabeza (MxId {args.mxid}): {e}")
+        print(f"✗ [autónomo] No se pudo abrir la {args.nombre} (MxId {args.mxid}): {e}")
         print("   ¿Está conectada? ¿La tiene abierta otro programa (teleoperación, calibración)?")
         _info(ok=False, error=str(e), mxid=args.mxid, t=time.time())
         return 1
 
     with dev:
-        usb = comprobar_usb(dev, "cabeza")
-        activar_ir(dev, "cabeza", args.ir_ma)
+        usb = comprobar_usb(dev, args.rol)
+        activar_ir(dev, args.rol, args.ir_ma)
         K, dist = intrinsecos_color(dev, ANCHO_CAM, ALTO_CAM)
         mxid = mxid_de(dev)
-        print(f"📷 [autónomo] Cámara de cabeza {mxid}: {ANCHO_CAM}x{ALTO_CAM}, "
+        print(f"📷 [autónomo] {args.nombre.capitalize()} {mxid}: {ANCHO_CAM}x{ALTO_CAM}, "
               f"fx={K[0, 0]:.1f} fy={K[1, 1]:.1f} cx={K[0, 2]:.1f} cy={K[1, 2]:.1f} px")
         qc = dev.getOutputQueue("color", maxSize=1, blocking=False)
         qd = dev.getOutputQueue("depth", maxSize=1, blocking=False)
         if args.grabar:
-            return _grabar(dev, K, args.grabar)
+            return _grabar(dev, K, args.grabar, args.calibracion)
         prof, n, t_fps, fps, t_info = None, 0, time.monotonic(), 0.0, 0.0
         # (18-nov) corrección de escala de la profundidad del estéreo (1.0 = tal cual). Con una cinta: un cartón
         # plano en el centro de la imagen a D mm medidos; si «centro:» marca M, ESCALA = D / M
-        escala_prof = float(getattr(cfg_, "AUTONOMO_CAM_ESCALA_PROF", 1.0) or 1.0)
+        escala_prof = float(args.escala_prof or 1.0)
         if abs(escala_prof - 1.0) > 1e-6:
-            print(f"📏 [autónomo] Profundidad del estéreo × {escala_prof:.4f} (AUTONOMO_CAM_ESCALA_PROF)")
+            print(f"📏 [autónomo] {args.nombre}: profundidad del estéreo × {escala_prof:.4f}")
         img_ult = None                                    # último color (el mapa descarta lo saturado)
         hilo_mapa = _HiloMapa(constructor) if constructor is not None else None      # (18-nov) aparte
         ms_det, ms_jpg, t_tiempos = None, None, time.monotonic()
@@ -324,10 +358,10 @@ def main():
                           prof_centro_mm=z, t=time.time(), mapa=est_mapa, tiempos=tiempos)
                     if ahora - t_tiempos >= 10.0:         # (18-nov) para ver qué frena el vídeo, si algo
                         t_tiempos = ahora
-                        print(f"📷 [autónomo] Cámara: {fps:.1f} fps · mapa {tiempos['mapa_ms']} ms (en su hilo) · "
+                        print(f"📷 [autónomo] {args.nombre}: {fps:.1f} fps · mapa {tiempos['mapa_ms']} ms (en su hilo) · "
                               f"detección {tiempos['deteccion_ms']} ms · jpeg {tiempos['jpeg_ms']} ms")
                 if args.ventana:
-                    cv2.imshow("Autonomo - camara de cabeza", img)
+                    cv2.imshow("Autonomo - " + ("camara A (mesa)" if args.rol == "a" else "camara de cabeza"), img)
                     if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
                         break
         if hilo_mapa is not None:

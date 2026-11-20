@@ -669,10 +669,30 @@ def dibujar_voxeles(scn, centros, res, rgba=(1.0, 0.45, 0.0, 0.55), inicio=None)
     return n
 
 
-def modelo_colision(cadena, cfg, T_mundo_cam=None, radio_mano=None):
+def _centro_calibrada(g, clave, defecto):
+    """(19-nov) Centro (mundo) de la cámara de un archivo de calibración (ruta relativa a la raíz del repo) o None."""
+    import os
+    ruta = g.get(clave, defecto)
+    if not ruta:
+        return None
+    if not os.path.isabs(ruta):
+        ruta = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ruta)
+    if not os.path.exists(ruta):
+        return None
+    try:
+        from skill_shield.autonomo.calibracion import cargar
+        return np.asarray(cargar(ruta)["T_mundo_cam"], float)[:3, 3]
+    except Exception:
+        return None
+
+
+def modelo_colision(cadena, cfg, T_mundo_cam=None, radio_mano=None, nombre_camara="camara_cabeza",
+                    otras_camaras=None):
     """Modelo de colisión de la teleoperación (cápsulas del FR5 + mano; soporte, suelo y
     TELEOP_FR5_OBSTACULOS de config) y, si se sabe, la cámara de cabeza como obstáculo.
-    cfg: el módulo config o un dict."""
+    cfg: el módulo config o un dict.
+    (19-nov) otras_camaras: [(nombre, centro)] que también son obstáculo. Por defecto, la cámara A de la mesa si
+    está activa (AUTONOMO_CAM_A) y calibrada: está fija al lado de la zona de agarre."""
     from skill_shield.teleop_fr5.ik_teleop import Caja, Entorno, ModeloColision, entorno_soporte_hombros
     from skill_shield.teleop_fr5.obstaculos import cajas_desde_config
     g = cfg if isinstance(cfg, dict) else {k: getattr(cfg, k) for k in dir(cfg) if k.isupper()}
@@ -680,7 +700,14 @@ def modelo_colision(cadena, cfg, T_mundo_cam=None, radio_mano=None):
         else Entorno(z_suelo=0.0)
     ent.cajas = cajas_desde_config(g, ent.z_suelo, verbose=False)
     if T_mundo_cam is not None:
-        ent.cajas.append(Caja("camara_cabeza", np.asarray(T_mundo_cam)[:3, 3], (0.07, 0.07, 0.07)))
+        ent.cajas.append(Caja(nombre_camara, np.asarray(T_mundo_cam)[:3, 3], (0.07, 0.07, 0.07)))
+    if otras_camaras is None:
+        c_a = _centro_calibrada(g, "AUTONOMO_CAM_A_CALIB_ARCHIVO", "camara_a_robot.json") \
+            if g.get("AUTONOMO_CAM_A", False) else None
+        otras_camaras = [("camara_a", c_a)] if c_a is not None else []
+    for nombre, c in otras_camaras:
+        if c is not None and (T_mundo_cam is None or np.linalg.norm(np.asarray(T_mundo_cam)[:3, 3] - c) > 0.02):
+            ent.cajas.append(Caja(nombre, np.asarray(c, float), (0.07, 0.07, 0.07)))
     m = ModeloColision(cadena, ent)
     if radio_mano is not None:
         m.R_MANO = float(radio_mano)

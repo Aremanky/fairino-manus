@@ -19,6 +19,8 @@ Qué hace ahora (criterio de «hecho» del paso 2):
      solo se le pasa la pose real del brazo (para quitarlo) y se dibuja en la ventana.
   8. Herramientas con ArUco (herramientas.py): las detecta el proceso de la cámara; la web las
      lista y deja elegir la objetivo; aquí se dibujan en la ventana.
+  9. (19-nov) Cámara A (camara_a.py): OAK-D fija mirando la mesa de cerca, en su propio proceso
+     (camara.py --rol a, sin mapa). La tarea la usa para medir la pelota al planificar y al afinar.
 
 Mandos de la web (los decide ESTE proceso, la web solo los pide):
   · Pedal de la web: «movimiento permitido» solo mientras llega su latido. Con el pedal
@@ -53,11 +55,12 @@ CANAL_MAPA = "skill_autonomo_mapa"
 CANAL_VISTO = "skill_autonomo_visto"     # (17-nov) qué ha visto la cámara (bits por cubo)
 CANAL_HERRAMIENTAS = "skill_autonomo_herramientas"
 CANAL_CONGELAR = "skill_autonomo_congelar"   # (18-nov) hay tarea → la cámara no aplica la autocorrección
+from skill_shield.autonomo.camara_a import CANAL_HERR_A, CANAL_IMG_A, CANAL_INFO_A   # noqa: E402 (19-nov)
 
 
-def estado_calibracion(raiz, cfg):
-    """Resumen de camara_robot.json (+ su última verificación) para la web."""
-    ruta = cfg.get("CALIB_ROBOT_ARCHIVO", "camara_robot.json")
+def estado_calibracion(raiz, cfg, ruta=None):
+    """Resumen de camara_robot.json (+ su última verificación) para la web. ruta (19-nov): la de otra cámara."""
+    ruta = ruta or cfg.get("CALIB_ROBOT_ARCHIVO", "camara_robot.json")
     ruta = ruta if os.path.isabs(ruta) else os.path.join(raiz, ruta)
     if not os.path.exists(ruta):
         return dict(estado="sin", texto="sin calibrar")
@@ -218,6 +221,14 @@ def ejecutar(cfg):
     con_herr = bool(cfg.get("AUTONOMO_HERRAMIENTAS"))
     canal_herr = Canal(CANAL_HERRAMIENTAS, capacidad=64 << 10, crear=True) if con_herr else None
     canal_congelar = Canal(CANAL_CONGELAR, capacidad=256, crear=True) if con_mapa else None
+    # (19-nov) cámara A: OAK-D fija mirando la mesa de cerca (pelotas y herramientas; sin mapa)
+    con_cam_a = bool(cfg.get("AUTONOMO_CAM_A", False)) and bool(cfg.get("AUTONOMO_CAM_A_MXID"))
+    if cfg.get("AUTONOMO_CAM_A", False) and not con_cam_a:
+        print("⚠️  AUTONOMO_CAM_A = True pero sin AUTONOMO_CAM_A_MXID: no se abre la cámara A.")
+    canal_img_a = Canal(CANAL_IMG_A, capacidad=2 << 20, crear=True) if con_cam_a else None
+    canal_info_a = Canal(CANAL_INFO_A, capacidad=64 << 10, crear=True) if con_cam_a else None
+    canal_herr_a = Canal(CANAL_HERR_A, capacidad=64 << 10, crear=True) if con_cam_a else None
+    ruta_calib_a = cfg.get("AUTONOMO_CAM_A_CALIB_ARCHIVO", "camara_a_robot.json")
 
     # ── 3. Procesos de cámara y web ──
     py_vision = cfg.get("AUTONOMO_PYTHON_PERCEPCION") or sys.executable
@@ -241,7 +252,8 @@ def ejecutar(cfg):
                "--canal-img", CANAL_IMG, "--canal-info", CANAL_INFO,
                "--canal-estado", CANAL_ESTADO, "--canal-mando", CANAL_MANDO,
                "--canal-sim", CANAL_SIM, "--canal-simcam", CANAL_SIMCAM, "--padre", pid] \
-        + (["--canal-herramientas", CANAL_HERRAMIENTAS] if con_herr else [])
+        + (["--canal-herramientas", CANAL_HERRAMIENTAS] if con_herr else []) \
+        + (["--canal-img-a", CANAL_IMG_A, "--canal-info-a", CANAL_INFO_A] if con_cam_a else [])
     # (18-nov) cada proceso, con su señal de vida: si se cae o se cuelga, el vigilante lo reinicia solo
     from skill_shield.autonomo.vigilante import Vigilado, Vigilante, comprobar_http
     vig_kw = dict(gracia_s=float(cfg.get("AUTONOMO_VIGILAR_GRACIA_S", 25.0)),
@@ -260,7 +272,19 @@ def ejecutar(cfg):
     vig_cam = Vigilado("cámara de cabeza", cmd_cam, raiz, senal=canal_img.tiempo, **vig_kw)
     vig_web = Vigilado("web", cmd_web, raiz, senal=canal_mando.tiempo, env=env_web,
                        extra=comprobar_http(f"http://127.0.0.1:{puerto_web}/api/estado"), **vig_kw)
-    vigilante = Vigilante([vig_cam, vig_web], activo=cfg.get("AUTONOMO_VIGILAR", True)).arrancar()
+    vigilados = [vig_cam, vig_web]
+    if con_cam_a:                                       # (19-nov) cámara A: el mismo programa, con --rol a
+        cmd_cam_a = [py_vision, "-m", "skill_shield.autonomo.camara", "--rol", "a",
+                     "--mxid", str(cfg["AUTONOMO_CAM_A_MXID"]), "--calibracion", str(ruta_calib_a),
+                     "--canal-img", CANAL_IMG_A, "--canal-info", CANAL_INFO_A,
+                     "--canal-herramientas", CANAL_HERR_A, "--padre", pid]
+        if con_mapa or con_herr:
+            cmd_cam_a += ["--canal-mando", CANAL_MANDO]
+        if cfg.get("AUTONOMO_CAM_VENTANA", False):
+            cmd_cam_a.append("--ventana")
+        vigilados.append(Vigilado("cámara A (mesa)", cmd_cam_a, raiz, senal=canal_img_a.tiempo, **vig_kw))
+        print(f"📷 Cámara A (mesa): {cfg['AUTONOMO_CAM_A_MXID']} · calibración {ruta_calib_a}")
+    vigilante = Vigilante(vigilados, activo=cfg.get("AUTONOMO_VIGILAR", True)).arrancar()
     avisados = set()
 
     # ── 4. OrcaHand (solo lectura) y táctiles ──
@@ -346,6 +370,7 @@ def ejecutar(cfg):
         periodo = 1.0 / float(cfg.get("AUTONOMO_HZ", 60.0))
         t_estado, sincronizado, permitido_antes = 0.0, None, None
         t_calib, calib_estado = 0.0, estado_calibracion(raiz, cfg)
+        calib_a_estado = estado_calibracion(raiz, cfg, ruta_calib_a) if con_cam_a else None
         t_mapa = 0.0
         from skill_shield.autonomo.mapa import desempaquetar, dibujar_voxeles
         from skill_shield.autonomo.herramientas import dibujar_herramientas
@@ -448,8 +473,11 @@ def ejecutar(cfg):
                         from skill_shield.autonomo.mapa import desempaquetar_visto
                         b_v, t_v = canal_visto.leer()
                         visto = desempaquetar_visto(b_v) if b_v and t_v and time.time() - t_v < 3.0 else None
+                    # (19-nov) lo que ve la cámara A (pelotas, con su calibración): la tarea lo usa si ve la misma
+                    from skill_shield.autonomo.camara_a import leer_canal
+                    lista_a, T_a = leer_canal(canal_herr_a)
                     return dict(q_real=q, herramientas=lista, objetivo_id=(mando or {}).get("objetivo_id"), mapa=mp,
-                                visto=visto, T_mundo_cam=T_mundo_cam)
+                                visto=visto, T_mundo_cam=T_mundo_cam, herramientas_a=lista_a, T_mundo_cam_a=T_a)
                 tarea.orden(mando, _contexto)
                 q_tarea_sim = tarea.paso(dt_vuelta, q, control.web_viva and control.pedal_pisado, _contexto)
             if canal_congelar is not None and t0 - t_congelar >= 0.2:
@@ -476,11 +504,14 @@ def ejecutar(cfg):
                     gemelo="copiando la pose real" if sincronizado else "sin pose real",
                     control=control.estado(robot_listo, mueve=tarea is not None and not simulacro),
                     calibracion=calib_estado,
+                    calibracion_a=calib_a_estado,                 # (19-nov) None = sin cámara A
                     tarea=tarea.estado_web() if tarea is not None else None,
                     procesos=vigilante.estado(),            # (18-nov) cámara, web y gemelo: vivos / reinicios
                 )).encode())
                 if t0 - t_calib >= 2.0:                 # por si se recalibra con el modo en marcha
                     t_calib, calib_estado = t0, estado_calibracion(raiz, cfg)
+                    if con_cam_a:
+                        calib_a_estado = estado_calibracion(raiz, cfg, ruta_calib_a)
                 if not vigilante.activo:                # (con el vigilante, los reinicia él en su hilo)
                     vigilante.avisos_sin_vigilar(avisados)
             time.sleep(max(0.0, periodo - (time.monotonic() - t0)))
@@ -503,7 +534,8 @@ def ejecutar(cfg):
             except Exception:
                 pass
         for c in (canal_img, canal_info, canal_estado, canal_mando, canal_sim, canal_simcam, canal_qpos,
-                  canal_qbrazo, canal_mapa, canal_herr, canal_visto, canal_congelar):
+                  canal_qbrazo, canal_mapa, canal_herr, canal_visto, canal_congelar,
+                  canal_img_a, canal_info_a, canal_herr_a):
             if c is not None:
                 c.cerrar()
     return 0

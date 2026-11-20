@@ -70,9 +70,11 @@ class ServicioWeb:
 
     def __init__(self, canal_img, canal_info, canal_estado, canal_mando, clave=None,
                  permitir_sin_pedal=True, pedal_obligatorio=True, latido_s=0.35,
-                 canal_sim=None, canal_simcam=None, vista=None, canal_herramientas=None):
+                 canal_sim=None, canal_simcam=None, vista=None, canal_herramientas=None,
+                 canal_img_a=None, canal_info_a=None):
         self._nombres = dict(img=canal_img, info=canal_info, estado=canal_estado, mando=canal_mando,
-                             sim=canal_sim, simcam=canal_simcam, herr=canal_herramientas)
+                             sim=canal_sim, simcam=canal_simcam, herr=canal_herramientas,
+                             img_a=canal_img_a, info_a=canal_info_a)        # (19-nov) cámara A (mesa)
         self.objetivo_id = None
         self._vista_inicial = dict(vista or VISTA_INICIAL)
         self.vista = dict(self._vista_inicial)
@@ -300,6 +302,13 @@ class ServicioWeb:
         if info is not None:
             info["edad_s"] = round(ahora - ti, 2) if ti else None
         e["camara"] = info or {}
+        if self._nombres.get("info_a"):                  # (19-nov) cámara A (mesa)
+            info_a, ta = self._json("info_a")
+            if info_a is not None:
+                info_a["edad_s"] = round(ahora - ta, 2) if ta else None
+            e["camara_a"] = dict(info_a or {}, activa=True)
+        else:
+            e["camara_a"] = dict(activa=False)
         e["mapa"] = dict((info or {}).get("mapa") or {}, ver=self.ver_obstaculos)
         h, th = self._json("herr")
         e["herramientas"] = dict(lista=(h or {}).get("lista", []) if th and ahora - th < 2.0 else [],
@@ -379,6 +388,10 @@ def crear_app(servicio):
     @app.get("/video.mjpg")
     async def video(request: Request):
         return _mjpeg(request, "img")
+
+    @app.get("/video_a.mjpg")
+    async def video_a(request: Request):                 # (19-nov) cámara A (mesa)
+        return _mjpeg(request, "img_a")
 
     @app.get("/sim.mjpg")
     async def sim(request: Request):
@@ -497,6 +510,8 @@ def main():
     ap.add_argument("--canal-sim", default="skill_autonomo_sim")
     ap.add_argument("--canal-simcam", default="skill_autonomo_simcam")
     ap.add_argument("--canal-herramientas", default="skill_autonomo_herramientas")
+    ap.add_argument("--canal-img-a", default=None, help="(19-nov) imagen de la cámara A (None = sin cámara A)")
+    ap.add_argument("--canal-info-a", default=None)
     ap.add_argument("--padre", type=int, default=0, help="PID del modo autónomo (si muere, salir)")
     args = ap.parse_args()
 
@@ -520,7 +535,8 @@ def main():
                            latido_s=getattr(cfg, "AUTONOMO_PEDAL_LATIDO_S", 0.35),
                            canal_sim=args.canal_sim, canal_simcam=args.canal_simcam,
                            vista=getattr(cfg, "AUTONOMO_SIM_VISTA", None),
-                           canal_herramientas=args.canal_herramientas)
+                           canal_herramientas=args.canal_herramientas,
+                           canal_img_a=args.canal_img_a, canal_info_a=args.canal_info_a)
     servidor = uvicorn.Server(uvicorn.Config(crear_app(servicio), host=args.host, port=args.puerto,
                                              log_level="warning", access_log=False,
                                              timeout_graceful_shutdown=1))   # el vídeo no la bloquea

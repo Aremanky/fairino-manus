@@ -26,6 +26,9 @@ Uso (cierra antes el modo autónomo / la teleoperación: la cámara y el robot t
   python calibrar_camara_robot.py --girar-posturas 180  # la mano se ha vuelto a montar girada 180° en la
                                                       #   brida: adapta UNA VEZ las posturas guardadas
                                                       #   (J6 ± 180°) y el tablero de camara_robot.json
+  python calibrar_camara_robot.py --camara a --auto   # (19-nov) la CÁMARA A (OAK-D fija de la mesa): igual,
+                                                      #   con sus archivos (AUTONOMO_CAM_A_CALIB_ARCHIVO,
+                                                      #   _POSTURAS, _MUESTRAS); vale con cualquier modo
 
 El robot solo se mueve MIENTRAS se mantiene el pedal de hombre muerto (TELEOP_FR5_PEDAL =
 "teclado": tecla P con la ventana delante, o "evdev"); al soltarlo se queda quieto. Velocidad
@@ -84,6 +87,27 @@ def _ruta(nombre_cfg, defecto):
 ARCHIVO = _ruta("CALIB_ROBOT_ARCHIVO", "camara_robot.json")
 POSTURAS = _ruta("CALIB_ROBOT_POSTURAS", "calib_posturas.json")
 MUESTRAS = _ruta("CALIB_ROBOT_MUESTRAS", "calib_muestras.json")
+# (19-nov) qué cámara se calibra: la de cabeza (por defecto) o la cámara A de la mesa (--camara a). Cada una con su
+# archivo, sus posturas y sus muestras; las dos con el mismo tablero
+CAMARA = "cabeza"
+CAM_MXID = getattr(cfg, "AUTONOMO_CAM_MXID", None)
+CAM_NOMBRE = "Cámara de cabeza"
+
+
+def elegir_camara(cual):
+    """(19-nov) Cambia archivos y MxId a los de la cámara 'cabeza' o 'a'."""
+    global CAMARA, CAM_MXID, CAM_NOMBRE, ARCHIVO, POSTURAS, MUESTRAS
+    CAMARA = cual
+    if cual == "a":
+        CAM_MXID = getattr(cfg, "AUTONOMO_CAM_A_MXID", None)
+        CAM_NOMBRE = "Cámara A (mesa)"
+        ARCHIVO = _ruta("AUTONOMO_CAM_A_CALIB_ARCHIVO", "camara_a_robot.json")
+        POSTURAS = _ruta("AUTONOMO_CAM_A_POSTURAS", "calib_posturas_a.json")
+        MUESTRAS = _ruta("AUTONOMO_CAM_A_MUESTRAS", "calib_muestras_a.json")
+        if not CAM_MXID:
+            sys.exit("✗ Falta AUTONOMO_CAM_A_MXID en config.py (el MxId de la cámara A).")
+        print(f"📷 Calibrando la CÁMARA A (mesa) {CAM_MXID} → {os.path.basename(ARCHIVO)} "
+              f"(posturas en {os.path.basename(POSTURAS)})")
 MIN_MUESTRAS = int(getattr(cfg, "CALIB_ROBOT_MIN_MUESTRAS", 15))
 ERROR_MAX = float(getattr(cfg, "CALIB_ROBOT_ERROR_MAX_MM", 5.0))
 VEL_MAX = float(cfg.CALIB_ROBOT_VEL_MAX_DEG_S)
@@ -307,18 +331,18 @@ def abrir_camara():
     from calibrar_extrinseca import _pipeline_charuco_hd
     from skill_shield.vision.multicamara import (abrir_dispositivo, comprobar_usb, intrinsecos_color,
                                                  listar_camaras, mxid_de)
-    mxid = getattr(cfg, "AUTONOMO_CAM_MXID", None)
+    mxid = CAM_MXID                                     # (19-nov) la de cabeza o la A (--camara)
     print(f"📷 OAK-D disponibles: {listar_camaras()}")
     # (16-nov) más resolución (tablero pequeño), enfoque fijo y, si se quiere, exposición fija
     pipeline, w, h = _pipeline_charuco_hd(fps=int(getattr(cfg, "CALIB_CAM_FPS", 15)),
                                           escala=getattr(cfg, "CALIB_CAM_ESCALA", None), control=True)
     dev = abrir_dispositivo(pipeline, mxid)
-    comprobar_usb(dev, "cabeza")
+    comprobar_usb(dev, CAMARA)
     K, dist = intrinsecos_color(dev, w, h)
     q = dev.getOutputQueue("color_hd", maxSize=2, blocking=False)
     ajustar_camara(dev)
     info = dict(mxid=mxid_de(dev), K=K, dist=np.asarray(dist).ravel(), ancho=w, alto=h)
-    print(f"📷 Cámara de cabeza {info['mxid']}: {w}x{h}, fx={K[0, 0]:.0f} fy={K[1, 1]:.0f} px")
+    print(f"📷 {CAM_NOMBRE} {info['mxid']}: {w}x{h}, fx={K[0, 0]:.0f} fy={K[1, 1]:.0f} px")
     return dev, q, info
 
 
@@ -428,6 +452,13 @@ def modelo_colision(cadena, T_mundo_cam=None):
     """El de la teleoperación (soporte, suelo, mesa/obstáculos de config) con la mano más gorda
     (lleva el tablero) y, si ya se sabe, la cámara de cabeza como obstáculo."""
     from skill_shield.autonomo.mapa import modelo_colision as _mc
+    if CAMARA == "a":
+        # (19-nov) calibrando la A: ella es «la cámara» del modelo y la de cabeza, si está calibrada, otra caja más
+        from skill_shield.autonomo.mapa import _centro_calibrada
+        c_cab = _centro_calibrada({k: getattr(cfg, k) for k in dir(cfg) if k.isupper()},
+                                  "CALIB_ROBOT_ARCHIVO", "camara_robot.json")
+        return _mc(cadena, cfg, T_mundo_cam, radio_mano=RADIO_MANO, nombre_camara="camara_a",
+                   otras_camaras=[("camara_cabeza", c_cab)] if c_cab is not None else [])
     return _mc(cadena, cfg, T_mundo_cam, radio_mano=RADIO_MANO)
 
 
@@ -1343,7 +1374,9 @@ def modo_manual(s=None):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Calibración cámara de cabeza → robot (paso 4)")
+    ap = argparse.ArgumentParser(description="Calibración cámara de cabeza (o cámara A) → robot (paso 4)")
+    ap.add_argument("--camara", choices=("cabeza", "a"), default="cabeza",
+                    help="(19-nov) cabeza = la de siempre · a = la OAK-D fija de la mesa (AUTONOMO_CAM_A_*)")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--generar-tablero", action="store_true")
     g.add_argument("--auto", action="store_true", help="calibración automática (el robot elige y recorre las posturas)")
@@ -1361,6 +1394,8 @@ def main():
     args = ap.parse_args()
     global SIN_PEDAL
     SIN_PEDAL = bool(args.sin)
+    if args.camara != "cabeza":
+        elegir_camara(args.camara)
 
     if args.generar_tablero:
         return generar_tablero()
