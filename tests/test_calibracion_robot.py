@@ -1325,3 +1325,19 @@ def test_manual_sliders_desarmados_no_mueven_el_robot(calib, cadena, reloj, arch
 
     assert np.degrees(np.abs(np.array(fr5.recorrido) - q0).max()) < 0.01
     assert fr5.publicados == []
+
+
+def test_manual_sliders_sin_pedal_mueve_con_los_sliders_armados(calib, cadena, reloj, archivos):
+    """--manual --sliders --sin: sin pedal, el robot va a lo que piden los sliders armados."""
+    crc_ = calib()
+    q0 = np.radians(Q0_DEG)
+    q_obj = q0 + np.radians([0.0, 0.0, 0.0, 0.0, 0.0, 15.0])
+    fr5 = FR5Simulado(q0)
+    sl = SlidersFalsos(q_obj)
+    s = SesionSimulada(cadena, reloj, fr5, T_BRIDA_TABLERO_20, TABLERO_20, teclas=[-1] * 200 + [ord("q")])
+    s.pedal = crc_.SinPedal()
+
+    crc_.modo_manual_sliders(s, sliders=sl)
+
+    assert np.degrees(np.abs(fr5.q_real_rad() - q_obj).max()) < 0.5
+    assert not fr5.habilitado

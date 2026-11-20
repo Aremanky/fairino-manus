@@ -1703,7 +1703,7 @@ AUTONOMO_FR5_CMD_TYPE = 1
 #   4. AUTONOMO_CAM_A = True. En la web sale la pestaña «Cámara A».
 # Si la A ve la MISMA pelota que la cabeza (a ≤ MAX_DIF_M), estable y reciente, el plan y el afinado la usan; si
 # no, todo sigue con la cabeza, como antes. En la terminal y en diagnosticos/intentos.jsonl sale con cuál se midió.
-AUTONOMO_CAM_A          = False               # True cuando esté montada y calibrada
+AUTONOMO_CAM_A          = True               # True cuando esté montada y calibrada
 AUTONOMO_CAM_A_MXID     = CAM_A_MXID          # la cámara A de la teleoperación (en este modo está libre)
 AUTONOMO_CAM_A_CALIB_ARCHIVO = "camara_a_robot.json"   # su T_mundo_cam (calibrar_camara_robot.py --camara a)
 AUTONOMO_CAM_A_POSTURAS = "calib_posturas_a.json"      # posturas de SU calibración (no pisan las de la cabeza)

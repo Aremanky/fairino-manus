@@ -20,7 +20,8 @@ Uso (cierra antes el modo autónomo / la teleoperación: la cámara y el robot t
   python calibrar_camara_robot.py --verificar --aqui  # comprueba en la postura actual, sin moverlo
   python calibrar_camara_robot.py --manual --sliders  # (20-nov) MANUAL CON SLIDERS: mueves el robot con la
                                                       #   ventana de sliders (ARMAR + pedal P mantenido);
-                                                      #   cada movimiento se comprueba antes (soporte, mesa…)
+                                                      #   cada movimiento se comprueba antes (soporte, mesa…).
+                                                      #   + --sin: sin pedal, basta con ARMAR los sliders
   python calibrar_camara_robot.py --manual            # MANUAL: mueves tú el robot (arrastre en la
                                                       #   WebApp) y pulsas ESPACIO en cada postura
   python calibrar_camara_robot.py --recalcular        # recalcula con las muestras guardadas
@@ -1399,6 +1400,8 @@ def modo_manual_sliders(s=None, sliders=None):
         mismas comprobaciones que --auto (brazo, mano + tablero, soporte, cabeza, suelo, cajas de
         TELEOP_FR5_OBSTACULOS —¡la mesa!—, y ningún hueco se cierra más de lo permitido respecto
         a la postura de inicio). Si no las pasa, el robot no va y los sliders se desarman.
+    Con --sin no hace falta el pedal: el robot se mueve en cuanto los sliders están ARMADOS (STOP,
+    Espacio en su ventana o cerrarla lo para; la P en la ventana de la cámara hace de pausa).
     Velocidad máxima CALIB_ROBOT_VEL_MAX_DEG_S. Con el robot quieto, ESPACIO (en la ventana de la
     cámara) captura; D quita la última; C calcula; Q termina."""
     from skill_shield.interfaz.sliders_brazo import FR5_ENVIANDO, FR5_ERROR, FR5_ESPERA
@@ -1457,7 +1460,9 @@ def modo_manual_sliders(s=None, sliders=None):
                         objetivo, s._trayecto = pedido, camino
                     else:
                         rechazar("por el camino, " + motivo)
-            hud = ["MANUAL CON SLIDERS: ARMAR en los sliders + P mantenida; ESPACIO aqui = capturar",
+            sin_pedal = isinstance(s.pedal, SinPedal)
+            hud = ["MANUAL CON SLIDERS: ARMAR en los sliders"
+                   + (" (SIN PEDAL: P = pausa)" if sin_pedal else " + P mantenida") + "; ESPACIO aqui = capturar",
                    f"muestras {len(muestras)} (min. {MIN_MUESTRAS}) · sliders "
                    + ("ARMADOS" if sl.armado else "desarmados") + " · robot " + ("en marcha" if s.armado else "quieto"),
                    "D = quitar ultima   C = calcular   Q = terminar"]
@@ -1537,8 +1542,6 @@ def main():
     SIN_PEDAL = bool(args.sin)
     if args.sliders and not args.manual:
         sys.exit("✗ --sliders va con --manual:  python calibrar_camara_robot.py [--camara a] --manual --sliders")
-    if args.sliders and args.sin:
-        sys.exit("✗ --manual --sliders va siempre con el pedal de hombre muerto (sin --sin).")
     if args.camara != "cabeza":
         elegir_camara(args.camara)
 
