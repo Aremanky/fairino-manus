@@ -6,12 +6,18 @@
 # See the LICENSE file at the root of this repository for full license information.
 # ==============================================================================
 
+import logging
 import os
+import sys
+import tempfile
+import time
 import yaml
 import numpy as np
 
 from ..constants import DEFAULT_MODEL_NAME
 from ..version import LATEST_VERSION
+
+logger = logging.getLogger(__name__)
 
 ################################################################################
 ### Model path utils ##########################################################
@@ -119,7 +125,7 @@ def get_model_path(model_path=None, model_version: str | None = None, model_name
                 )
                 if fallback_model_dir is not None:
                     resolved_path = fallback_model_dir
-    
+
     if not os.path.exists(resolved_path):
         available = _list_available_models(models_dir)
         msg = f"\033[1;35mModel '{requested_model}' not found."
@@ -153,34 +159,146 @@ def update_yaml(file_path, key, value):
         key: Top-level key to update.
         value: New value. ``np.ndarray`` instances are converted to lists.
     """
-    if isinstance(value, np.ndarray):
-        value = value.tolist()
-    
-    if isinstance(value, dict):
-        value = {k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in value.items()}
-
     try:
-        with open(file_path, 'r+') as file:
-            data = yaml.safe_load(file) or {} 
-            
+        with open(file_path, 'r+', encoding="utf-8") as file:
+            data = yaml.safe_load(file) or {}
+
             new_data = {key: value} # Make the latest chnage in the yaml file the first entry
             for existing_key, existing_value in data.items():
                 if existing_key != key:
                     new_data[existing_key] = existing_value
-            
-            file.seek(0) 
-            yaml.dump(new_data, file, default_flow_style=False, sort_keys=False) 
-            file.truncate() 
+
+            file.seek(0)
+            file.write(_dump_yaml(new_data))
+            file.truncate()
     except FileNotFoundError:
-        with open(file_path, 'w') as file:
-            yaml.dump({key: value}, file, default_flow_style=False, sort_keys=False)
+        with open(file_path, 'w', encoding="utf-8") as file:
+            file.write(_dump_yaml({key: value}))
+
+
+def _to_plain(value):
+    """``value`` as plain YAML types: arrays and tuples as lists, NumPy scalars
+    as numbers, all the way down. Anything else is left for the safe dumper to
+    refuse, so a write never emits a tag that a safe read sets aside."""
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {_to_plain(k): _to_plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_plain(v) for v in value]
+    return value
+
+
+def _dump_yaml(data) -> str:
+    return yaml.safe_dump(_to_plain(data), default_flow_style=False, sort_keys=False)
+
+
+def is_packaged_model_path(path) -> bool:
+    """Whether ``path`` lies inside the package's bundled ``models/`` tree.
+
+    Packaged configs are shared by every hand of a model; anything measured
+    on one hand must never be written into them.
+    """
+    models_dir = os.path.normcase(os.path.realpath(_get_models_dir()))
+    candidate = os.path.normcase(os.path.realpath(path))
+    try:
+        if os.path.commonpath([candidate, models_dir]) == models_dir:
+            return True
+    except ValueError:
+        # Different drives on Windows: cannot be inside the package tree.
+        return False
+    # A case-insensitive file system (macOS) opens the tree under other
+    # spellings too, which only the file system itself can say.
+    probe = candidate
+    while True:
+        try:
+            if os.path.samefile(probe, models_dir):
+                return True
+        except OSError:
+            pass
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return False
+        probe = parent
+
+
+_REPLACE_ATTEMPTS = 20
+
+
+def _replace(src: str, dst: str) -> None:
+    """``os.replace``, retried briefly on PermissionError: Windows refuses it
+    while another process has ``dst`` open, e.g. reading it."""
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(0.05)
+
+
+def write_bytes_atomic(file_path, data: bytes) -> None:
+    """Replace ``file_path`` with ``data`` via a same-directory temp file and
+    ``os.replace``, so a crash mid-write never leaves a truncated file. A
+    symlink is resolved first, and the target keeps its permissions."""
+    real_path = os.path.realpath(file_path)
+    # mkstemp creates 0600 files; carry over the target's permissions.
+    try:
+        mode = os.stat(real_path).st_mode & 0o7777
+    except OSError:
+        mode = 0o644
+    fd, tmp_path = tempfile.mkstemp(
+        dir=os.path.dirname(real_path) or ".", prefix=os.path.basename(real_path) + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, mode)
+        _replace(tmp_path, real_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def write_text_atomic(file_path, text: str) -> None:
+    """:func:`write_bytes_atomic` for UTF-8 ``text``."""
+    write_bytes_atomic(file_path, text.encode("utf-8"))
+
+
+def write_yaml_atomic(file_path, data):
+    """Replace a YAML file with ``data`` as its complete document, atomically.
+
+    The document is written to a temporary file in the same directory and
+    moved over ``file_path`` with ``os.replace``, so a crash mid-write can
+    never leave the target truncated or partially updated. A symlinked
+    ``file_path`` is resolved first, so the write replaces the file the link
+    points to rather than swapping the link for a regular file. Values are
+    written as plain YAML (NumPy arrays and tuples as lists, NumPy scalars as
+    numbers); one with no plain form raises instead of being tagged.
+
+    Args:
+        file_path: Path to the YAML file. Created if it does not exist.
+        data: Mapping of top-level keys to values forming the whole document.
+    """
+    write_text_atomic(file_path, _dump_yaml(data))
+
+
+_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
 def read_yaml(file_path):
-    """Reads a YAML file and returns its content."""
+    """Reads a UTF-8 YAML file and returns its content."""
     try:
-        with open(file_path, 'r') as file:
-            return yaml.safe_load(file) or None
+        with open(file_path, 'r', encoding="utf-8") as file:
+            return yaml.load(file, Loader=_SAFE_LOADER) or None
     except FileNotFoundError:
         return {}
 
@@ -202,107 +320,137 @@ def interpolate_waypoints(start, end, duration, step_time, mode="linear"):
         alpha = interp_func(t)
         yield [(1 - alpha) * s + alpha * e for s, e in zip(start, end)]
 
-def auto_detect_port(motor_type: str = "dynamixel") -> str:
+def auto_detect_port(motor_type: "str | None" = None) -> str:
     """Auto-detect a serial adapter port for the given motor type.
 
     Args:
-        motor_type: The motor driver type (``"dynamixel"`` or ``"feetech"``).
+        motor_type: The motor driver type (``"dynamixel"`` or ``"feetech"``),
+            or ``None`` to match adapters of any known motor family.
 
     Returns:
         The port device string if exactly one matching adapter is found,
         otherwise ``None``.
     """
     import serial.tools.list_ports
-    from ..constants import KNOWN_VIDS
+    from ..constants import KNOWN_VIDS, motor_family_vids
 
-    known_vids = KNOWN_VIDS.get(motor_type, [])
+    # The hand's controller board presents two CDC interfaces with one VID/PID;
+    # find the motor one via ORCA_ID?, falling back to VID for classic adapters.
+    try:
+        from ..hardware.sensing.serial_discovery import find_motor_port
+
+        orca_motor_port = find_motor_port()
+    except Exception:
+        orca_motor_port = None
+    if orca_motor_port is not None:
+        logger.info("Auto-detected ORCA motor bus via ORCA_ID?: %s", orca_motor_port)
+        return orca_motor_port
+
+    if motor_type is None:
+        known_vids = motor_family_vids()
+    else:
+        known_vids = KNOWN_VIDS.get(motor_type, [])
     ports = serial.tools.list_ports.comports()
     matches = [p for p in ports if p.vid in known_vids]
 
     if len(matches) == 1:
         port = matches[0]
-        print(f"Auto-detected {motor_type} adapter: {port.device} ({port.description or 'unknown'})")
+        logger.info(
+            "Auto-detected %s adapter: %s (%s)",
+            motor_type or "motor",
+            port.device,
+            port.description or "unknown",
+        )
         return port.device
 
     return None
 
 
-def get_and_choose_port() -> str:
-    """Present an interactive terminal menu for USB port selection.
+def motor_type_for_port(port_device: str) -> "str | None":
+    """Return the motor family whose USB VID matches ``port_device``, or None."""
+    import serial.tools.list_ports
+    from ..constants import KNOWN_VIDS
 
-    Uses ``curses`` to render an arrow-key-navigable list of all detected
-    serial ports. The user selects a port with Enter or quits with ``q`` /
-    Escape.
+    for port in serial.tools.list_ports.comports():
+        if port.device != port_device:
+            continue
+        for motor_type, vids in KNOWN_VIDS.items():
+            if port.vid in vids:
+                return motor_type
+        return None
+    return None
+
+
+def find_single_usb_serial_port() -> "str | None":
+    """Return the device path of the only attached USB serial adapter, or None.
+
+    Filters out built-in / non-USB serial endpoints (Bluetooth, debug console)
+    by requiring a USB VID. Used as a last-resort port pick when no VID is
+    in :data:`~orca_core.constants.KNOWN_VIDS`.
+    """
+    import serial.tools.list_ports
+
+    ports = [p for p in serial.tools.list_ports.comports() if p.vid is not None]
+    if len(ports) == 1:
+        return ports[0].device
+    return None
+
+
+def serial_port_exists(port: str) -> bool:
+    """Return True if ``port`` is currently attached.
+
+    Ports are device files on Linux and macOS, so ``os.path.exists`` answers.
+    Windows COM ports are not files; there pyserial's enumeration is asked.
+    """
+    if not port:
+        return False
+    if sys.platform != "win32":
+        return os.path.exists(port)
+    import serial.tools.list_ports
+
+    wanted = port.casefold()
+    return any(p.device.casefold() == wanted for p in serial.tools.list_ports.comports())
+
+
+def enable_ansi_escapes() -> None:
+    """Let the Windows console honour ANSI colour and cursor codes. No-op elsewhere."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32
+    enable_virtual_terminal_processing = 0x0004
+    for std_handle in (-11, -12):  # stdout, stderr
+        handle = kernel32.GetStdHandle(std_handle)
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | enable_virtual_terminal_processing)
+
+
+def get_and_choose_port() -> str:
+    """Prompt on the terminal for one of the detected serial ports, by number.
 
     Returns:
         Device string of the selected port (e.g. ``"/dev/ttyUSB0"``), or
         ``None`` if the user cancels or no ports are found.
     """
-    import curses
     import serial.tools.list_ports
-    
-    def draw_menu(stdscr, ports, selected_idx):
-        stdscr.clear()
-        height, width = stdscr.getmaxyx()
-        
-        title = "Choose a device (use arrow keys, Enter to select, q to quit)"
-        stdscr.addstr(0, (width - len(title)) // 2, title, curses.A_BOLD)
-        
-        for i, port in enumerate(ports):
-            y_pos = i * 3 + 2
-            if y_pos >= height - 1:
-                break
-            marker = "(x)" if i == selected_idx else "( )"
 
-            if i == selected_idx:
-                stdscr.attron(curses.A_REVERSE)
-                stdscr.addstr(y_pos, 0, f"{i+1:2d}. {marker} {port.device}")
-                stdscr.attroff(curses.A_REVERSE)
-            else:
-                stdscr.addstr(y_pos, 0, f"{i+1:2d}. {marker} {port.device}")
-
-            if y_pos + 1 < height - 1:
-                stdscr.addstr(y_pos + 1, 4, f"{port.description or 'No description'}")
-            if y_pos + 2 < height - 1:
-                stdscr.addstr(y_pos + 2, 4, f"{port.manufacturer or 'Unknown manufacturer'}")
-        
-        if len(ports) + 5 < height:
-            stdscr.addstr(height - 2, 0, "Use ↑↓ arrows to navigate, Enter to select, q to quit")
-        
-        stdscr.refresh()
-    
-    def main_menu(stdscr):
-        curses.curs_set(0)
-        stdscr.keypad(True)
-        
-        ports = list(serial.tools.list_ports.comports())
-        
-        if not ports:
-            stdscr.clear()
-            stdscr.addstr(0, 0, "No USB devices found!")
-            stdscr.refresh()
-            stdscr.getch()
-            return None
-        
-        selected_idx = 0
-        
-        while True:
-            draw_menu(stdscr, ports, selected_idx)
-            
-            key = stdscr.getch()
-            
-            if key == curses.KEY_UP and selected_idx > 0:
-                selected_idx -= 1
-            elif key == curses.KEY_DOWN and selected_idx < len(ports) - 1:
-                selected_idx += 1
-            elif key == curses.KEY_ENTER or key in [10, 13]:
-                return ports[selected_idx].device
-            elif key == ord('q') or key == ord('Q'):
-                return None
-            elif key == 27:
-                return None
-    
-    try:
-        return curses.wrapper(main_menu)
-    except KeyboardInterrupt:
+    ports = list(serial.tools.list_ports.comports())
+    if not ports:
+        print("No USB devices found!")
         return None
+    print("Choose a device (number, or q to quit):")
+    for i, port in enumerate(ports, 1):
+        print(f"{i:2d}. {port.device}  {port.description or 'No description'}  "
+              f"({port.manufacturer or 'Unknown manufacturer'})")
+    while True:
+        try:
+            answer = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if answer.lower() == "q":
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= len(ports):
+            return ports[int(answer) - 1].device
+        print(f"Enter a number between 1 and {len(ports)}, or q.")

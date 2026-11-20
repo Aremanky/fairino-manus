@@ -18,6 +18,9 @@ Uso (cierra antes el modo autónomo / la teleoperación: la cámara y el robot t
   python calibrar_camara_robot.py --verificar --sin   # (19-nov) igual pero SIN PEDAL: entra por la postura
                                                       #   guardada más cercana y va sola a ~4 posturas
   python calibrar_camara_robot.py --verificar --aqui  # comprueba en la postura actual, sin moverlo
+  python calibrar_camara_robot.py --manual --sliders  # (20-nov) MANUAL CON SLIDERS: mueves el robot con la
+                                                      #   ventana de sliders (ARMAR + pedal P mantenido);
+                                                      #   cada movimiento se comprueba antes (soporte, mesa…)
   python calibrar_camara_robot.py --manual            # MANUAL: mueves tú el robot (arrastre en la
                                                       #   WebApp) y pulsas ESPACIO en cada postura
   python calibrar_camara_robot.py --recalcular        # recalcula con las muestras guardadas
@@ -1373,6 +1376,142 @@ def modo_manual(s=None):
     return calcular_y_guardar(muestras, s.cadena, s.info)[1]
 
 
+# ═════════════ (20-nov) manual con los sliders del brazo ═════════════
+
+def abrir_sliders():
+    """La ventana de sliders del modo «gemelo con sliders» (skill_shield/interfaz/sliders_brazo.py).
+    Se abre ANTES que la Sesion: es un proceso aparte (fork) y tiene que nacer antes de la cámara."""
+    from skill_shield.interfaz.sliders_brazo import SlidersBrazo
+    sl = SlidersBrazo.desde_config({k: getattr(cfg, k) for k in dir(cfg) if k.isupper()})
+    if not sl.iniciar():
+        sys.exit("✗ No se puede abrir la ventana de sliders (¿sudo apt install python3.12-tk?).")
+    return sl
+
+
+def modo_manual_sliders(s=None, sliders=None):
+    """--manual --sliders: como --manual, pero el robot se mueve con la ventana de sliders en vez de
+    con el arrastre de la WebApp. El robot solo se mueve si:
+      · los sliders están ARMADOS (botón ARMAR; STOP / Espacio en su ventana / cerrarla = desarmar),
+      · el pedal de hombre muerto está pisado (TELEOP_FR5_PEDAL; con "teclado", la P mantenida, que
+        se pulsa con la ventana de la CÁMARA delante; luego se puede soltar el foco e ir a los
+        sliders con el ratón sin soltar la P),
+      · y el trayecto desde donde está el robot DE VERDAD hasta lo que piden los sliders pasa las
+        mismas comprobaciones que --auto (brazo, mano + tablero, soporte, cabeza, suelo, cajas de
+        TELEOP_FR5_OBSTACULOS —¡la mesa!—, y ningún hueco se cierra más de lo permitido respecto
+        a la postura de inicio). Si no las pasa, el robot no va y los sliders se desarman.
+    Velocidad máxima CALIB_ROBOT_VEL_MAX_DEG_S. Con el robot quieto, ESPACIO (en la ventana de la
+    cámara) captura; D quita la última; C calcula; Q termina."""
+    from skill_shield.interfaz.sliders_brazo import FR5_ENVIANDO, FR5_ERROR, FR5_ESPERA
+    sl = sliders or abrir_sliders()
+    s = s or Sesion(mover=True)
+    muestras = []
+    lim = limites_articulares(s.cadena)
+    objetivo = None                 # lo que se le manda al robot: lo último de los sliders que ha pasado
+    pedido_ant, t_comprobado = None, -1e9
+    if os.path.exists(MUESTRAS):
+        os.replace(MUESTRAS, MUESTRAS + ".bak")
+
+    def rechazar(motivo):
+        nonlocal objetivo, pedido_ant
+        objetivo, pedido_ant = None, None
+        s._trayecto = None
+        s.fr5.habilitar(False)
+        s.armado = False
+        sl.desarmar("NO voy ahí: " + motivo)
+        s.avisar("NO voy ahí: " + motivo + " → sliders desarmados (vuelve a ARMAR)")
+
+    try:
+        t0 = time.monotonic()
+        while s.q is None:                               # sin postura real no se puede comprobar nada
+            s.vuelta(None, hud=["esperando la postura real del robot..."])
+            if time.monotonic() - t0 > SIN_LECTURA_S:
+                raise Detenido(f"lleva {SIN_LECTURA_S:.0f} s sin leer la postura del robot (¿conexión con el FR5?)")
+        # La postura de inicio es la referencia de los huecos, como en --auto: empieza con el robot
+        # en una postura cómoda, sin nada apretado y con el tablero a la vista de la cámara.
+        s.seguridad = crear_seguridad(s.cadena, np.array(s.q))
+        if not s.seguridad.libre(np.array(s.q)):
+            raise Detenido("la postura de inicio ya está demasiado cerca de algo ("
+                           + (s.seguridad.motivo(np.array(s.q)) or "?") + "): sepáralo antes de empezar")
+        while True:
+            if s.q is not None:
+                sl.publicar_real(sl.a_grados(s.q), True)
+            sl.estado_fr5(FR5_ERROR if s.fr5.en_error else FR5_ENVIANDO if s.armado else FR5_ESPERA)
+            if sl.pide_reset():
+                s._reiniciar("RESET desde los sliders")
+            if not sl.armado:
+                objetivo, pedido_ant, s._trayecto = None, None, None
+            elif objetivo is None:                       # recién armado: parte de la postura real
+                if s.q is not None:
+                    objetivo = np.array(s.q, float)
+                    pedido_ant = objetivo.copy()
+                    s._trayecto = objetivo[None, :].copy()
+            else:
+                pedido = np.clip(np.asarray(sl.objetivo_rad(), float), lim[:, 0], lim[:, 1])
+                ahora = time.monotonic()
+                if (s.q is not None and ahora - t_comprobado >= 0.1
+                        and float(np.degrees(np.max(np.abs(pedido - pedido_ant)))) > 0.2):
+                    t_comprobado, pedido_ant = ahora, pedido
+                    camino = np.array(C.simular_camino(np.array(s.q), pedido, VEL_MAX))
+                    motivo = s.seguridad.motivo_posturas(camino, MARGEN_TRAYECTO)
+                    if motivo is None:
+                        objetivo, s._trayecto = pedido, camino
+                    else:
+                        rechazar("por el camino, " + motivo)
+            hud = ["MANUAL CON SLIDERS: ARMAR en los sliders + P mantenida; ESPACIO aqui = capturar",
+                   f"muestras {len(muestras)} (min. {MIN_MUESTRAS}) · sliders "
+                   + ("ARMADOS" if sl.armado else "desarmados") + " · robot " + ("en marcha" if s.armado else "quieto"),
+                   "D = quitar ultima   C = calcular   Q = terminar"]
+            try:
+                key, _ = s.vuelta(objetivo, hud=hud)
+            except FueraDeTrayecto:
+                # el robot no está en el trayecto comprobado: se comprueba desde donde está
+                if objetivo is not None and s.q is not None:
+                    camino = np.array(C.simular_camino(np.array(s.q), objetivo, VEL_MAX))
+                    motivo = s.seguridad.motivo_posturas(camino, MARGEN_TRAYECTO)
+                    if motivo is None:
+                        s._trayecto = camino
+                    else:
+                        rechazar("desde donde está el robot, " + motivo)
+                continue
+            if key == 32:
+                m = s.capturar(objetivo=objetivo) if s.listo else None
+                if m is None:
+                    s.avisar("no capturo: " + ("sin pose del robot" if s.q is None else
+                                               "el robot se mueve" if not s.robot.quieto else
+                                               getattr(s, "motivo_captura", "") or "no se ve el tablero"))
+                    continue
+                muestras.append(m)
+                _escribir_json(POSTURAS, [mm["q"] for mm in muestras])
+                _guardar_muestras(s, muestras)
+                giro, rec = C.diversidad([s.cadena.fk_marcos(np.array(mm["q"]))[5] for mm in muestras])
+                s.avisar(f"muestra {len(muestras)} guardada · giro {giro:.0f}° · recorrido {rec:.0f} mm")
+            elif key in (8, 65288, ord("d"), ord("D")) and muestras:
+                muestras.pop()
+                _escribir_json(POSTURAS, [mm["q"] for mm in muestras])
+                _guardar_muestras(s, muestras)
+                s.avisar(f"quitada la última: quedan {len(muestras)}")
+            elif key in (ord("c"), ord("C")):
+                if len(muestras) < 3:
+                    s.avisar("hacen falta al menos 3 muestras")
+                else:
+                    calcular_y_guardar(muestras, s.cadena, s.info)
+    except Cancelado:
+        pass
+    except Detenido as e:
+        s.mostrar_error(str(e))
+    finally:
+        sl.desarmar()
+        s.fr5.habilitar(False)
+        s.cerrar()
+        sl.parar()
+    if len(muestras) < 3:
+        print("Menos de 3 muestras: no se calcula nada.")
+        return None
+    if len(muestras) < MIN_MUESTRAS:
+        print(f"⚠️  Solo {len(muestras)} muestras (recomendadas ≥ {MIN_MUESTRAS}).")
+    return calcular_y_guardar(muestras, s.cadena, s.info)[1]
+
+
 def main():
     ap = argparse.ArgumentParser(description="Calibración cámara de cabeza (o cámara A) → robot (paso 4)")
     ap.add_argument("--camara", choices=("cabeza", "a"), default="cabeza",
@@ -1389,11 +1528,17 @@ def main():
     g.add_argument("--girar-posturas", type=float, metavar="GRADOS", default=None,
                    help="la mano se ha montado girada GRADOS en la brida: adapta las posturas guardadas")
     ap.add_argument("--aqui", action="store_true", help="con --verificar: en la postura actual, sin mover el robot")
+    ap.add_argument("--sliders", action="store_true",
+                    help="(20-nov) con --manual: mueves el robot con la ventana de sliders (ARMAR + pedal)")
     ap.add_argument("--sin", action="store_true",
                     help="SIN PEDAL: el robot se mueve solo (P = pausa/seguir, Q/Esc = parar). Vale con cualquier modo")
     args = ap.parse_args()
     global SIN_PEDAL
     SIN_PEDAL = bool(args.sin)
+    if args.sliders and not args.manual:
+        sys.exit("✗ --sliders va con --manual:  python calibrar_camara_robot.py [--camara a] --manual --sliders")
+    if args.sliders and args.sin:
+        sys.exit("✗ --manual --sliders va siempre con el pedal de hombre muerto (sin --sin).")
     if args.camara != "cabeza":
         elegir_camara(args.camara)
 
@@ -1439,7 +1584,7 @@ def main():
     if args.repetir or args.verificar:
         ok = modo_repetir_o_verificar(args.verificar, aqui=args.aqui)
     elif args.manual:
-        ok = modo_manual()
+        ok = modo_manual_sliders() if args.sliders else modo_manual()
     else:
         if not args.auto:
             print("(Sin opciones = calibración automática. --manual para hacerlo a mano.)")

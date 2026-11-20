@@ -1238,3 +1238,90 @@ def test_la_mano_se_pone_recta_con_par_y_se_suelta_al_cerrar():
     m.cerrar()
     assert falsa.desconectada
     assert CR.abrir_mano_recta(fabrica=lambda: ManoFalsa(ok=False), esperar_s=0) is None
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 11. (20-nov) --manual --sliders: el robot va a lo que piden los sliders, pero solo por trayectos
+#     comprobados y con los sliders armados (más el pedal)
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+class SlidersFalsos:
+    """Lo que el modo usa de SlidersBrazo: armados desde el principio, pidiendo 'objetivo' (rad)."""
+
+    def __init__(self, objetivo, armado=True):
+        self.objetivo = np.asarray(objetivo, float)
+        self._armado = armado
+        self.motivos, self.publicados, self.parado = [], 0, False
+
+    @property
+    def armado(self):
+        return self._armado
+
+    def objetivo_rad(self):
+        return list(self.objetivo)
+
+    def a_grados(self, q):
+        return list(np.degrees(q))
+
+    def publicar_real(self, q_deg, de_fr5):
+        self.publicados += 1
+
+    def estado_fr5(self, codigo):
+        pass
+
+    def mensaje(self, texto):
+        pass
+
+    def pide_reset(self):
+        return False
+
+    def desarmar(self, motivo=None):
+        self._armado = False
+        if motivo:
+            self.motivos.append(motivo)
+
+    def parar(self):
+        self.parado = True
+
+
+def test_manual_sliders_lleva_el_robot_a_los_sliders_y_captura(calib, cadena, reloj, archivos):
+    crc_ = calib()
+    q0 = np.radians(Q0_DEG)
+    q_obj = q0 + np.radians([0.0, 0.0, 0.0, 0.0, 0.0, 15.0])
+    fr5 = FR5Simulado(q0)
+    sl = SlidersFalsos(q_obj)
+    s = SesionSimulada(cadena, reloj, fr5, T_BRIDA_TABLERO_20, TABLERO_20,
+                       teclas=[-1] * 150 + [32] + [-1] * 600 + [ord("q")])
+
+    crc_.modo_manual_sliders(s, sliders=sl)
+
+    assert np.degrees(np.abs(fr5.q_real_rad() - q_obj).max()) < 0.5        # ha ido a lo que piden
+    assert len(json.load(open(archivos.POSTURAS))) == 1                      # y ha capturado allí
+    assert not sl.motivos and sl.parado and not fr5.habilitado
+
+
+def test_manual_sliders_no_cruza_el_soporte_y_desarma(calib, cadena, reloj, archivos):
+    crc_ = calib()
+    q0 = np.radians(Q0_DEG)
+    q_otro_lado = np.radians([-26.1, -27.7, 56.4, 43.0, 105.0, 25.0])       # girando J1 119°: cruza la columna
+    fr5 = FR5Simulado(q0)
+    sl = SlidersFalsos(q_otro_lado)
+    s = SesionSimulada(cadena, reloj, fr5, T_BRIDA_TABLERO_20, TABLERO_20, teclas=[-1] * 100 + [ord("q")])
+
+    crc_.modo_manual_sliders(s, sliders=sl)
+
+    assert np.degrees(np.abs(np.array(fr5.recorrido) - q0).max()) < 0.01   # no se ha movido nada
+    assert sl.motivos and "NO voy" in sl.motivos[0] and not sl.armado
+
+
+def test_manual_sliders_desarmados_no_mueven_el_robot(calib, cadena, reloj, archivos):
+    crc_ = calib()
+    q0 = np.radians(Q0_DEG)
+    fr5 = FR5Simulado(q0)
+    sl = SlidersFalsos(q0 + np.radians([0.0, 0.0, 0.0, 0.0, 0.0, 15.0]), armado=False)
+    s = SesionSimulada(cadena, reloj, fr5, T_BRIDA_TABLERO_20, TABLERO_20, teclas=[-1] * 100 + [ord("q")])
+
+    crc_.modo_manual_sliders(s, sliders=sl)
+
+    assert np.degrees(np.abs(np.array(fr5.recorrido) - q0).max()) < 0.01
+    assert fr5.publicados == []

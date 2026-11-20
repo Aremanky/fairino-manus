@@ -6,17 +6,155 @@
 # See the LICENSE file at the root of this repository for full license information.
 # ==============================================================================
 
+import dataclasses
+import functools
+import logging
+import math
+import numbers
 import os
+import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal
+from typing import Dict, List, Literal, Optional
 
-from .constants import CONTROL_MODES, DEFAULT_MODEL_NAME, JOINT_IDS, JOINT_ROM_DICT, JOINT_TO_MOTOR_MAP, MOTOR_IDS
+from .constants import (
+    CALIBRATION_CURRENT_V21,
+    CALIBRATION_GROUPS,
+    DYNAMIXEL,
+    GUIDED_TENSION_CURRENTS,
+    CALIBRATION_RETRY_STEP_MA,
+    CONTROL_MODES,
+    DEFAULT_CALIBRATION_TRAVEL_RETRIES,
+    DEFAULT_MODEL_NAME,
+    DEFAULT_RETRY_CURRENT_SCALE,
+    FINGER_NAMES,
+    JOINT_IDS,
+    JOINT_MOTOR_TRAVEL,
+    JOINT_MOTOR_TRAVEL_V21,
+    JOINT_ROM_DICT,
+    HARDWARE_VERSION,
+    HARDWARE_VERSION_V21,
+    HARDWARE_VERSION_V211,
+    JOINT_ROMS_V211,
+    JOINT_TO_MOTOR_MAP,
+    JOINT_TO_MOTOR_MAP_V21,
+    MOTOR_IDS,
+    SUPPORTED_MOTOR_TYPES,
+    WRIST,
+    normalize_hardware_version,
+)
+from .control.constants import (
+    DEFAULT_CORRECTION_MAX_DEG,
+    DEFAULT_JOINT_GAIN_OVERRIDES,
+    DEFAULT_KI,
+    DEFAULT_KP,
+)
+from .hardware.sensing.constants import (
+    VALID_SENSOR_IDS,
+    DEFAULT_ENCODER_BAUDRATE,
+    DEFAULT_SENSOR_PORT,
+    DEFAULT_FINGER_TO_SENSOR_ID,
+)
 from .joint_position import OrcaJointPositions
-from .utils.utils import get_model_path, read_yaml
+from .utils.utils import _get_models_dir, get_model_path, is_packaged_model_path, read_yaml, write_yaml_atomic
+from .version import LATEST_VERSION
+
+
+# What a current limit says in config.yaml to take the motor family's own value.
+_FAMILY_DEFAULT = "default"
+
+
+def _current_setting(value, name: str) -> "int | str":
+    """A current limit from config.yaml: a whole number of mA, or ``default``."""
+    if isinstance(value, str) and value.strip().lower() == _FAMILY_DEFAULT:
+        return _FAMILY_DEFAULT
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise HandConfigValidationError(
+            f"{name} must be a number of mA or 'default', got {value!r}."
+        )
+    try:
+        return int(value)
+    except ValueError:
+        raise HandConfigValidationError(
+            f"{name} must be a number of mA or 'default', got {value!r}."
+        ) from None
 
 
 class HandConfigValidationError(ValueError):
     """Raised when a hand configuration is structurally invalid."""
+
+
+@dataclass(frozen=True)
+class JointGains:
+    """Outer-loop PI gains for one joint of the closed-loop joint controller.
+
+    ``kp`` is dimensionless: the correction is mapped to motor space through
+    the calibrated joint-to-motor ratio, so one degree of correction nominally
+    produces one degree of joint motion. Joints that respond fast (a small
+    motor move producing a large joint move) have the least stability margin
+    and want a lower ``kp`` than the rest.
+    """
+
+    kp: float = DEFAULT_KP
+    ki: float = DEFAULT_KI
+    correction_max_deg: float = DEFAULT_CORRECTION_MAX_DEG
+
+    def __post_init__(self) -> None:
+        for name in ("kp", "ki", "correction_max_deg"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise HandConfigValidationError(
+                    f"JointGains.{name} must be a number, got {value!r}"
+                )
+            if not math.isfinite(value):
+                raise HandConfigValidationError(
+                    f"JointGains.{name} must be finite, got {value}"
+                )
+            if value < 0:
+                raise HandConfigValidationError(
+                    f"JointGains.{name} must be non-negative, got {value}"
+                )
+
+    @classmethod
+    def from_dict(
+        cls, raw: Dict[str, float], base: "JointGains | None" = None
+    ) -> "JointGains":
+        """Build from a YAML mapping, inheriting unspecified fields from
+        ``base`` (or the package defaults). Lets a per-joint override name
+        only the gain it changes."""
+        base = base or cls()
+        if not isinstance(raw, dict):
+            raise HandConfigValidationError(
+                f"joint gain entry must be a mapping, got {raw!r}"
+            )
+        unknown = set(raw) - {"kp", "ki", "correction_max_deg"}
+        if unknown:
+            raise HandConfigValidationError(
+                f"unknown joint gain key(s) {sorted(unknown)}; "
+                "expected kp, ki, or correction_max_deg"
+            )
+
+        # float() would silently coerce bools and crash on None; reject both
+        # here so __post_init__ only ever sees genuine numbers.
+        def _coerce(key: str) -> float:
+            value = raw[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise HandConfigValidationError(
+                    f"JointGains.{key} must be a number, got {value!r}"
+                )
+            return float(value)
+
+        return cls(
+            kp=_coerce("kp") if "kp" in raw else base.kp,
+            ki=_coerce("ki") if "ki" in raw else base.ki,
+            correction_max_deg=(
+                _coerce("correction_max_deg")
+                if "correction_max_deg" in raw
+                else base.correction_max_deg
+            ),
+        )
+
+    def as_dict(self) -> Dict[str, float]:
+        return dataclasses.asdict(self)
 
 
 def _resolve_model_name_from_type(hand_type: str | None) -> str:
@@ -30,7 +168,7 @@ def _resolve_model_name_from_type(hand_type: str | None) -> str:
     if normalized_type not in {"left", "right"}:
         raise ValueError(f"Unsupported hand type: {hand_type!r}. Expected 'left' or 'right'.")
 
-    return f"orcahand_{normalized_type}"
+    return f"orcahand-{normalized_type}"
 
 
 def _resolve_config_path(
@@ -56,10 +194,15 @@ def _resolve_config_path(
 
 
 def _resolve_calibration_path(config_path: str, calibration_path: str | None) -> str:
-    """Resolve the companion ``calibration.yaml`` path for a config file."""
-    if calibration_path is not None:
+    """An explicitly given calibration file, absolute; ``""`` otherwise.
+
+    Nothing beside a model's config is a hand's own file: without an explicit
+    path a hand reads and writes the calibration in its own folder under
+    ``ORCA_HOME`` once it knows which hand it is (see :mod:`orca_core.hand_store`).
+    """
+    if calibration_path:
         return os.path.abspath(calibration_path)
-    return os.path.join(os.path.dirname(config_path), "calibration.yaml")
+    return ""
 
 
 def canonical_joint_ids(
@@ -86,6 +229,316 @@ def _canonical_joint_to_motor_map(
         inversion_dict[joint] = motor_id < 0
         normalized_map[joint] = abs(motor_id)
     return normalized_map, inversion_dict
+
+
+SHARED_CONFIG_FILE = "shared.yaml"
+# shared.yaml maps keyed by joint name. A merge cannot delete a key, so each is
+# trimmed to the model's joint_ids: a model without a joint drops its entries.
+_SHARED_JOINT_MAPS = (JOINT_ROM_DICT, JOINT_ROMS_V211, JOINT_MOTOR_TRAVEL_V21)
+
+
+def _shared_config_path(config_path: str) -> str | None:
+    """The ``shared.yaml`` the config at ``config_path`` builds on, or None.
+
+    Only a packaged model has one: its generation's ``models/<version>/shared.yaml``,
+    found through symlinks. A config anywhere else is standalone and complete,
+    whatever ``shared.yaml`` happens to sit near it.
+    """
+    real = os.path.realpath(config_path)
+    if not is_packaged_model_path(real):
+        return None
+    path = os.path.join(os.path.dirname(os.path.dirname(real)), SHARED_CONFIG_FILE)
+    return path if is_packaged_model_path(path) and os.path.isfile(path) else None
+
+
+def _deep_merge(base: Dict, over: Dict) -> Dict:
+    """``base`` with ``over`` laid on top: mappings merge key by key, anything else is replaced."""
+    merged = dict(base)
+    for key, value in over.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _read_mapping(path: str) -> Dict:
+    doc = read_yaml(path) or {}
+    if not isinstance(doc, dict):
+        raise HandConfigValidationError(f"{path} must hold a mapping of config keys, got {type(doc).__name__}.")
+    return doc
+
+
+def _load_config_documents(config_path: str) -> tuple[Dict, Dict]:
+    """``(config.yaml as written, the effective document)`` for ``config_path``."""
+    own = _read_mapping(config_path)
+    shared_path = _shared_config_path(config_path)
+    if shared_path is None:
+        return own, own
+    shared = _read_mapping(shared_path)
+    joint_ids = own.get(JOINT_IDS)
+    if isinstance(joint_ids, list):
+        for key in _SHARED_JOINT_MAPS:
+            if isinstance(shared.get(key), dict):
+                shared[key] = {j: v for j, v in shared[key].items() if j in joint_ids}
+    return own, _deep_merge(shared, own)
+
+
+def load_config(
+    config_path: str | None = None,
+    model_version: str | None = None,
+    model_name: str | None = None,
+) -> Dict:
+    """The effective yaml document of a model: for a packaged v2 model, its
+    generation's ``shared.yaml`` deep-merged under its ``config.yaml``, the
+    model's values winning and the shared per-joint maps trimmed to its
+    ``joint_ids``. Any other config (a v1 model, a config outside the package)
+    is used as written and must be complete. Writing this document out gives a
+    standalone copy of the model."""
+    return _load_config_documents(
+        _resolve_config_path(config_path, model_version=model_version, model_name=model_name)
+    )[1]
+
+
+def write_standalone_config(
+    destination: str,
+    config_path: str | None = None,
+    model_version: str | None = None,
+    model_name: str | None = None,
+) -> str:
+    """Write a model's effective config (:func:`load_config`) to ``destination``
+    as a complete ``config.yaml`` that loads the same anywhere, with no
+    ``shared.yaml``. ``destination`` is the file to write, or a folder to write
+    ``config.yaml`` into; missing folders are created. Returns the path written.
+
+    Raises:
+        ValueError: ``destination`` lies inside the package's models tree.
+    """
+    document = load_config(config_path, model_version=model_version, model_name=model_name)
+    path = os.path.join(destination, "config.yaml") if os.path.isdir(destination) else destination
+    if is_packaged_model_path(path):
+        raise ValueError(f"{path} is inside the package's models; write the copy somewhere else.")
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    write_yaml_atomic(path, document)
+    return path
+
+
+@functools.lru_cache(maxsize=None)
+def _shared_keys() -> tuple[str, ...]:
+    """What the packaged ``shared.yaml`` gives a v2 model and no code default
+    stands in for (guided tensioning falls back to the packaged holds)."""
+    shared = _read_mapping(os.path.join(_get_models_dir(), LATEST_VERSION, SHARED_CONFIG_FILE))
+    return tuple(key for key in shared if key != GUIDED_TENSION_CURRENTS)
+
+
+_warned_incomplete: set = set()
+
+
+def _check_standalone(config_path: str, config: Dict, require_roms: bool = True) -> None:
+    """Refuse a config that takes nothing from ``shared.yaml`` and has no
+    ``joint_roms`` (with ``require_roms`` False, only a v2 one); warn once about
+    a v2 one missing the other shared keys, which leaves the v2.1 travel checks
+    or calibration currents off."""
+    if _shared_config_path(config_path) is not None:
+        return
+    is_v2 = HARDWARE_VERSION in config
+    missing = [key for key in _shared_keys() if key not in config] if is_v2 else []
+    fix = ("Write a complete copy of its model with orca_core.write_standalone_config("
+           "<destination>, model_name=<model>) and carry this hand's own values over to it.")
+    if JOINT_ROM_DICT not in config and (require_roms or is_v2):
+        names = ", ".join(missing or [JOINT_ROM_DICT])
+        raise HandConfigValidationError(
+            f"{config_path} sets no {names}. Only a packaged model takes these from its "
+            f"generation's shared.yaml; a config outside the package must be complete. {fix}")
+    if JOINT_ROM_DICT in config and missing and config_path not in _warned_incomplete:
+        _warned_incomplete.add(config_path)
+        logging.getLogger(__name__).warning(
+            "%s sets no %s, so those v2 defaults are off for this hand. %s",
+            config_path, ", ".join(missing), fix)
+
+
+@functools.lru_cache(maxsize=None)
+def _default_guided_tension_currents() -> Dict:
+    """The packaged ``shared.yaml``'s ``guided_tension_currents``: the hold
+    currents a config with no ``shared.yaml`` under it falls back to. Cached and
+    shared, so never hand it out without copying it."""
+    shared = _read_mapping(os.path.join(_get_models_dir(), LATEST_VERSION, SHARED_CONFIG_FILE))
+    return _parse_guided_tension_currents(shared[GUIDED_TENSION_CURRENTS])
+
+
+def format_hardware_version(version: int | None) -> str:
+    """``211`` -> ``"v2.1.1"``; the older ``21`` and ``2`` read as v2.1.0 and v2.0.0."""
+    if version is None:
+        return "an unknown version"
+    version = normalize_hardware_version(version)
+    return f"v{version // 100}.{version // 10 % 10}.{version % 10}"
+
+
+def calibration_group(joint: str) -> Optional[str]:
+    """``abd`` (the abductions and thumb_cmc), ``mcp``, ``pip`` (the PIPs and thumb_dip), or None for the wrist."""
+    if joint == WRIST:
+        return None
+    if joint.endswith("_abd") or joint == "thumb_cmc":
+        return "abd"
+    return "mcp" if joint.endswith("_mcp") else "pip"
+
+
+def _parse_group_currents(raw, key: str) -> Dict[str, Dict[str, int]]:
+    raw = raw or {}
+    if not isinstance(raw, dict):
+        raise HandConfigValidationError(
+            f"{key} must map a motor family to per-group currents in mA, got {raw!r}"
+        )
+    by_family = {}
+    for family, groups in raw.items():
+        if not isinstance(groups, dict) or not set(groups) <= set(CALIBRATION_GROUPS):
+            raise HandConfigValidationError(
+                f"{key}[{family}] must map {', '.join(CALIBRATION_GROUPS)} to a current in mA, "
+                f"got {groups!r}"
+            )
+        for group, current in groups.items():
+            if isinstance(current, bool) or not isinstance(current, int) or current <= 0:
+                raise HandConfigValidationError(
+                    f"{key}[{family}][{group}] must be a positive number of mA, got {current!r}"
+                )
+        by_family[str(family)] = {str(g): int(c) for g, c in groups.items()}
+    return by_family
+
+
+def _positive_ma(value, where: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise HandConfigValidationError(f"{where} must be a positive number of mA, got {value!r}")
+    return value
+
+
+def _parse_guided_tension_currents(raw) -> Dict[str, dict]:
+    key = GUIDED_TENSION_CURRENTS
+    if not isinstance(raw, dict) or not set(raw) <= set(SUPPORTED_MOTOR_TYPES):
+        raise HandConfigValidationError(
+            f"{key} must map a motor family ({', '.join(SUPPORTED_MOTOR_TYPES)}) to its currents, got {raw!r}"
+        )
+    by_family = {}
+    for family, entry in raw.items():
+        if not isinstance(entry, dict) or not set(entry) <= {"hold", "tension"}:
+            raise HandConfigValidationError(f"{key}[{family}] may set only hold and tension, got {entry!r}")
+        hold = entry.get("hold") or {}
+        if not isinstance(hold, dict):
+            raise HandConfigValidationError(f"{key}[{family}][hold] must map a group or joint to mA, got {hold!r}")
+        parsed = {"hold": {str(k): _positive_ma(v, f"{key}[{family}][hold][{k}]") for k, v in hold.items()}}
+        if "tension" in entry:
+            parsed["tension"] = _positive_ma(entry["tension"], f"{key}[{family}][tension]")
+        by_family[str(family)] = parsed
+    return by_family
+
+
+def _one_joint_per_step(sequence: List[dict]) -> List[dict]:
+    """``sequence`` with each step split into one step per joint, order and direction kept."""
+    return [
+        {"step": number, "joints": {joint: direction}}
+        for number, (joint, direction) in enumerate(
+            ((joint, direction) for step in sequence for joint, direction in step["joints"].items()),
+            start=1,
+        )
+    ]
+
+
+def _parse_motor_travel(raw, key: str) -> Dict[str, float]:
+    raw = raw or {}
+    if not isinstance(raw, dict):
+        raise HandConfigValidationError(
+            f"{key} must be a mapping of joint name to motor travel in degrees, got {raw!r}"
+        )
+    travel_by_joint = {}
+    for joint, travel in raw.items():
+        if travel is None or isinstance(travel, bool) or not isinstance(travel, (int, float)):
+            raise HandConfigValidationError(
+                f"{key}[{joint}] must be a number of degrees, got {travel!r}"
+            )
+        travel_by_joint[str(joint)] = float(travel)
+    return travel_by_joint
+
+
+def _validated_gain_partial(raw, where: str) -> Dict[str, float]:
+    """Check one partial gain mapping and return it as plain floats.
+
+    Kept partial rather than resolved so each layer can override only the keys
+    it names; building a JointGains from it here surfaces bad keys and negative
+    values at config-load time instead of at connect.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise HandConfigValidationError(f"{where} must be a mapping, got {raw!r}")
+    JointGains.from_dict(raw)  # validates keys and values; result discarded
+    return {key: float(value) for key, value in raw.items()}
+
+
+def _parse_joint_control_gains(
+    raw: Dict[str, dict] | None,
+) -> tuple[Dict[str, float], Dict[str, Dict[str, float]]]:
+    """Parse the config.yaml ``joint_control_gains`` block.
+
+    The block holds overrides only — the defaults in ``control.constants`` are
+    the baseline, so an absent block (or an absent key within it) means "use
+    the shipped default". Four layers, each overriding only the gains it
+    names::
+
+        control/constants.py  DEFAULT_KP / DEFAULT_KI / DEFAULT_CORRECTION_MAX_DEG
+          └─ DEFAULT_JOINT_GAIN_OVERRIDES   shipped per-joint defaults
+               └─ config.yaml  all:         this hand, every joint
+                    └─ config.yaml  joints: this hand, the joints it names
+
+    Expected shape, with every key optional::
+
+        joint_control_gains:
+          all: {kp: 0.4}
+          joints:
+            index_mcp: {kp: 0.25}
+
+    Returns the raw partial overrides; :meth:`OrcaHandConfig.joint_gains_for`
+    layers them.
+    """
+    if raw is None:
+        return {}, {}
+    if not isinstance(raw, dict):
+        raise HandConfigValidationError(
+            f"joint_control_gains must be a mapping, got {raw!r}"
+        )
+    unknown = set(raw) - {"all", "joints"}
+    if unknown:
+        raise HandConfigValidationError(
+            f"unknown joint_control_gains key(s) {sorted(unknown)}; "
+            "expected 'all' and/or 'joints'"
+        )
+
+    gains_all = _validated_gain_partial(raw.get("all"), "joint_control_gains.all")
+
+    raw_joints = raw.get("joints") or {}
+    if not isinstance(raw_joints, dict):
+        raise HandConfigValidationError(
+            f"joint_control_gains.joints must be a mapping, got {raw_joints!r}"
+        )
+    overrides = {
+        str(joint): _validated_gain_partial(
+            entry, f"joint_control_gains.joints.{joint}"
+        )
+        for joint, entry in raw_joints.items()
+    }
+    return gains_all, overrides
+
+
+def _shared_hand_kwargs(config: dict) -> dict:
+    """The joint-space fields every hand config carries, taken from a parsed ``config.yaml``."""
+    kwargs = {}
+    if "type" in config:
+        kwargs["type"] = config["type"]
+    if JOINT_IDS in config:
+        kwargs["joint_ids"] = list(config[JOINT_IDS])
+    if JOINT_ROM_DICT in config:
+        kwargs["joint_roms_dict"] = dict(config[JOINT_ROM_DICT])
+    if "neutral_position" in config:
+        kwargs["neutral_position"] = dict(config["neutral_position"])
+    return kwargs
 
 
 @dataclass(frozen=True)
@@ -116,19 +569,11 @@ class BaseHandConfig:
             model_version=model_version,
             model_name=model_name,
         )
-        config = read_yaml(resolved_config_path) or {}
+        config = _load_config_documents(resolved_config_path)[1]
+        # Joint metadata alone (canonical_joint_ids) needs no ranges.
+        _check_standalone(resolved_config_path, config, require_roms=False)
 
-        kwargs = {"config_path": resolved_config_path}
-        if "type" in config:
-            kwargs["type"] = config["type"]
-        if JOINT_IDS in config:
-            kwargs["joint_ids"] = list(config[JOINT_IDS])
-        if JOINT_ROM_DICT in config:
-            kwargs["joint_roms_dict"] = dict(config[JOINT_ROM_DICT])
-        if "neutral_position" in config:
-            kwargs["neutral_position"] = dict(config["neutral_position"])
-
-        return cls(**kwargs)
+        return cls(config_path=resolved_config_path, **_shared_hand_kwargs(config))
 
     def validate(self) -> None:
         """Validate shared joint-space configuration."""
@@ -142,7 +587,7 @@ class BaseHandConfig:
         for joint, rom in self.joint_roms_dict.items():
             if joint not in self.joint_ids:
                 raise HandConfigValidationError(f"Joint {joint} in ROMs is not defined.")
-            if len(rom) != 2 or rom[1] - rom[0] <= 0:
+            if not _valid_rom(rom):
                 raise HandConfigValidationError(f"ROM {rom} for joint {joint} is not valid.")
 
         for joint in self.neutral_position:
@@ -180,22 +625,241 @@ class BaseHandConfig:
 class OrcaHandConfig(BaseHandConfig):
     """ORCA hand configuration layered on top of the shared base spec."""
 
+    # The calibration file in use: the hand folder's, or one given explicitly.
+    # Empty until the hand knows which hand it is.
     calibration_path: str = ""
-    baudrate: int = 3_000_000
-    port: str = "/dev/ttyUSB0"
-    max_current: int = 300  # mA
+    # This physical hand's folder (see orca_core.hand_store); empty until known.
+    hand_dir: str = ""
+    # None = auto-detect at connect time (probed and persisted to config.yaml).
+    baudrate: int | None = None
+    port: str = "auto"
+    # A current limit in mA, or "default": the motor family's own value, filled
+    # in once the family is known (load_hand when detected or pinned, else connect).
+    max_current: int | str = _FAMILY_DEFAULT
     control_mode: str = "current_based_position"
-    motor_type: str = "dynamixel"
+    motor_type: str | None = None
     motor_ids: List[int] = field(default_factory=list)
     joint_to_motor_map: Dict[str, int] = field(default_factory=dict)
     joint_inversion_dict: Dict[str, bool] = field(default_factory=dict)
-    calibration_current: int = 200  # mA
-    wrist_calibration_current: int = 100  # mA
+    # 200 = v2.0.0, 210 = v2.1.0, 211 = v2.1.1 (None: unknown); picks the map and gates v2.1
+    # features. Pinned only for a hand with no board to report it; a board's version wins.
+    hardware_version: int | None = None
+    # The signed map a v2.1 hand uses instead of joint_to_motor_map, kept raw
+    # (sign included). Absent on models whose wiring did not change.
+    # with_hardware_version applies it; the chosen map then passes the same
+    # checks the base map does.
+    joint_to_motor_map_v21: Dict[str, int] = field(default_factory=dict)
+    # The joint ROMs a v2.1.1 hand overrides; with_hardware_version lays them over joint_roms.
+    joint_roms_v211_dict: Dict[str, List[float]] = field(default_factory=dict)
+    # Ranges measured on this hand (with_measured_ranges), already in joint_roms_dict. They win
+    # over every packaged range and over a calibration's encoder-measured span.
+    measured_joint_roms_dict: Dict[str, List[float]] = field(default_factory=dict)
+    # Internal: the signed map and ranges before any hardware version was applied, kept by
+    # with_hardware_version so another version (or none) can be put in force later.
+    base_joint_to_motor_map: Dict[str, int] = field(default_factory=dict, repr=False)
+    base_joint_roms_dict: Dict[str, List[float]] = field(default_factory=dict, repr=False)
+    calibration_current: int | str = _FAMILY_DEFAULT
+    # None follows calibration_current: the wrist gets what the fingers get
+    # unless a config says otherwise.
+    wrist_calibration_current: int | str | None = None
+    # v2.1 only: per motor family, a calibration current per joint group (see
+    # calibration_group) that replaces calibration_current for those joints.
+    calibration_current_v21_dict: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    # Guided tensioning currents per motor family (see guided_tension_currents_for).
+    guided_tension_currents_dict: Dict[str, dict] = field(default_factory=dict)
     calibration_step_size: float = 0.1  # rad
     calibration_step_period: float = 0.01  # s
     calibration_threshold: float = 0.01  # rad
     calibration_num_stable: int = 20
     calibration_sequence: List[dict] = field(default_factory=list)
+    # Steps for manual calibration; one operator answer records a whole step.
+    # Empty becomes calibration_sequence split into one joint per step.
+    manual_calibration_sequence: List[dict] = field(default_factory=list)
+    # Motor-shaft travel between a joint's two hardstops, in degrees, keyed by
+    # joint name. The travel a joint's motor makes is set by that joint's
+    # tendon spool diameter, so it belongs to the joint and is resolved to a
+    # motor only where it is used - motor IDs differ per hand. A hand's own
+    # measurement (``joint_motor_travel``) wins over the packaged v2.1 baseline.
+    joint_motor_travel_dict: Dict[str, float] = field(default_factory=dict)
+    joint_motor_travel_v21_dict: Dict[str, float] = field(default_factory=dict)
+    # Fraction of the expected travel a measured travel may deviate by before
+    # the calibration routine re-drives the joint at a higher current.
+    calibration_travel_margin: float = 0.25
+    # Current the re-drive uses (mA). None derives it from calibration_current.
+    calibration_retry_current: int | None = None
+    calibration_travel_retries: int = DEFAULT_CALIBRATION_TRAVEL_RETRIES
+    # Ceiling for the re-drive only (mA), independent of max_current: getting a
+    # joint past an over-tensioned tendon takes more torque than the hand is
+    # allowed to use in normal operation, and the routine restores max_current
+    # as soon as it finishes. Unset (with calibration_retry_current unset too)
+    # steps each re-drive CALIBRATION_RETRY_STEP_MA above the last, so the top
+    # attempt is retries x step above the nominal calibration current.
+    calibration_max_current: int | None = None
+    use_joint_feedback: bool | None = None
+    # Joint names or the ["all"] sentinel (every slotted joint, wrist
+    # included); an explicit finger-only list leaves the wrist open-loop.
+    joint_encoder_joints: List[str] | None = None
+    encoder_serial_port: str = "auto"
+    encoder_baudrate: int = DEFAULT_ENCODER_BAUDRATE
+    # Partial outer-loop PI gain overrides from the config.yaml
+    # 'joint_control_gains' block; the defaults live in control.constants.
+    # See _parse_joint_control_gains() for the layering.
+    joint_gains_all: Dict[str, float] = field(default_factory=dict)
+    joint_gains_overrides: Dict[str, Dict[str, float]] = field(default_factory=dict)
+
+    def joint_gains_for(self, joint: str) -> JointGains:
+        """Gains the closed-loop controller uses for ``joint``, with every
+        override layer applied in order. Each layer sets only the gains it
+        names; the rest fall through to the layer above."""
+        layered: Dict[str, float] = dict(DEFAULT_JOINT_GAIN_OVERRIDES.get(joint, {}))
+        layered.update(self.joint_gains_all)
+        layered.update(self.joint_gains_overrides.get(joint, {}))
+        return JointGains.from_dict(layered)
+
+    @property
+    def joint_gains_baseline(self) -> JointGains:
+        """What a joint with no per-joint override resolves to — the package
+        defaults with this hand's ``all:`` block applied."""
+        return JointGains.from_dict(self.joint_gains_all)
+
+    @property
+    def joint_gains_dict(self) -> Dict[str, JointGains]:
+        """Resolved gains for every configured joint, overrides applied."""
+        return {joint: self.joint_gains_for(joint) for joint in self.joint_ids}
+
+    @property
+    def calibration_group_currents(self) -> Dict[str, int]:
+        """The per-group calibration currents in force: v2.1 hardware with an
+        entry for this hand's motor family, else none."""
+        if not self.uses_motor_travel:
+            return {}
+        return dict(self.calibration_current_v21_dict.get(str(self.motor_type), {}))
+
+    def calibration_current_for(self, joint: Optional[str]) -> float:
+        """The current (mA) ``joint`` is driven onto its hardstops with."""
+        if joint == WRIST:
+            return self.wrist_calibration_current
+        group = calibration_group(joint) if joint else None
+        return self.calibration_group_currents.get(group, self.calibration_current)
+
+    def guided_tension_currents_for(self, family: Optional[str] = None) -> dict:
+        """``{"hold": {group or joint: mA}, "tension": mA}`` for ``family`` (default: this
+        hand's): the config's entries (``shared.yaml``'s included) over the packaged
+        ``shared.yaml``'s. An unset ``tension`` follows ``max_current``."""
+        family = family or self.motor_type
+        if family not in SUPPORTED_MOTOR_TYPES:
+            family = DYNAMIXEL
+        base = _default_guided_tension_currents()[family]["hold"]
+        own = self.guided_tension_currents_dict.get(family, {})
+        return {"hold": {**base, **own.get("hold", {})},
+                "tension": own.get("tension", self._family_max_current(family))}
+
+    def _family_max_current(self, family: str) -> int:
+        """This hand's ``max_current`` when it applies to ``family``, else that family's own."""
+        if self.max_current != _FAMILY_DEFAULT and self.motor_type in (None, family):
+            return self.max_current
+
+        from .hardware.motor_factory import motor_client_class
+
+        return int(motor_client_class(family).default_max_current_ma)
+
+    def tension_hold_current_for(self, joint: str) -> int:
+        """Range-check hold current (mA) for ``joint``: its own entry, else its group's."""
+        hold = self.guided_tension_currents_for()["hold"]
+        return hold.get(joint, hold[calibration_group(joint)])
+
+    @property
+    def tension_hold_joint_currents(self) -> Dict[str, int]:
+        """The hold entries that name a joint; they win over any group or flat current."""
+        hold = self.guided_tension_currents_for()["hold"]
+        return {k: v for k, v in hold.items() if k not in CALIBRATION_GROUPS}
+
+    @property
+    def tension_current(self) -> int:
+        """Guided tensioning's limit (mA) for the pull and for fingers frozen during a range check."""
+        return self.guided_tension_currents_for()["tension"]
+
+    def calibration_retry_current_for(self, joint: Optional[str] = None) -> int:
+        """Current (mA) a short-travel ``joint`` is re-driven at.
+
+        An over-tensioned tendon stalls the drive before the hardstop, so the
+        re-drive needs more torque than the nominal calibration pass. Config
+        may pin it outright; otherwise it scales off the joint's own current.
+        """
+        if self.calibration_retry_current is not None:
+            return self.calibration_retry_current
+        return int(round(self.calibration_current_for(joint) * DEFAULT_RETRY_CURRENT_SCALE))
+
+    @property
+    def calibration_retry_current_resolved(self) -> int:
+        """Current (mA) a short-travel joint on the plain calibration current is re-driven at."""
+        return self.calibration_retry_current_for(None)
+
+    @property
+    def retry_steps_by_default(self) -> bool:
+        """Re-drives step up by CALIBRATION_RETRY_STEP_MA, nothing being pinned."""
+        return self.calibration_retry_current is None and self.calibration_max_current is None
+
+    def retry_current_for_attempt(self, attempt: int, joint: Optional[str] = None) -> float:
+        """Current (mA) for 1-based re-drive ``attempt`` of ``joint``.
+
+        With neither ``calibration_retry_current`` nor ``calibration_max_current``
+        pinned, each attempt adds CALIBRATION_RETRY_STEP_MA to the nominal
+        current. Otherwise:
+
+        Successive attempts ramp evenly from the nominal calibration current up
+        to :attr:`calibration_retry_current_resolved`, so a hand that only
+        needs a nudge is not driven at the full retry current on the first try.
+        With the default single retry there is no room to ramp and the one
+        attempt goes straight to the top — set ``calibration_travel_retries``
+        above 1 to get the gradual approach.
+
+        Capped at :attr:`calibration_max_current`, *not* at ``max_current``.
+        The whole point of the re-drive is to break a joint past whatever
+        stalled it, which routinely needs more torque than the hand is allowed
+        in normal operation; capping at ``max_current`` would make the retry
+        repeat the pass that already failed on any hand whose
+        ``calibration_current`` equals its ceiling. The elevated current is
+        bounded in time — the routine restores ``max_current`` when
+        calibration ends — so it never leaks into ordinary motor commands.
+        """
+        if attempt < 1 or attempt > self.calibration_travel_retries:
+            raise ValueError(
+                f"attempt {attempt} is outside 1..{self.calibration_travel_retries}"
+            )
+        base = float(self.calibration_current_for(joint))
+        if self.retry_steps_by_default:
+            return base + CALIBRATION_RETRY_STEP_MA * attempt
+        top = float(self.calibration_retry_current_for(joint))
+        ramped = base + (top - base) * attempt / self.calibration_travel_retries
+        ceiling = (
+            self.calibration_max_current
+            if self.calibration_max_current is not None
+            else base
+        )
+        return min(ramped, float(ceiling))
+
+    @property
+    def uses_motor_travel(self) -> bool:
+        """Whether the travel-based features (calibration's short-travel
+        re-drive, guided tensioning) apply: v2.1 hardware only."""
+        return self.is_v21
+
+    @property
+    def is_v21(self) -> bool:
+        """Whether the hand is any v2.1 hardware (v2.1.0, v2.1.1, ...)."""
+        version = normalize_hardware_version(self.hardware_version)
+        return version is not None and version // 10 == HARDWARE_VERSION_V21 // 10
+
+    def expected_motor_travel_deg(self, joint: str, *, any_hardware: bool = False) -> float | None:
+        """Baseline motor travel for ``joint``, or ``None`` if there is none.
+
+        ``None`` on anything but v2.1 hardware unless ``any_hardware`` is set,
+        which an operator's explicit override of the version gate uses.
+        """
+        if not (self.uses_motor_travel or any_hardware):
+            return None
+        return self.joint_motor_travel_dict.get(joint, self.joint_motor_travel_v21_dict.get(joint))
 
     @property
     def motor_id_to_idx_dict(self) -> Dict[int, int]:
@@ -207,15 +871,33 @@ class OrcaHandConfig(BaseHandConfig):
         """Map motor ID to joint name."""
         return {motor_id: joint for joint, motor_id in self.joint_to_motor_map.items()}
 
+    @property
+    def has_joint_encoders(self) -> bool:
+        """Whether this hand declares any joint-encoder hardware."""
+        return bool(self.joint_encoder_joints)
+
+    @property
+    def joint_feedback_enabled(self) -> bool:
+        """Whether the closed-loop joint-feedback controller should engage.
+
+        ``use_joint_feedback`` is tri-state: ``None`` (unset) defers to the
+        presence of encoder hardware, so a hand that declares
+        ``joint_encoder_joints`` runs closed-loop by default. An explicit
+        ``False`` forces plain motor-only control even when encoders exist.
+        """
+        if self.use_joint_feedback is None:
+            return self.has_joint_encoders
+        return self.use_joint_feedback
+
     @classmethod
-    def from_config_path(
+    def _kwargs_from_config_path(
         cls,
         config_path: str | None = None,
         calibration_path: str | None = None,
         model_version: str | None = None,
         model_name: str | None = None,
-    ) -> "OrcaHandConfig":
-        """Load hardware-backed ORCA hand configuration from canonical YAML keys."""
+    ) -> "tuple[dict, dict]":
+        """Constructor kwargs and the parsed yaml document for a hardware-backed hand."""
         resolved_config_path = _resolve_config_path(
             config_path,
             model_version=model_version,
@@ -225,24 +907,25 @@ class OrcaHandConfig(BaseHandConfig):
             resolved_config_path, calibration_path
         )
 
-        config = read_yaml(resolved_config_path)  # {} when file is not found
+        own, config = _load_config_documents(resolved_config_path)
+        if not own:
+            raise HandConfigValidationError(
+                f"config.yaml at {resolved_config_path} is empty. Restore it "
+                "from the bundled model or your hand's backup."
+            )
+        _check_standalone(resolved_config_path, config)
 
-        kwargs = {"config_path": resolved_config_path, "calibration_path": resolved_calibration_path}
-
-        if "type" in config:
-            kwargs["type"] = config["type"]
-        if JOINT_IDS in config:
-            kwargs["joint_ids"] = list(config[JOINT_IDS])
-        if JOINT_ROM_DICT in config:
-            kwargs["joint_roms_dict"] = dict(config[JOINT_ROM_DICT])
-        if "neutral_position" in config:
-            kwargs["neutral_position"] = dict(config["neutral_position"])
+        kwargs = {
+            "config_path": resolved_config_path,
+            "calibration_path": resolved_calibration_path,
+            **_shared_hand_kwargs(config),
+        }
         if "baudrate" in config:
             kwargs["baudrate"] = int(config["baudrate"])
         if "port" in config:
             kwargs["port"] = config["port"]
         if "max_current" in config:
-            kwargs["max_current"] = int(config["max_current"])
+            kwargs["max_current"] = _current_setting(config["max_current"], "max_current")
         if "control_mode" in config:
             kwargs["control_mode"] = config["control_mode"]
         if "motor_type" in config:
@@ -255,11 +938,38 @@ class OrcaHandConfig(BaseHandConfig):
             )
             kwargs["joint_to_motor_map"] = joint_to_motor_map
             kwargs["joint_inversion_dict"] = joint_inversion_dict
+        if JOINT_TO_MOTOR_MAP_V21 in config:
+            raw_v21 = config[JOINT_TO_MOTOR_MAP_V21]
+            if not isinstance(raw_v21, dict):
+                raise HandConfigValidationError(
+                    f"{JOINT_TO_MOTOR_MAP_V21} must be a mapping of joint name to "
+                    f"signed motor ID, got {raw_v21!r}"
+                )
+            kwargs["joint_to_motor_map_v21"] = {
+                str(joint): int(motor_id) for joint, motor_id in raw_v21.items()
+            }
+        raw_hw = config.get(HARDWARE_VERSION)
+        if raw_hw is not None and not (isinstance(raw_hw, str) and raw_hw.strip().lower() == "auto"):
+            if isinstance(raw_hw, bool) or not isinstance(raw_hw, int) or raw_hw < 0:
+                raise HandConfigValidationError(
+                    f"{HARDWARE_VERSION} must be 'auto' or a non-negative integer "
+                    f"(210 for v2.1.0, 211 for v2.1.1), got {raw_hw!r}"
+                )
+            kwargs["hardware_version"] = normalize_hardware_version(raw_hw)
+        raw_roms_v211 = config.get(JOINT_ROMS_V211) or {}
+        if not isinstance(raw_roms_v211, dict):
+            raise HandConfigValidationError(
+                f"{JOINT_ROMS_V211} must be a mapping of joint name to [min, max], "
+                f"got {raw_roms_v211!r}"
+            )
+        kwargs["joint_roms_v211_dict"] = dict(raw_roms_v211)
         if "calibration_current" in config:
-            kwargs["calibration_current"] = int(config["calibration_current"])
-        if "wrist_calibration_current" in config:
-            kwargs["wrist_calibration_current"] = int(
-                config["wrist_calibration_current"]
+            kwargs["calibration_current"] = _current_setting(
+                config["calibration_current"], "calibration_current"
+            )
+        if config.get("wrist_calibration_current") is not None:
+            kwargs["wrist_calibration_current"] = _current_setting(
+                config["wrist_calibration_current"], "wrist_calibration_current"
             )
         if "calibration_step_size" in config:
             kwargs["calibration_step_size"] = float(config["calibration_step_size"])
@@ -271,8 +981,94 @@ class OrcaHandConfig(BaseHandConfig):
             kwargs["calibration_num_stable"] = int(config["calibration_num_stable"])
         if "calibration_sequence" in config:
             kwargs["calibration_sequence"] = list(config["calibration_sequence"])
+        if "manual_calibration_sequence" in config:
+            kwargs["manual_calibration_sequence"] = list(config["manual_calibration_sequence"])
+        if GUIDED_TENSION_CURRENTS in config:
+            kwargs["guided_tension_currents_dict"] = _parse_guided_tension_currents(
+                config[GUIDED_TENSION_CURRENTS]
+            )
+        if CALIBRATION_CURRENT_V21 in config:
+            kwargs["calibration_current_v21_dict"] = _parse_group_currents(
+                config[CALIBRATION_CURRENT_V21], CALIBRATION_CURRENT_V21
+            )
+        for key, kwarg in ((JOINT_MOTOR_TRAVEL, "joint_motor_travel_dict"),
+                           (JOINT_MOTOR_TRAVEL_V21, "joint_motor_travel_v21_dict")):
+            if key in config:
+                kwargs[kwarg] = _parse_motor_travel(config[key], key)
+        if "calibration_travel_margin" in config:
+            kwargs["calibration_travel_margin"] = float(
+                config["calibration_travel_margin"]
+            )
+        if "calibration_retry_current" in config:
+            raw_retry = config["calibration_retry_current"]
+            kwargs["calibration_retry_current"] = (
+                None if raw_retry is None else int(raw_retry)
+            )
+        if "calibration_travel_retries" in config:
+            kwargs["calibration_travel_retries"] = int(
+                config["calibration_travel_retries"]
+            )
+        if "calibration_max_current" in config:
+            raw_ceiling = config["calibration_max_current"]
+            kwargs["calibration_max_current"] = (
+                None if raw_ceiling is None else int(raw_ceiling)
+            )
+        if "use_joint_feedback" in config:
+            raw_ujf = config["use_joint_feedback"]
+            kwargs["use_joint_feedback"] = None if raw_ujf is None else bool(raw_ujf)
+        if "joint_encoder_joints" in config:
+            raw = config["joint_encoder_joints"]
+            kwargs["joint_encoder_joints"] = (
+                None if raw is None else [str(j) for j in raw]
+            )
+        if "encoder_serial_port" in config:
+            kwargs["encoder_serial_port"] = str(config["encoder_serial_port"])
+        if "encoder_baudrate" in config:
+            kwargs["encoder_baudrate"] = int(config["encoder_baudrate"])
+        if "joint_control_gains" in config:
+            gains_all, overrides = _parse_joint_control_gains(
+                config["joint_control_gains"]
+            )
+            kwargs["joint_gains_all"] = gains_all
+            kwargs["joint_gains_overrides"] = overrides
 
-        return cls(**kwargs)
+        return kwargs, config
+
+    @classmethod
+    def from_config_path(
+        cls,
+        config_path: str | None = None,
+        calibration_path: str | None = None,
+        model_version: str | None = None,
+        model_name: str | None = None,
+    ) -> "OrcaHandConfig":
+        """Load hardware-backed ORCA hand configuration from canonical YAML keys."""
+        kwargs, _ = cls._kwargs_from_config_path(
+            config_path, calibration_path, model_version, model_name
+        )
+        # A pinned version is in force from load, so a hand built straight from
+        # the path (not through load_hand) still gets that revision's map.
+        return cls(**kwargs).with_hardware_version(kwargs.get("hardware_version"))
+
+    def validate_control_mode(self) -> None:
+        """Check ``control_mode`` against what the motor family accepts.
+
+        An unpinned ``motor_type`` is only checked against the union of modes
+        across families; connect re-runs this once the family is resolved.
+        """
+        if self.motor_type is None:
+            if self.control_mode not in CONTROL_MODES:
+                raise HandConfigValidationError("Invalid control mode.")
+            return
+
+        from .hardware.motor_factory import motor_client_class
+
+        supported = motor_client_class(self.motor_type).supported_modes
+        if self.control_mode not in supported:
+            raise HandConfigValidationError(
+                f"control_mode {self.control_mode!r} is not supported by "
+                f"{self.motor_type} motors; supported: {sorted(supported)}."
+            )
 
     def validate_config(self) -> None:
         """Validate the ORCA hand configuration."""
@@ -288,13 +1084,29 @@ class OrcaHandConfig(BaseHandConfig):
                 "Number of motor IDs and joint-to-motor mappings do not match."
             )
 
-        if self.control_mode not in CONTROL_MODES:
-            raise HandConfigValidationError("Invalid control mode.")
+        if self.motor_type is not None and self.motor_type not in SUPPORTED_MOTOR_TYPES:
+            raise HandConfigValidationError(
+                f"Unknown motor_type: {self.motor_type!r}. "
+                f"Expected one of {SUPPORTED_MOTOR_TYPES} or omit for auto-detection."
+            )
 
-        if self.max_current < self.calibration_current:
+        self.validate_control_mode()
+
+        for name in ("max_current", "calibration_current", "wrist_calibration_current"):
+            value = getattr(self, name)
+            if value == _FAMILY_DEFAULT:
+                continue
+            if not (isinstance(value, (int, float)) and math.isfinite(value) and value > 0):
+                raise HandConfigValidationError(
+                    f"{name} must be a positive number of mA or 'default', got {value!r}."
+                )
+
+        if self.currents_resolved and self.max_current < self.calibration_current:
             raise HandConfigValidationError(
                 "Max current should be greater than the calibration current."
             )
+
+        self._validate_travel_check()
 
         for joint, motor_id in self.joint_to_motor_map.items():
             if joint not in self.joint_ids:
@@ -304,7 +1116,7 @@ class OrcaHandConfig(BaseHandConfig):
                     f"Motor ID {motor_id} is not in the motor IDs list."
                 )
 
-        for step in self.calibration_sequence:
+        for step in [*self.calibration_sequence, *self.manual_calibration_sequence]:
             joints = step.get("joints")
             if not isinstance(joints, dict):
                 raise HandConfigValidationError(
@@ -318,8 +1130,309 @@ class OrcaHandConfig(BaseHandConfig):
                         f"Invalid direction for joint {joint}."
                     )
 
+        # A gain override for an unknown joint would silently never apply.
+        unknown_gain_joints = set(self.joint_gains_overrides) - set(self.joint_ids)
+        if unknown_gain_joints:
+            raise HandConfigValidationError(
+                f"joint_control_gains.joints names unknown joint(s) "
+                f"{sorted(unknown_gain_joints)}; expected joints from joint_ids."
+            )
+
+        if self.use_joint_feedback is True and not self.has_joint_encoders:
+            raise HandConfigValidationError(
+                "use_joint_feedback: true requires joint_encoder_joints to be set."
+            )
+
+        if self.joint_encoder_joints is not None:
+            from .hardware.sensing.constants import (
+                ENCODER_JOINTS_ALL,
+                JOINT_TO_ENCODER_SLOT,
+            )
+            for joint in self.joint_encoder_joints:
+                if str(joint).lower() == ENCODER_JOINTS_ALL:
+                    continue
+                if joint not in JOINT_TO_ENCODER_SLOT:
+                    raise HandConfigValidationError(
+                        f"joint_encoder_joints contains {joint!r}, which has no encoder slot."
+                    )
+
+    def _validate_travel_check(self) -> None:
+        """Validate the dynamic short-travel re-drive settings."""
+        for joint, rom in self.joint_roms_v211_dict.items():
+            if joint not in self.joint_ids:
+                raise HandConfigValidationError(f"{JOINT_ROMS_V211} names joint {joint!r}, which is not in joint_ids.")
+            if not _valid_rom(rom):
+                raise HandConfigValidationError(f"{JOINT_ROMS_V211}[{joint}] {rom} is not a valid ROM.")
+        for key, travel_by_joint in ((JOINT_MOTOR_TRAVEL, self.joint_motor_travel_dict),
+                                     (JOINT_MOTOR_TRAVEL_V21, self.joint_motor_travel_v21_dict)):
+            for joint, travel in travel_by_joint.items():
+                if joint not in self.joint_ids:
+                    raise HandConfigValidationError(
+                        f"{key} names joint {joint!r}, which is not in joint_ids."
+                    )
+                if not math.isfinite(travel) or travel <= 0:
+                    raise HandConfigValidationError(
+                        f"{key}[{joint}] must be a positive number of degrees, "
+                        f"got {travel!r}"
+                    )
+
+        for family, entry in self.guided_tension_currents_dict.items():
+            for name in entry.get("hold", {}):
+                if name not in CALIBRATION_GROUPS and name not in self.joint_ids:
+                    raise HandConfigValidationError(
+                        f"{GUIDED_TENSION_CURRENTS}[{family}][hold] names {name!r}, which is "
+                        f"neither a group ({', '.join(CALIBRATION_GROUPS)}) nor in joint_ids."
+                    )
+
+        margin = self.calibration_travel_margin
+        if not math.isfinite(margin) or not 0 < margin < 1:
+            raise HandConfigValidationError(
+                "calibration_travel_margin must be a fraction in (0, 1), got "
+                f"{margin!r}"
+            )
+
+        if self.calibration_travel_retries < 0:
+            raise HandConfigValidationError(
+                "calibration_travel_retries must be non-negative, got "
+                f"{self.calibration_travel_retries!r}"
+            )
+
+        # The re-drive ceiling has to leave room above the nominal pass, or
+        # every attempt clamps back onto the current that already stalled.
+        if (
+            self.currents_resolved
+            and self.calibration_max_current is not None
+            and self.calibration_max_current < self.calibration_current
+        ):
+            raise HandConfigValidationError(
+                "calibration_max_current must be at least calibration_current "
+                f"({self.calibration_current}), got "
+                f"{self.calibration_max_current}."
+            )
+
+        # A retry current at or below the nominal one would re-drive with no
+        # more torque than the pass that already stalled short.
+        if (
+            self.currents_resolved
+            and self.calibration_retry_current is not None
+            and self.calibration_retry_current <= self.calibration_current
+        ):
+            raise HandConfigValidationError(
+                "calibration_retry_current must exceed calibration_current "
+                f"({self.calibration_current}), got "
+                f"{self.calibration_retry_current}."
+            )
+
     def __post_init__(self) -> None:
+        if self.wrist_calibration_current is None:
+            object.__setattr__(self, "wrist_calibration_current", self.calibration_current)
         self.validate_config()
+        if not self.manual_calibration_sequence:
+            object.__setattr__(
+                self, "manual_calibration_sequence", _one_joint_per_step(self.calibration_sequence)
+            )
+
+    @property
+    def currents_resolved(self) -> bool:
+        """Whether every current limit is a number rather than ``default``."""
+        return _FAMILY_DEFAULT not in (
+            self.max_current, self.calibration_current, self.wrist_calibration_current
+        )
+
+    def with_family_currents(self, client_cls) -> "OrcaHandConfig":
+        """This config with each ``default`` current replaced by ``client_cls``'s own.
+
+        ``client_cls`` is the motor client class of the connected family; its
+        ``default_max_current_ma`` fills ``max_current`` and its
+        ``default_calibration_current_ma`` fills ``calibration_current`` and a
+        wrist value that was left to follow it. The result is validated, so a
+        pinned ``max_current`` below the family's calibration current raises.
+        """
+        if self.currents_resolved:
+            return self
+
+        def pick(value, family_value):
+            return int(family_value) if value == _FAMILY_DEFAULT else value
+
+        return dataclasses.replace(
+            self,
+            max_current=pick(self.max_current, client_cls.default_max_current_ma),
+            calibration_current=pick(
+                self.calibration_current, client_cls.default_calibration_current_ma
+            ),
+            wrist_calibration_current=pick(
+                self.wrist_calibration_current, client_cls.default_calibration_current_ma
+            ),
+        )
 
 
-HandConfig = BaseHandConfig
+    def with_hardware_version(self, hardware_version: int | None) -> "OrcaHandConfig":
+        """This config as the given hardware revision of the hand sees it.
+
+        Picks the map for the revision. For one that carries its own,
+        ``joint_to_motor_map`` and ``joint_inversion_dict`` are rebuilt from it,
+        exactly as they are built from the base map at load; every consumer
+        then reads it with no idea a revision exists. A model without a map
+        for the revision keeps the base one. A v2.1.1 hand also takes the
+        ROMs in ``joint_roms_v211``. ``hardware_version`` is recorded
+        either way, the same way a detected ``motor_type`` is.
+
+        ``None`` means the version is not known, and returns self untouched.
+        """
+        if hardware_version is None:
+            return self
+        hardware_version = normalize_hardware_version(hardware_version)
+        base = self._without_hardware_version()
+        changes = {
+            "hardware_version": hardware_version,
+            "base_joint_to_motor_map": base.base_joint_to_motor_map,
+            "base_joint_roms_dict": base.base_joint_roms_dict,
+        }
+        if hardware_version // 10 == HARDWARE_VERSION_V21 // 10 and self.joint_to_motor_map_v21:
+            changes["joint_to_motor_map"], changes["joint_inversion_dict"] = (
+                _canonical_joint_to_motor_map(self.joint_to_motor_map_v21)
+            )
+        if hardware_version == HARDWARE_VERSION_V211 and self.joint_roms_v211_dict:
+            changes["joint_roms_dict"] = {
+                **base.joint_roms_dict, **self.joint_roms_v211_dict, **self.measured_joint_roms_dict
+            }
+        return dataclasses.replace(base, **changes)
+
+    def _without_hardware_version(self) -> "OrcaHandConfig":
+        """This config with no hardware version in force: the base map and
+        ranges, with the ranges measured on this hand still on top."""
+        recorded = self._with_base_recorded()
+        joint_to_motor_map, joint_inversion_dict = _canonical_joint_to_motor_map(
+            recorded.base_joint_to_motor_map)
+        return dataclasses.replace(
+            recorded,
+            hardware_version=None,
+            joint_to_motor_map=joint_to_motor_map,
+            joint_inversion_dict=joint_inversion_dict,
+            joint_roms_dict={**{j: list(r) for j, r in recorded.base_joint_roms_dict.items()},
+                             **self.measured_joint_roms_dict},
+        )
+
+    def _with_base_recorded(self) -> "OrcaHandConfig":
+        """This config with ``base_joint_to_motor_map`` / ``base_joint_roms_dict``
+        filled. Until a version or a measured range is applied (both record the
+        base first), the map and ranges in force are the base ones, even when a
+        pinned version is set but not yet applied."""
+        if self.base_joint_to_motor_map:
+            return self
+        signed = {
+            joint: -motor_id if self.joint_inversion_dict.get(joint, False) else motor_id
+            for joint, motor_id in self.joint_to_motor_map.items()
+        }
+        return dataclasses.replace(
+            self, base_joint_to_motor_map=signed,
+            base_joint_roms_dict={j: list(r) for j, r in self.joint_roms_dict.items()},
+        )
+
+    def with_measured_ranges(self, roms: Dict[str, List[float]]) -> "OrcaHandConfig":
+        """This config with ``roms`` (joint -> ``[min, max]`` degrees, measured on
+        this hand) in force for the named joints. They become both the clamp
+        (``joint_roms_dict``) and the frame the calibration maps motor travel
+        onto, over the model's ranges and an encoder-measured span alike; the
+        other joints keep theirs. Raises HandConfigValidationError for a joint
+        the hand does not have or a range that is not ``[min, max]`` with
+        ``min < max``.
+
+        Only the frame changes here; the joint-to-motor ratios follow on the
+        hand: :class:`~orca_core.OrcaHand` derives them from its motor limits
+        and the ranges in force whenever its config is replaced, so the named
+        joints' ends land on the calibrated motor limits. The ranges stay in
+        force across :meth:`with_hardware_version`.
+        """
+        if not isinstance(roms, dict):
+            raise HandConfigValidationError(
+                f"measured ranges must map a joint name to [min, max], got {roms!r}")
+        measured = {}
+        for joint, rom in roms.items():
+            if joint not in self.joint_ids:
+                raise HandConfigValidationError(
+                    f"measured range for {joint!r}, which is not one of this hand's joints.")
+            if not _valid_rom(rom):
+                raise HandConfigValidationError(
+                    f"measured range for {joint} must be [min, max] in degrees with min < max, got {rom!r}")
+            measured[str(joint)] = [float(rom[0]), float(rom[1])]
+        # The base is recorded before the measured ranges displace any of it.
+        recorded = self._with_base_recorded()
+        return dataclasses.replace(
+            recorded,
+            joint_roms_dict={**recorded.joint_roms_dict, **measured},
+            measured_joint_roms_dict={**recorded.measured_joint_roms_dict, **measured},
+        )
+
+
+def _valid_rom(rom) -> bool:
+    """True for a ``[min, max]`` pair of finite numbers with ``min < max``."""
+    return (
+        not isinstance(rom, (str, bytes, dict))
+        and hasattr(rom, "__len__")
+        and len(rom) == 2
+        and all(not isinstance(v, bool) and isinstance(v, numbers.Real) and math.isfinite(v)
+                for v in rom)
+        and rom[0] < rom[1]
+    )
+
+
+def _sensor_kwargs(sensors: dict) -> dict:
+    """Touch-config constructor kwargs from the ``sensors:`` block."""
+    sensor_kwargs = {}
+    if "port" in sensors:
+        sensor_kwargs["sensor_port"] = sensors["port"]
+    if "baudrate" in sensors:
+        raw_baud = sensors["baudrate"]
+        sensor_kwargs["sensor_baudrate"] = raw_baud if raw_baud == "auto" else int(raw_baud)
+    if "finger_to_sensor_id" in sensors:
+        sensor_kwargs["finger_to_sensor_id"] = dict(sensors["finger_to_sensor_id"])
+    return sensor_kwargs
+
+
+@dataclass(frozen=True)
+class OrcaHandTouchConfig(OrcaHandConfig):
+    """ORCA hand configuration with tactile sensor support."""
+
+    sensor_port: str = DEFAULT_SENSOR_PORT
+    sensor_baudrate: "int | str" = "auto"
+    """``"auto"`` detects the baud from the connected sensor. Set an int in
+    ``sensors.baudrate`` only to force a specific rate."""
+    finger_to_sensor_id: Dict[str, int] = field(
+        default_factory=lambda: dict(DEFAULT_FINGER_TO_SENSOR_ID)
+    )
+
+    @classmethod
+    def from_config_path(
+        cls,
+        config_path: str | None = None,
+        calibration_path: str | None = None,
+        model_version: str | None = None,
+        model_name: str | None = None,
+    ) -> "OrcaHandTouchConfig":
+        kwargs, config = cls._kwargs_from_config_path(
+            config_path, calibration_path, model_version, model_name
+        )
+        try:
+            sensor_kwargs = _sensor_kwargs(config.get("sensors", {}))
+        except Exception:
+            OrcaHandConfig(**kwargs)  # a base-field error is reported ahead of a sensors one
+            raise
+
+        return cls(**kwargs, **sensor_kwargs).with_hardware_version(kwargs.get("hardware_version"))
+
+    def validate_config(self) -> None:
+        super().validate_config()
+
+        if set(self.finger_to_sensor_id.keys()) != set(FINGER_NAMES):
+            raise HandConfigValidationError(
+                f"finger_to_sensor_id must contain exactly {FINGER_NAMES}, "
+                f"got {sorted(self.finger_to_sensor_id.keys())}"
+            )
+
+        ids = set(self.finger_to_sensor_id.values())
+        if ids != VALID_SENSOR_IDS:
+            raise HandConfigValidationError(
+                f"finger_to_sensor_id values must be 0-4 with no duplicates, "
+                f"got {sorted(self.finger_to_sensor_id.values())}"
+            )

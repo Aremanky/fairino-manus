@@ -116,11 +116,10 @@ class TraductorMano:
     def __init__(self, config_path=None):
         import contextlib
         import io
-        from orca_hardware import OrcaHardwareWrapper, _CONFIG_PATH
-        from orca_core import OrcaHand
+        from orca_hardware import OrcaHardwareWrapper, _CONFIG_PATH, crear_orcahand
         ruta = config_path or _CONFIG_PATH
         with contextlib.redirect_stdout(io.StringIO()):     # sus avisos ya los da la teleoperación
-            self._hand = OrcaHand(config_path=ruta)
+            self._hand = crear_orcahand(config_path=ruta)   # con su calibration.yaml (orca_core 0.14 también)
             self._w = OrcaHardwareWrapper(config_path=ruta)
             self._w._hand = self._hand
             self._w._preparar_traduccion()

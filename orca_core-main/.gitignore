@@ -93,7 +93,6 @@ celerybeat-schedule
 # Environments
 .env
 .venv
-uv.lock
 env/
 venv/
 ENV/
@@ -124,12 +123,42 @@ urdf/
 
 dev_scripts/
 
-calibration.yaml
-
 # macOS
 .DS_Store
 
 .pytest_cache/
 
-# not storing the lockfile (as of now)
-uv.lock
+# Per-hand calibration output (machine-specific, not committed)
+calibration.yaml
+calibration_auto.yaml
+calibration_manual.yaml
+setup.yaml
+setup.yaml.lock
+# Before setup.yaml these were separate files; still read until rewritten.
+slack_tests.yaml
+tension_probes.yaml
+tension_sweeps.yaml
+travel_baselines.yaml
+
+# Generated soak-test output (metrics.csv, progress.png)
+soak_logs/
+
+# Scratch worktrees created by agent sessions
+.claude/
+
+# Personal Claude Code instructions (see CLAUDE.local.md)
+CLAUDE.local.md
+
+# Recordings from examples/record_*.py (per-hand captures, not shared assets;
+# curated sequences live in examples/sequences/)
+replay_sequences/
+
+# Per-hand calibration artifacts written next to a model's config.yaml: a
+# backup of the previous calibration, the calibration event log, and the
+# joint usage counters. All are one hand's history, not shared assets.
+calibration.yaml.bak-*
+calibration_history.jsonl
+last_tension.yaml
+tension_progress.yaml
+joint_usage.json
+local_config.yaml

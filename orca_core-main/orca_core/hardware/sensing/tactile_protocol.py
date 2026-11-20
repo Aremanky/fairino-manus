@@ -1,0 +1,514 @@
+"""Binary protocol codec for ORCA tactile sensor communication.
+
+Converts between raw bytes (as defined by the sensor hardware protocol)
+and Python objects. Pure functions only — no I/O, no state, no threading.
+"""
+import re
+import struct
+from typing import TypedDict
+
+from orca_core.hardware.sensing.framing import calculate_checksum
+from orca_core.hardware.sensing.types import (
+    FingertipHealth,
+    ForceVector,
+    ResultantForces,
+    SensingBoardVersion,
+    TaxelForces,
+)
+from orca_core.hardware.sensing.constants import (
+    SLOT_COUNTER_STRIDE,
+    VERSION_PREFIX_ORCA,
+    PROTOCOL_HEADER_REQUEST,
+    PROTOCOL_HEADER_RESPONSE,
+    PROTOCOL_HEADER_AUTO,
+    PROTOCOL_RESERVED,
+    FUNC_CODE_READ,
+    FUNC_CODE_WRITE,
+    AUTO_DATA_RESULTANT,
+    AUTO_DATA_TAXELS,
+    ADDR_NUM_TAXELS_START,
+    ADDR_NUM_TAXELS_LENGTH,
+    RESULTANT_BLOCK_SIZE,
+    RESOLUTION_N_PER_LSB,
+    FORCE_ROUND_DECIMALS,
+    BYTES_PER_RESULTANT,
+    BYTES_PER_TAXEL,
+    SLOT_CONNECTED_BIT_POSITIONS,
+    SLOT_DISTAL_TAXEL_REGISTER_OFFSETS,
+    MODULES_PER_SLOT,
+    DISTAL_MODULE_OFFSET,
+    MIN_READ_RESPONSE_SIZE,
+    MIN_WRITE_RESPONSE_SIZE,
+)
+
+# =========================================================================
+# Types
+# =========================================================================
+
+class AutoDataTypeInfo(TypedDict):
+    """Parsed auto-data-type register value."""
+    raw: str
+    resultant: bool
+    taxels: bool
+
+
+
+
+# =========================================================================
+# Checksum
+# =========================================================================
+
+def _validate_frame_lrc(frame: bytes, context: str) -> None:
+    if frame[-1] != calculate_checksum(frame[:-1]):
+        raise IOError(f"{context} LRC mismatch")
+
+
+# =========================================================================
+# Frame Builders
+# =========================================================================
+
+def _validate_u16(value: int, name: str) -> None:
+    if not 0 <= value <= 0xFFFF:
+        raise ValueError(f"{name} must be 0x0000-0xFFFF, got {value}")
+
+
+def _with_checksum(body: bytes) -> bytes:
+    return body + bytes([calculate_checksum(body)])
+
+
+def build_register_frame(
+    header: bytes, func: int, address: int, length: int, data: bytes = b"",
+) -> bytes:
+    """Build an AA 55 / 55 AA register frame: header, reserved, func, address, length, data, LRC."""
+    body = (
+        header
+        + bytes([PROTOCOL_RESERVED, func])
+        + address.to_bytes(2, "little")
+        + length.to_bytes(2, "little")
+        + data
+    )
+    return _with_checksum(body)
+
+
+def build_auto_frame(valid_bytes: bytes, err_code: int = 0) -> bytes:
+    """Wrap force data in the AA 56 auto-stream envelope: header, meta, error code, data, LRC."""
+    payload = bytes([err_code]) + valid_bytes
+    body = (
+        PROTOCOL_HEADER_AUTO
+        + bytes([PROTOCOL_RESERVED])
+        + len(payload).to_bytes(2, "little")
+        + payload
+    )
+    return _with_checksum(body)
+
+
+def build_read_request(address: int, count: int) -> bytes:
+    """Build a read-register request frame (55 AA | 00 | 03 | addr | count | LRC)."""
+    _validate_u16(address, "address")
+    if count <= 0:
+        raise ValueError(f"count must be > 0, got {count}")
+    _validate_u16(count, "count")
+    return build_register_frame(PROTOCOL_HEADER_REQUEST, FUNC_CODE_READ, address, count)
+
+
+def build_write_request(address: int, data: bytes) -> bytes:
+    """Build a write-register request frame (55 AA | 00 | 10 | addr | len | data | LRC)."""
+    _validate_u16(address, "address")
+    if len(data) == 0:
+        raise ValueError("data must not be empty")
+    _validate_u16(len(data), "data length")
+    return build_register_frame(PROTOCOL_HEADER_REQUEST, FUNC_CODE_WRITE, address, len(data), data)
+
+
+# =========================================================================
+# Frame Parsers — response frames (request-response mode)
+# =========================================================================
+
+def _validate_echoed_address(frame: bytes, expected_address: int | None, context: str) -> None:
+    """Check the address the device echoes in a response against the request's."""
+    if expected_address is None:
+        return
+    echoed = int.from_bytes(frame[4:6], "little")
+    if echoed != expected_address:
+        raise IOError(
+            f"{context} address mismatch: expected 0x{expected_address:04X}, "
+            f"got 0x{echoed:04X} (stale response?)"
+        )
+
+
+def parse_read_response(frame: bytes, expected_address: int | None = None) -> bytes:
+    """Validate a read-response frame and return its data bytes.
+
+    Frame layout: header(2) + reserved(1) + func(1) + addr(2) + count(2) + data(count) + LRC(1).
+    Raises ``IOError`` on size, func-code, LRC, or — when ``expected_address``
+    is given — echoed-address mismatch.
+    """
+    if len(frame) < MIN_READ_RESPONSE_SIZE:
+        raise IOError(
+            f"Read response frame too short: {len(frame)} bytes "
+            f"(minimum {MIN_READ_RESPONSE_SIZE}), data={frame.hex()}"
+        )
+    if frame[:2] != PROTOCOL_HEADER_RESPONSE:
+        raise IOError(
+            f"Expected response header {PROTOCOL_HEADER_RESPONSE.hex()}, "
+            f"got {frame[:2].hex()}"
+        )
+    _validate_frame_lrc(frame, "Read response")
+    if frame[3] != FUNC_CODE_READ:
+        raise IOError(
+            f"Expected read response (func=0x{FUNC_CODE_READ:02X}), "
+            f"got func=0x{frame[3]:02X}"
+        )
+    _validate_echoed_address(frame, expected_address, "Read response")
+    declared_count = int.from_bytes(frame[6:8], "little")
+    actual_data = frame[8:-1]
+    if len(actual_data) != declared_count:
+        raise IOError(
+            f"Read response length mismatch: header declares {declared_count} bytes "
+            f"but frame contains {len(actual_data)}, data={frame.hex()}"
+        )
+    return bytes(actual_data)
+
+
+def parse_write_response(frame: bytes, expected_address: int | None = None) -> None:
+    """Validate a write-response frame's func code, LRC, and status byte.
+
+    Frame layout: header(2) + reserved(1) + func(1) + addr(2) + nbytes(2) + payload(nbytes) + LRC(1).
+    Raises ``IOError`` on size, func-code, LRC, non-zero status, or — when
+    ``expected_address`` is given — echoed-address mismatch.
+    """
+    if len(frame) < MIN_WRITE_RESPONSE_SIZE:
+        raise IOError(
+            f"Write response frame too short: {len(frame)} bytes "
+            f"(minimum {MIN_WRITE_RESPONSE_SIZE}), data={frame.hex()}"
+        )
+    if frame[:2] != PROTOCOL_HEADER_RESPONSE:
+        raise IOError(
+            f"Expected response header {PROTOCOL_HEADER_RESPONSE.hex()}, "
+            f"got {frame[:2].hex()}"
+        )
+    _validate_frame_lrc(frame, "Write response")
+    if frame[3] != FUNC_CODE_WRITE:
+        raise IOError(
+            f"Expected write response (func=0x{FUNC_CODE_WRITE:02X}), "
+            f"got func=0x{frame[3]:02X}"
+        )
+    _validate_echoed_address(frame, expected_address, "Write response")
+    nbytes = int.from_bytes(frame[6:8], "little")
+    if nbytes >= 1:
+        if len(frame) < 9 + nbytes:
+            raise IOError(
+                f"Write response frame truncated: claims {nbytes} payload bytes "
+                f"but frame is only {len(frame)} bytes, data={frame.hex()}"
+            )
+        status = frame[8]
+        if status != 0:
+            raise IOError(f"Write failed, status=0x{status:02X}")
+
+
+# =========================================================================
+# Frame Parsers — auto-stream frames
+# =========================================================================
+
+def unpack_auto_payload(payload: bytes) -> tuple[int, bytes]:
+    """Split an auto-stream payload into (error_code, force_data).
+
+    The protocol prefixes force data with a single error-code byte
+    (0 = no error). Empty payloads raise ``ValueError``.
+    """
+    if len(payload) == 0:
+        raise ValueError("Auto-stream payload is empty (expected at least error code byte)")
+    return payload[0], payload[1:]
+
+
+# =========================================================================
+# Payload Size Computation
+# =========================================================================
+
+def compute_expected_payload_size(
+    resultant: bool,
+    taxels: bool,
+    active_sensors: list[str],
+    num_taxels: dict[str, int],
+) -> int:
+    """Bytes of force data per frame: per sensor, an optional resultant plus optional taxels."""
+    return sum(
+        (BYTES_PER_RESULTANT if resultant else 0)
+        + (num_taxels[finger] * BYTES_PER_TAXEL if taxels else 0)
+        for finger in active_sensors
+    )
+
+
+# =========================================================================
+# Payload Decoders — auto-stream formats
+# =========================================================================
+
+def _validate_payload_size(data: bytes, expected: int, context: str) -> None:
+    if len(data) != expected:
+        preview = data[:16].hex() if data else "(empty)"
+        raise ValueError(
+            f"{context} size mismatch: expected {expected} bytes, "
+            f"got {len(data)} bytes (first bytes: {preview})"
+        )
+
+
+def _unpack_taxel(data: bytes, offset: int) -> ForceVector:
+    """Unpack one taxel force vector: 3 contiguous bytes (int8 fx, int8 fy, uint8 fz)."""
+    fx_byte, fy_byte, fz_byte = data[offset], data[offset + 1], data[offset + 2]
+    fx = (fx_byte - 256 if fx_byte > 127 else fx_byte) * RESOLUTION_N_PER_LSB
+    fy = (fy_byte - 256 if fy_byte > 127 else fy_byte) * RESOLUTION_N_PER_LSB
+    fz = fz_byte * RESOLUTION_N_PER_LSB
+    return [
+        round(fx, FORCE_ROUND_DECIMALS),
+        round(fy, FORCE_ROUND_DECIMALS),
+        round(fz, FORCE_ROUND_DECIMALS),
+    ]
+
+
+def _unpack_resultant(data: bytes, offset: int) -> ForceVector:
+    """Unpack one resultant force vector from a 6-byte module slot.
+
+    Each axis occupies a 2-byte slot; only the low byte carries data
+    (signed int8 for fx/fy, unsigned uint8 for fz). The high byte is
+    sign-extension of the low byte cast to int8 and must be discarded.
+    """
+    fx_lo, fy_lo, fz_lo = data[offset], data[offset + 2], data[offset + 4]
+    fx = (fx_lo - 256 if fx_lo > 127 else fx_lo) * RESOLUTION_N_PER_LSB
+    fy = (fy_lo - 256 if fy_lo > 127 else fy_lo) * RESOLUTION_N_PER_LSB
+    fz = fz_lo * RESOLUTION_N_PER_LSB
+    return [
+        round(fx, FORCE_ROUND_DECIMALS),
+        round(fy, FORCE_ROUND_DECIMALS),
+        round(fz, FORCE_ROUND_DECIMALS),
+    ]
+
+
+def decode_auto_payload(
+    data: bytes,
+    active_sensors: list[str],
+    num_taxels: dict[str, int],
+    resultant: bool,
+    taxels: bool,
+) -> tuple[ResultantForces | None, TaxelForces | None]:
+    """Decode an auto-stream payload into ``(resultant_forces, taxel_forces)``, with ``None`` for a part the stream omits."""
+    expected_size = compute_expected_payload_size(resultant, taxels, active_sensors, num_taxels)
+    _validate_payload_size(data, expected_size, f"Auto payload ({len(active_sensors)} sensors)")
+
+    forces: ResultantForces | None = {} if resultant else None
+    taxel_forces: TaxelForces | None = {} if taxels else None
+    offset = 0
+    for finger in active_sensors:
+        if resultant:
+            forces[finger] = _unpack_resultant(data, offset)
+            offset += BYTES_PER_RESULTANT
+        if taxels:
+            finger_taxels = []
+            for _ in range(num_taxels[finger]):
+                finger_taxels.append(_unpack_taxel(data, offset))
+                offset += BYTES_PER_TAXEL
+            taxel_forces[finger] = finger_taxels
+    return forces, taxel_forces
+
+
+# =========================================================================
+# Payload Decoders — register block format (request-response mode)
+# =========================================================================
+
+def compute_distal_module_index(sensor_id: int) -> int:
+    """Module index of the distal phalanx for ``sensor_id`` (slot 0-4).
+
+    The register block packs ``MODULES_PER_SLOT`` modules per slot
+    (proximal, middle, distal, nail); the distal one sits at
+    ``DISTAL_MODULE_OFFSET`` inside each group.
+    """
+    return sensor_id * MODULES_PER_SLOT + DISTAL_MODULE_OFFSET
+
+
+def decode_resultant_register(
+    data: bytes,
+    active_sensors: list[str],
+    module_indices: dict[str, int],
+) -> ResultantForces:
+    """Decode the 168-byte resultant register block (0x0500-0x05A7) at given indices.
+
+    The block packs 28 modules of 6 bytes each (4 per slot + 8 palm).
+    ``module_indices[finger]`` is the zero-based module index; for fingertip
+    sensors use ``compute_distal_module_index(slot_id)`` to derive it.
+    """
+    if len(data) < RESULTANT_BLOCK_SIZE:
+        raise ValueError(f"Resultant force block too short: {len(data)} bytes")
+
+    result = {}
+    for finger in active_sensors:
+        result[finger] = _unpack_resultant(data, module_indices[finger] * BYTES_PER_RESULTANT)
+    return result
+
+
+# =========================================================================
+# Register Codecs
+# =========================================================================
+
+def decode_connected_sensors(
+    data: bytes,
+    sensor_id_to_finger: dict[int, str],
+) -> dict[str, bool]:
+    """Decode the 4-byte connected-sensors register into ``{finger: is_connected}``."""
+    num_slots = len(SLOT_CONNECTED_BIT_POSITIONS)
+    if len(data) < 4:
+        raise ValueError(f"Expected 4 bytes, got {len(data)}")
+    if len(sensor_id_to_finger) != num_slots:
+        raise ValueError(
+            f"sensor_id_to_finger must have {num_slots} entries, "
+            f"got {len(sensor_id_to_finger)}"
+        )
+    status = [bool(data[byte_idx] & (1 << bit_pos)) for byte_idx, bit_pos in SLOT_CONNECTED_BIT_POSITIONS]
+    return {sensor_id_to_finger[i]: status[i] for i in range(num_slots)}
+
+
+def decode_num_taxels(
+    data: bytes,
+    sensor_id_to_finger: dict[int, str],
+) -> dict[str, int]:
+    """Decode the 56-byte taxel-count register block (28 × uint16 LE) into ``{finger: count}``."""
+    num_slots = len(SLOT_DISTAL_TAXEL_REGISTER_OFFSETS)
+    if len(data) != ADDR_NUM_TAXELS_LENGTH:
+        raise ValueError(
+            f"Taxel count register block size mismatch: "
+            f"expected {ADDR_NUM_TAXELS_LENGTH} bytes, got {len(data)}"
+        )
+    if len(sensor_id_to_finger) != num_slots:
+        raise ValueError(
+            f"sensor_id_to_finger must have {num_slots} entries, "
+            f"got {len(sensor_id_to_finger)}"
+        )
+    taxel_counts = [
+        int.from_bytes(data[i:i+2], byteorder="little")
+        for i in range(0, len(data), 2)
+    ]
+    num_entries = len(taxel_counts)
+    distal_indices = {}
+    for slot, addr in enumerate(SLOT_DISTAL_TAXEL_REGISTER_OFFSETS):
+        idx = (addr - ADDR_NUM_TAXELS_START) // 2
+        if idx < 0 or idx >= num_entries:
+            raise ValueError(
+                f"Slot {slot} register offset {addr:#x} maps to index {idx}, "
+                f"but register block only has {num_entries} entries"
+            )
+        distal_indices[sensor_id_to_finger[slot]] = idx
+    return {finger: taxel_counts[idx] for finger, idx in distal_indices.items()}
+
+
+_ORCA_VERSION = re.compile(r"ORCA(\d+)\.(\d+)([-+])([0-9a-f]+)")
+
+
+def parse_board_version(data: bytes) -> SensingBoardVersion:
+    """Classify the board from its version register (0x0000, 15 or 16 bytes read)."""
+    if not any(data):
+        return SensingBoardVersion("connector_legacy")
+    raw = bytes(data).split(b"\x00", 1)[0]
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError:
+        return SensingBoardVersion("unknown")
+    if not text or not text.isprintable():
+        return SensingBoardVersion("unknown", text)
+    if not text.startswith(VERSION_PREFIX_ORCA):
+        return SensingBoardVersion("paxini", text)
+    match = _ORCA_VERSION.fullmatch(text)
+    if match is None:
+        return SensingBoardVersion("connector", text)
+    major, minor, mark, commit = match.groups()
+    return SensingBoardVersion("connector", text, (int(major), int(minor)), commit, mark == "+")
+
+
+def decode_fingertip_health(
+    errors: bytes,
+    counters: bytes,
+    sensor_id_to_finger: dict[int, str],
+) -> dict[str, FingertipHealth]:
+    """Decode the 0x0700 error report and the 0x6480 counters into ``{finger: FingertipHealth}``."""
+    out = {}
+    for slot, finger in sensor_id_to_finger.items():
+        code = int.from_bytes(errors[2 * compute_distal_module_index(slot):][:2], "little")
+        ok, timeouts, bad, gone = struct.unpack_from("<4I", counters, slot * SLOT_COUNTER_STRIDE)
+        out[finger] = FingertipHealth(code, ok, timeouts, bad, gone)
+    return out
+
+
+def decode_auto_data_type(data: bytes) -> AutoDataTypeInfo:
+    """Decode auto-data-type register (1 byte) into parsed flags."""
+    if len(data) != 1:
+        raise ValueError(f"Auto-data-type register must be exactly 1 byte, got {len(data)}")
+    val = data[0]
+    return {
+        "raw": f"{val:08b}",
+        "resultant": bool(val & AUTO_DATA_RESULTANT),
+        "taxels": bool(val & AUTO_DATA_TAXELS),
+    }
+
+
+def encode_auto_data_type(resultant: bool, taxels: bool) -> bytes:
+    """Encode auto-data-type register value."""
+    val = (AUTO_DATA_RESULTANT if resultant else 0) | (AUTO_DATA_TAXELS if taxels else 0)
+    return bytes([val])
+
+
+# =========================================================================
+# Wire-format encoders — fake-hardware fixtures only
+#
+# Production code never encodes resultant or taxel wire bytes (the sensor
+# board is the only encoder on the real bus). These exist so the mock
+# client and decoder unit tests can round-trip through the real decoders,
+# exercising the wire-format logic instead of bypassing it. Do NOT import
+# from runtime code paths.
+# =========================================================================
+
+def _pack_resultant_for_mock(force: ForceVector) -> bytes:
+    """Encode one [fx, fy, fz] vector into a 6-byte module slot.
+
+    Each axis is packed as low_byte + sign-extended high byte (0xFF when
+    low byte > 127, else 0x00) for fx, fy, AND fz — matching the firmware.
+    """
+    def _pack_axis(value_n: float) -> bytes:
+        lo = round(value_n / RESOLUTION_N_PER_LSB) & 0xFF
+        hi = 0xFF if lo > 127 else 0x00
+        return bytes([lo, hi])
+
+    return _pack_axis(force[0]) + _pack_axis(force[1]) + _pack_axis(force[2])
+
+
+def _pack_taxel_for_mock(force: ForceVector) -> bytes:
+    """Encode one [fx, fy, fz] taxel vector into 3 contiguous bytes."""
+    return bytes([
+        round(force[0] / RESOLUTION_N_PER_LSB) & 0xFF,
+        round(force[1] / RESOLUTION_N_PER_LSB) & 0xFF,
+        round(force[2] / RESOLUTION_N_PER_LSB) & 0xFF,
+    ])
+
+
+def encode_resultant_auto_for_mock(
+    forces: ResultantForces,
+    active_sensors: list[str],
+) -> bytes:
+    return b"".join(_pack_resultant_for_mock(forces[f]) for f in active_sensors)
+
+
+def encode_taxels_auto_for_mock(
+    taxels: TaxelForces,
+    active_sensors: list[str],
+) -> bytes:
+    return b"".join(_pack_taxel_for_mock(t) for f in active_sensors for t in taxels[f])
+
+
+def encode_combined_auto_for_mock(
+    forces: ResultantForces,
+    taxels: TaxelForces,
+    active_sensors: list[str],
+) -> bytes:
+    """Build interleaved [resultant_i, taxels_i, resultant_{i+1}, ...] payload."""
+    out = bytearray()
+    for f in active_sensors:
+        out += _pack_resultant_for_mock(forces[f])
+        for t in taxels[f]:
+            out += _pack_taxel_for_mock(t)
+    return bytes(out)

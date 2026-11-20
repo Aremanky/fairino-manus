@@ -1,0 +1,2089 @@
+# ==============================================================================
+# Copyright (c) 2025 ORCA
+#
+# This file is part of ORCA and is licensed under the MIT License.
+# You may use, copy, modify, and distribute this file under the terms of the MIT License.
+# See the LICENSE file at the root of this repository for full license information.
+# ==============================================================================
+
+"""Joint calibration routine for an ORCA hand.
+
+Drives each joint to its mechanical limits following the model's
+``calibration_sequence``, records motor limits and joint-to-motor ratios,
+and persists partial progress to ``calibration.yaml`` after every step.
+
+Once a joint has both of its limits, the travel between them is checked
+against that joint's ``joint_motor_travel`` baseline in ``config.yaml``. A
+joint that falls short of it stalled before its hardstop - an over-tensioned
+tendon does this - and is re-driven before its limits are committed, which
+also recovers a joint something blocked mid-drive. See
+:func:`_resolve_short_travel`.
+
+Like the other maintenance routines this is interaction-free: progress is
+reported through ``progress_callback({"event": ..., ...})`` and cooperative
+cancellation through ``should_stop()``, so a terminal, a GUI, and a web
+front-end all drive the same procedure. The usual entry point is
+:meth:`OrcaHand.calibrate`, which wires both to its background-task plumbing;
+call :func:`run_calibration` directly to supply your own.
+
+The routine operates on the hand through its public API plus a few protected
+seams (``_set_motor_pos``, ``_compute_wrap_offsets_dict``,
+``_clear_wrap_offset``, ``_encoder_backed_joints``) and commits partial
+results to ``hand.calibration`` per step, so an interrupted run never loses
+the work already done.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import logging
+import math
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Callable, Dict, Optional, TYPE_CHECKING
+
+import numpy as np
+
+from ..calibration import CalibrationResult, JointEncoderCal
+from ..constants import (
+    CURRENT_BASED_POSITION,
+    DRIVE_STEP_TIMEOUT_S,
+    MAX_DRIVE_TURNS,
+    OVERRUN_BASELINE_SCALE,
+    WRIST_PWM_RETRY_SCALE,
+    EXTEND,
+    FLEX,
+    JOINTS,
+    MIN_MOTOR_TRAVEL_RAD,
+    MIN_TRAVEL_FRACTION,
+    NUM_STEPS,
+    STEP,
+    STEP_SIZE,
+    TINY_SLEEP,
+    WRIST,
+)
+from ..hardware.joint_encoder_client import (
+    JointEncoderCalibrationError,
+    sample_anchor_count_from_client,
+)
+from ..hardware.sensing.constants import ENCODER_COUNTS_PER_REV, ENCODER_LSB_DEG
+from .motor_reads import read_motor_pos_checked
+from .progress import ProgressCallback, ShouldStop, never_stop, progress_emitter
+from .release import release_hand
+from .motor_travel import motor_travel_deg, travel_deviation
+
+if TYPE_CHECKING:
+    from ..hardware_hand import OrcaHand
+
+logger = logging.getLogger(__name__)
+_emit = progress_emitter(logger, "calibration progress callback failed")
+
+# Blocking: returns one of MANUAL_ACTIONS once the operator has answered.
+ManualPromptCallback = Callable[[dict], str]
+
+MANUAL_RECORD = "record"
+MANUAL_SKIP = "skip"
+MANUAL_ABORT = "abort"
+# Re-ask the previous step: its hardstops are captured again and overwrite
+# what was recorded. Offered only from the second step on (``can_back``).
+MANUAL_BACK = "back"
+MANUAL_ACTIONS = (MANUAL_RECORD, MANUAL_SKIP, MANUAL_ABORT, MANUAL_BACK)
+
+# An anchor commits only when the flex- and extend-hardstop samples differ by
+# a meaningful fraction of the ROM span: a dead or unwired slot reads a
+# constant (which passes the chip parity check) and must not be anchored.
+MIN_ANCHOR_SWEEP_FRACTION = 0.25
+MIN_ANCHOR_SWEEP_COUNTS = 300
+
+# The encoder-measured hardstop span replaces the config nominal in the
+# joint↔motor map, so the config ROM stays its sanity envelope: a measured
+# endpoint this far off nominal is a build, hardstop, or sensor fault rather
+# than unit-to-unit tolerance, and the nominal is kept instead. A clamped
+# value would be neither measured nor nominal, and would enter the map
+# silently.
+MEASURED_ROM_WARN_TOL_DEG = 4.0
+MEASURED_ROM_REJECT_TOL_DEG = 8.0
+
+
+def _count_delta(a: int, b: int) -> int:
+    """Wrap-aware distance between two 14-bit encoder counts."""
+    d = abs(a - b) % ENCODER_COUNTS_PER_REV
+    return min(d, ENCODER_COUNTS_PER_REV - d)
+
+
+def _report(
+    progress_callback: Optional[ProgressCallback],
+    event: str,
+    level: int,
+    message: str,
+    /,
+    *args,
+    **payload,
+) -> None:
+    """Emit a progress event and log the operator-facing message that goes with it."""
+    _emit(progress_callback, event, **payload)
+    logger.log(level, message, *args, stacklevel=2)
+
+
+def _direction_sign(hand: "OrcaHand", joint: str, direction: str) -> int:
+    """+1 when the joint's motor winds up toward the limit in ``direction``, -1 when it unwinds."""
+    sign = 1 if direction == FLEX else -1
+    return -sign if hand.config.joint_inversion_dict.get(joint, False) else sign
+
+
+def _record_limit(
+    hand: "OrcaHand",
+    pending_limits: Dict[int, list],
+    motor_id: int,
+    sign: int,
+    limit: float,
+    progress_callback: Optional[ProgressCallback],
+    message: str = "motor %d (%s) reached the limit at %.4f rad",
+) -> None:
+    """Store ``limit`` as the motor's upper or lower bound by its direction sign, then emit and log it."""
+    bound = 1 if sign == 1 else 0
+    pending_limits[motor_id][bound] = limit
+    joint = hand.config.motor_to_joint_dict[motor_id]
+    _report(
+        progress_callback,
+        "limit_recorded",
+        logging.INFO,
+        message,
+        motor_id,
+        joint,
+        limit,
+        motor=motor_id,
+        joint=joint,
+        limit=limit,
+        bound="upper" if bound else "lower",
+    )
+
+
+def _drive_currents(hand: "OrcaHand") -> "dict[int, float]":
+    """What each motor is driven onto its hardstops with, by motor ID.
+
+    Finger tendons are driven at the motor's own current ceiling: a cap below
+    what the joint needs stalls it short of its stop, and the stall reads as a
+    hardstop, so the joint calibrates over a fraction of its range. The wrist
+    keeps its configured current — it drives a belt, not a tendon.
+    """
+    try:
+        ceilings = hand.motor_client.read_current_limits()
+    except Exception as e:
+        logger.warning("could not read the motors' current ceilings (%s); "
+                       "driving at the configured currents instead", e)
+        ceilings = {}
+    fallback = float(hand.config.max_current)
+    currents = {}
+    for motor_id in hand.config.motor_ids:
+        joint = hand.config.motor_to_joint_dict.get(motor_id)
+        if joint == WRIST:
+            currents[motor_id] = float(hand.config.wrist_calibration_current)
+        else:
+            currents[motor_id] = float(ceilings.get(motor_id) or fallback)
+    return currents
+
+
+def _calibration_currents(hand: "OrcaHand") -> "list[float]":
+    """The drive currents in ``motor_ids`` order, for a hand-wide write."""
+    currents = _drive_currents(hand)
+    return [currents[motor_id] for motor_id in hand.config.motor_ids]
+
+
+def _step_currents(
+    hand: "OrcaHand", current_for: Callable[[str], float]
+) -> "list[float]":
+    """Each motor's drive current in ``motor_ids`` order, so a step mixing the
+    wrist and a finger writes both in one list rather than one over the other."""
+    joint_of = hand.config.motor_to_joint_dict
+    return [float(current_for(joint_of.get(motor_id))) for motor_id in hand.config.motor_ids]
+
+
+def run_calibration(
+    hand: "OrcaHand",
+    *,
+    force_wrist: bool = False,
+    joints: list[str] | None = None,
+    joint_encoder_client=None,
+    progress_callback: Optional[ProgressCallback] = None,
+    should_stop: Optional[ShouldStop] = None,
+    persist: bool = True,
+    manual: bool = False,
+    prompt_callback: Optional[ManualPromptCallback] = None,
+) -> CalibrationResult | None:
+    """Run the calibration routine on ``hand`` and return the result.
+
+    Returns ``None`` on early exit (``should_stop`` triggered). On any exit
+    without a result — abort or exception — torque is released and the
+    configured current limit restored so the hand doesn't strain against a
+    hardstop. Partial per-step progress is committed to ``hand.calibration``
+    (and, when ``persist`` is true, ``calibration.yaml``) either way; applying
+    the *final* result to the hand is the caller's choice.
+
+    Args:
+        hand: A connected :class:`~orca_core.OrcaHand`.
+        force_wrist: Recalibrate the wrist even if already calibrated.
+        joints: Restrict to calibration steps touching these joint names.
+            Joints not visited keep their previously-persisted values.
+        joint_encoder_client: With ``hand.config.joint_feedback_enabled``
+            and an encoder client, the encoder pass also runs and writes a
+            ``joint_encoder_calibration:`` block.
+        progress_callback: Optional ``callable(dict)`` invoked with
+            structured progress events (``calibration_started``,
+            ``step_started``, ``limit_recorded``, ``joint_calibrated``,
+            ``encoder_anchor_recorded``, ``encoder_anchor_failed``,
+            ``offset_calibration_failed``, ``torque_release_failed``,
+            ``wrist_skipped``, ``motor_faulted``, ``sweep_no_motion``,
+            ``travel_checked``,
+            ``travel_baseline_missing``, ``travel_excess``,
+            ``drive_currents_measured`` (``table``),
+            ``travel_retry_started``, ``travel_retry_succeeded``,
+            ``travel_retry_exhausted``, ``travel_retry_disabled``,
+            ``travel_retry_unavailable``,
+            ``step_done``, ``calibration_done``, ``calibration_aborted``,
+            ``cleanup_failed``, ``torque_off_failed`` (``motors``, ``joints``)). Called from the calibrating thread; must be
+            fast and non-blocking. Exceptions raised by the callback are
+            swallowed.
+        should_stop: Optional ``callable() -> bool`` polled between motor
+            commands; return ``True`` to abort cooperatively.
+        persist: When ``False``, nothing is written to ``calibration.yaml``;
+            results are still committed to ``hand.calibration`` in memory.
+        manual: Capture each hardstop from a pose the operator sets by hand
+            instead of driving the motors onto it. Torque stays off for the
+            whole run and ``prompt_callback`` is required.
+        prompt_callback: Blocking ``callable(dict) -> str`` used only in
+            manual mode. Called with ``{"action": "capture_limit", "joint":
+            ..., "motor": ..., "direction": "flex"|"extend"}`` once the
+            operator should be holding that joint on that hardstop; return
+            ``"record"``, ``"skip"`` or ``"abort"``.
+    """
+    should_stop = should_stop or never_stop
+    if manual and prompt_callback is None:
+        raise ValueError(
+            "manual calibration needs a prompt_callback to ask the operator "
+            "when each joint is at its hardstop"
+        )
+
+    result = None
+    try:
+        result = _drive_calibration(
+            hand,
+            force_wrist=force_wrist,
+            joints=joints,
+            joint_encoder_client=joint_encoder_client,
+            progress_callback=progress_callback,
+            should_stop=should_stop,
+            persist=persist,
+            manual=manual,
+            prompt_callback=prompt_callback,
+        )
+    finally:
+        if result is None:
+            _release_after_abort(hand, progress_callback)
+    return result
+
+
+def _release_after_abort(
+    hand: "OrcaHand", progress_callback: Optional[ProgressCallback] = None
+) -> None:
+    """Release torque and restore the configured current limit so the hand
+    doesn't strain against a hardstop after an abnormal exit."""
+    try:
+        release_hand(hand, lambda: hand.set_max_current(hand.config.max_current),
+                     routine="calibration", progress_callback=progress_callback)
+    except Exception as e:
+        _report(
+            progress_callback,
+            "cleanup_failed",
+            logging.WARNING,
+            "cleanup after aborted calibration failed: %s",
+            e,
+            error=str(e),
+        )
+
+
+def _build_calibration_result(
+    motor_limits: Dict[int, list],
+    joint_to_motor_ratios: Dict[int, float],
+    wrist_calibrated: bool,
+    joint_encoder_calibration_dict: Dict[str, JointEncoderCal] | None = None,
+    joint_roms_measured_dict: Dict[str, list] | None = None,
+    motor_travel_measured_dict: Dict[str, float] | None = None,
+    drive_current_measured_dict: Dict[str, Dict[str, float]] | None = None,
+) -> CalibrationResult:
+    result = CalibrationResult(
+        motor_limits_dict={
+            motor_id: list(limits) for motor_id, limits in motor_limits.items()
+        },
+        joint_to_motor_ratios_dict=dict(joint_to_motor_ratios),
+        calibrated=False,
+        wrist_calibrated=wrist_calibrated,
+        joint_encoder_calibration_dict=dict(joint_encoder_calibration_dict or {}),
+        joint_roms_measured_dict={
+            joint: list(rom) for joint, rom in (joint_roms_measured_dict or {}).items()
+        },
+        motor_travel_measured_dict=dict(motor_travel_measured_dict or {}),
+        drive_current_measured_dict={
+            joint: dict(per_direction)
+            for joint, per_direction in (drive_current_measured_dict or {}).items()
+        },
+    )
+    return dataclasses.replace(result, calibrated=result._all_motors_ready())
+
+
+def _skips_torque_release(hand: "OrcaHand", motor_id: int) -> bool:
+    """Whether this motor's limit is taken while it presses the hardstop.
+
+    Only a multi-turn wrist qualifies: it travels far beyond a turn, so a
+    released re-read means nothing. On a single-turn family the wrist is an
+    ordinary servo, and skipping the release (and the offset calibration that
+    follows it) would leave its two limits in a different coordinate frame
+    from every finger motor's.
+    """
+    return (
+        hand.config.motor_to_joint_dict[motor_id] == WRIST
+        and hand.motor_client.supports_multi_turn
+    )
+
+
+@dataclass
+class _DriveState:
+    """Motor-side state carried across every drive within one calibration run.
+
+    ``pending_limits`` holds each motor's in-flight ``[lower, upper]`` pair;
+    a bound commits to the run's results only once both are captured, so a
+    partial or re-driven step never leaves half-updated limits behind. The
+    offset sets track the one-time frame shifts families that need them
+    ("requires_offset_calibration") have already been given, so a re-drive
+    does not shift a motor's frame a second time.
+    """
+
+    pending_limits: Dict[int, list]
+    motors_with_initial_offset: set = field(default_factory=set)
+    motors_with_final_offset: set = field(default_factory=set)
+    # joint -> direction -> mean mA drawn driving onto that stop. Seeded from
+    # the stored calibration so a run that drives a subset of the joints keeps
+    # the rest, and a re-drive overwrites with the newer figure.
+    drive_currents: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    # The joints whose drive current this run measured, as opposed to carried over.
+    joints_measured: set = field(default_factory=set)
+
+
+@dataclass
+class _EncoderPass:
+    """Live state of the joint-encoder anchor pass, when one is running."""
+
+    client: object
+    joints_to_anchor: set
+    pending_anchors: Dict[str, int]
+    joint_encoder_calibration: Dict[str, JointEncoderCal]
+    joint_roms_measured: Dict[str, list]
+
+
+def _nominal_step_current(hand: "OrcaHand") -> Callable[[str], float]:
+    """The current each joint is driven onto its hardstop with.
+
+    The ceilings are read once and closed over: a step must not re-read the
+    bus per joint.
+    """
+    currents = _drive_currents(hand)
+    joint_to_motor = hand.config.joint_to_motor_map
+    fallback = float(hand.config.max_current)
+
+    def current_for(joint: str) -> float:
+        motor_id = joint_to_motor.get(joint)
+        return currents.get(motor_id, fallback)
+
+    return current_for
+
+
+def drive_current_change(
+    now: float | None, before: float | None
+) -> "tuple[float, float] | None":
+    """``(delta_ma, fraction)`` between this run's figure and the last one.
+
+    ``None`` when either run has no figure, or the earlier one was zero and a
+    fraction would be meaningless.
+    """
+    if now is None or before is None or before == 0:
+        return None
+    return now - before, (now - before) / before
+
+
+def _drive_current_cell(
+    now: float | None, before: float | None
+) -> str:
+    """One joint-direction's figure with its change, as a fixed-width cell."""
+    if now is None:
+        return f"{'--':>7}{'':>13}"
+    change = drive_current_change(now, before)
+    if change is None:
+        return f"{now:>7.0f}{'':>13}"
+    delta, fraction = change
+    return f"{now:>7.0f}{delta:>+7.0f}{100 * fraction:>+6.0f}%"
+
+
+def _drive_current_table(
+    hand: "OrcaHand",
+    measured: Dict[str, Dict[str, float]],
+    previous: Dict[str, Dict[str, float]] | None = None,
+) -> str:
+    """The mean current each joint drew onto its stops, with the change
+    against the previous run, grouped by finger.
+
+    Informational: a joint well above its siblings, or one that has climbed
+    since the last run, is the signature of an over-tensioned tendon.
+    """
+    previous = previous or {}
+    by_finger: Dict[str, list] = {}
+    for joint in hand.config.joint_ids:
+        if joint not in measured:
+            continue
+        finger = joint.split("_", 1)[0]
+        by_finger.setdefault(finger, []).append(joint)
+
+    lines = ["mean current drawn driving onto the hardstops, "
+             "and the change since the previous run (mA):",
+             f"  {'joint':<14}{'flex':>7}{'Δ':>7}{'Δ%':>6}"
+             f"{'extend':>10}{'Δ':>7}{'Δ%':>6}"]
+    for joints in by_finger.values():
+        for joint in joints:
+            per_direction = measured[joint]
+            was = previous.get(joint, {})
+            lines.append(
+                f"  {joint:<14}"
+                + _drive_current_cell(per_direction.get(FLEX), was.get(FLEX))
+                + "   "
+                + _drive_current_cell(per_direction.get(EXTEND), was.get(EXTEND))
+            )
+    return "\n".join(lines)
+
+
+def _motor_temperature(hand: "OrcaHand", motor_id: int) -> float | None:
+    """This motor's present temperature in °C, or ``None`` if unreadable."""
+    try:
+        temps = hand.get_motor_temp(as_dict=True)
+    except Exception:
+        return None
+    value = temps.get(motor_id)
+    return None if value is None else float(value)
+
+
+def _latched_fault(hand: "OrcaHand", motor_id: int) -> list[str] | None:
+    """Names of the motor's latched Hardware Error Status bits, if any.
+
+    A latched motor still answers the bus and still acknowledges torque-enable
+    writes — it simply never energizes. Driving it therefore looks exactly
+    like a joint that is already on its hardstop, which is how a dead motor
+    ends up recorded as a zero-travel limit pair. Returns ``None`` when the
+    register cannot be read (not every family exposes one), so an unreadable
+    register never blocks a calibration.
+    """
+    client = hand.motor_client
+    read = getattr(client, "read_hardware_error", None)
+    if read is None:
+        return None
+    try:
+        value = read(motor_id)
+        if value is None:  # one retry: a garbled reply is not a fault
+            value = read(motor_id)
+    except Exception:
+        return None
+    return client.decode_hardware_error(value) or None
+
+
+def _report_motionless_sweeps(
+    hand: "OrcaHand",
+    *,
+    step_joints: Dict[str, str],
+    directions: Dict[int, int],
+    start_positions,
+    progress_callback: Optional[ProgressCallback],
+) -> None:
+    """Flag any motor that finished this sweep where it started it.
+
+    The sweep calls a hardstop when the position stops changing, which a motor
+    that never moved satisfies on its first few reads — the step then completes
+    in milliseconds and its "limit" is wherever the joint happened to be
+    resting. Saying so per direction is the point: waiting for both bounds
+    hides the first half of the problem behind a step that looked fine.
+    """
+    if start_positions is None or not directions:
+        return
+    try:
+        end_positions = read_motor_pos_checked(hand)
+    except Exception:
+        return
+
+    motor_to_joint = hand.config.motor_to_joint_dict
+    for motor_id in directions:
+        idx = hand.config.motor_id_to_idx_dict[motor_id]
+        moved = abs(float(end_positions[idx]) - float(start_positions[idx]))
+        if moved >= MIN_MOTOR_TRAVEL_RAD:
+            continue
+        joint = motor_to_joint.get(motor_id, "?")
+        _report(
+            progress_callback,
+            "sweep_no_motion",
+            logging.ERROR,
+            "motor %d (%s) finished its %s sweep %.2f deg from where it "
+            "started: it never moved, so the position recorded as its "
+            "hardstop is just its resting pose. Check that the tendon is "
+            "connected and that nothing is blocking the joint.",
+            motor_id,
+            joint,
+            step_joints.get(joint, "?"),
+            math.degrees(moved),
+            joint=joint,
+            motor=motor_id,
+            direction=step_joints.get(joint),
+            moved_deg=math.degrees(moved),
+        )
+
+
+def _drive_step(
+    hand: "OrcaHand",
+    *,
+    step_joints: Dict[str, str],
+    current_for: Callable[[str], float],
+    state: _DriveState,
+    encoder_pass: Optional[_EncoderPass],
+    progress_callback: Optional[ProgressCallback],
+    should_stop: ShouldStop,
+) -> Dict[int, int] | None:
+    """Drive one step's joints onto their hardstops and record their limits.
+
+    Torques each joint's motor, walks it in the step's direction until its
+    position stops changing, samples encoder anchors while the motors still
+    press their hardstops, then releases torque per motor to read the
+    tension-free limit into ``state.pending_limits``.
+
+    Returns the per-motor direction signs, or ``None`` if ``should_stop`` fired
+    mid-drive — the joints are then at an arbitrary pose and nothing captured
+    this step may be committed.
+    """
+    hand.disable_torque()
+
+    if should_stop():
+        return None
+
+    hand.set_max_current(_step_currents(hand, current_for))
+
+    pending_limits = state.pending_limits
+    directions: Dict[int, int] = {}
+    step_direction: Dict[int, str] = {}
+    # motor ID -> [summed mA, samples], averaged once the drive ends.
+    current_sums: Dict[int, list] = {}
+    motor_reached_limit: Dict[int, bool] = {}
+    position_buffers: Dict[int, deque] = {}
+
+    for joint, direction in step_joints.items():
+        motor_id = hand.config.joint_to_motor_map[joint]
+        # A latched motor still acknowledges the torque-enable write below but
+        # never energizes, so its resting pose would be recorded as both
+        # hardstops — a dead motor read as a mechanical fact about the joint.
+        faults = _latched_fault(hand, motor_id)
+        if faults:
+            temperature = _motor_temperature(hand, motor_id)
+            _report(
+                progress_callback,
+                "motor_faulted",
+                logging.ERROR,
+                "motor %d (joint %s) has latched %s and will not energize "
+                "until it is rebooted or power-cycled%s. Skipping the joint: "
+                "driving it would record its resting pose as both hardstops. "
+                "Let it cool first — a motor that is still hot re-latches "
+                "immediately.",
+                motor_id,
+                joint,
+                " + ".join(faults),
+                "" if temperature is None else f" (currently {temperature:.0f} °C)",
+                joint=joint,
+                motor=motor_id,
+                flags=faults,
+                temperature_c=temperature,
+            )
+            continue
+
+        if motor_id in hand.enable_torque(motor_ids=[motor_id]):
+            _report(
+                progress_callback,
+                "torque_enable_failed",
+                logging.ERROR,
+                "motor %d (joint %s) did not acknowledge torque enable; "
+                "skipping it this step rather than recording limits from a "
+                "motor that cannot move. A latched hardware error needs a "
+                "power cycle to clear.",
+                motor_id,
+                joint,
+                joint=joint,
+                motor=motor_id,
+            )
+            continue
+        logger.debug("torque enabled for motor %d (joint %s)", motor_id, joint)
+
+        if should_stop():
+            return None
+
+        sign = _direction_sign(hand, joint, direction)
+
+        if (
+            hand.motor_client.requires_offset_calibration
+            and motor_id not in state.motors_with_initial_offset
+        ):
+            # A failed offset command leaves the motor frame un-shifted;
+            # driving on would record limits in the wrong frame.
+            if not hand.motor_client.calibrate_offset(motor_id, upper=(sign < 0)):
+                _report(
+                    progress_callback,
+                    "offset_calibration_failed",
+                    logging.WARNING,
+                    "offset calibration failed for motor %d; joint %s "
+                    "skipped this step",
+                    motor_id,
+                    joint,
+                    motor=motor_id,
+                    joint=joint,
+                )
+                hand.disable_torque([motor_id])
+                continue
+            state.motors_with_initial_offset.add(motor_id)
+
+        directions[motor_id] = sign
+        step_direction[motor_id] = direction
+        current_sums[motor_id] = [0.0, 0]
+        position_buffers[motor_id] = deque(maxlen=hand.config.calibration_num_stable)
+        motor_reached_limit[motor_id] = False
+
+    try:
+        start_positions = read_motor_pos_checked(hand)
+    except Exception:
+        start_positions = None
+
+    deadline = time.monotonic() + DRIVE_STEP_TIMEOUT_S
+    # Motors given up on mid-step: no hardstop within their overrun limit.
+    abandoned: set = set()
+    # Multi-turn wrist retries at a lower output: attempts so far per motor.
+    pwm_retries: Dict[int, int] = {}
+    client = hand.motor_client
+
+    def overrun_rad(motor_id: int) -> float:
+        # A multi-turn wrist on a belt can run on past its stop, so its baseline
+        # bounds the sweep; a tendon joint stalls, so only a free spin trips it.
+        expected = hand.config.expected_motor_travel_deg(
+            hand.config.motor_to_joint_dict[motor_id]
+        )
+        if expected and _skips_torque_release(hand, motor_id):
+            return math.radians(OVERRUN_BASELINE_SCALE * expected)
+        return MAX_DRIVE_TURNS * 2 * math.pi
+
+    while (
+        not all(reached or m in abandoned for m, reached in motor_reached_limit.items())
+        and not should_stop()
+    ):
+        if time.monotonic() > deadline:
+            # A motor that never stabilises (a disconnected tendon spins
+            # freely) would otherwise drive until someone stops it.
+            for motor_id, reached in motor_reached_limit.items():
+                if reached or motor_id in abandoned:
+                    continue
+                _report(
+                    progress_callback,
+                    "drive_step_timeout",
+                    logging.ERROR,
+                    "motor %d (%s) never settled onto a hardstop within %.0fs; "
+                    "giving up on this direction. Its limit is not recorded.",
+                    motor_id,
+                    hand.config.motor_to_joint_dict[motor_id],
+                    DRIVE_STEP_TIMEOUT_S,
+                    motor=motor_id,
+                    joint=hand.config.motor_to_joint_dict[motor_id],
+                )
+            break
+
+        desired_increment = {
+            motor_id: directions[motor_id] * hand.config.calibration_step_size
+            for motor_id, reached_limit in motor_reached_limit.items()
+            if not reached_limit and motor_id not in abandoned
+        }
+
+        hand._set_motor_pos(desired_increment, rel_to_current=True)
+        time.sleep(hand.config.calibration_step_period)
+        with hand._motor_lock:
+            motor_read = hand.motor_client.read_position_velocity_current()
+            read_ok = hand.motor_client.last_read_ok
+        curr_pos = motor_read.position
+
+        # A failed bulk read returns the stale cache; feeding it into the
+        # stability buffers would fake a hardstop detection. Skip and retry.
+        if not read_ok:
+            continue
+
+        if start_positions is not None:
+            for motor_id in list(desired_increment):
+                idx = hand.config.motor_id_to_idx_dict[motor_id]
+                travelled = abs(float(curr_pos[idx] - start_positions[idx]))
+                limit_rad = overrun_rad(motor_id)
+                if travelled <= limit_rad:
+                    continue
+                joint = hand.config.motor_to_joint_dict[motor_id]
+                attempts = pwm_retries.get(motor_id, 0)
+                if (
+                    _skips_torque_release(hand, motor_id)
+                    and getattr(client, "supports_pwm_cap", False)
+                    and attempts < hand.config.calibration_travel_retries
+                ):
+                    # A belt that skipped at this output may hold at less: back
+                    # the wrist's PWM off and keep driving with a fresh budget.
+                    pwm_retries[motor_id] = attempts + 1
+                    fraction = WRIST_PWM_RETRY_SCALE ** (attempts + 1)
+                    client.write_pwm_fraction([motor_id], fraction)
+                    start_positions[idx] = curr_pos[idx]
+                    position_buffers[motor_id].clear()
+                    _report(
+                        progress_callback,
+                        "overrun_retry",
+                        logging.WARNING,
+                        "motor %d (%s) turned %.0f deg past %.0f deg without meeting a "
+                        "stop: the belt is poorly set (slipping). Driving again at %.0f%% "
+                        "PWM output (attempt %d/%d)",
+                        motor_id, joint, math.degrees(travelled), math.degrees(limit_rad),
+                        100 * fraction, attempts + 1, hand.config.calibration_travel_retries,
+                        motor=motor_id,
+                        joint=joint,
+                        travel_deg=math.degrees(travelled),
+                        limit_deg=math.degrees(limit_rad),
+                        attempt=attempts + 1,
+                        pwm_fraction=fraction,
+                    )
+                    continue
+                abandoned.add(motor_id)
+                desired_increment.pop(motor_id)
+                _report(
+                    progress_callback,
+                    "hardstop_not_found",
+                    logging.ERROR,
+                    "motor %d (%s) turned %.0f deg without meeting a hardstop; "
+                    "giving up on this direction, limit not recorded. The "
+                    "tendon is slack or broken: tension it and calibrate again.",
+                    motor_id, joint, math.degrees(travelled),
+                    motor=motor_id,
+                    joint=joint,
+                    travel_deg=math.degrees(travelled),
+                    limit_deg=math.degrees(limit_rad),
+                    max_turns=MAX_DRIVE_TURNS,
+                )
+
+        for motor_id in desired_increment.keys():
+            idx = hand.config.motor_id_to_idx_dict[motor_id]
+            total = current_sums[motor_id]
+            total[0] += abs(float(motor_read.current[idx]))
+            total[1] += 1
+            position_buffers[motor_id].append(curr_pos[idx])
+
+            if len(
+                position_buffers[motor_id]
+            ) == hand.config.calibration_num_stable and np.allclose(
+                position_buffers[motor_id],
+                position_buffers[motor_id][0],
+                atol=hand.config.calibration_threshold,
+            ):
+                motor_reached_limit[motor_id] = True
+                # A multi-turn wrist's limit comes from the stable-position
+                # buffer (no torque release); every other motor is re-read
+                # after the release.
+                if _skips_torque_release(hand, motor_id):
+                    avg_limit = float(np.mean(position_buffers[motor_id]))
+                    _record_limit(
+                        hand, pending_limits, motor_id, directions[motor_id],
+                        avg_limit, progress_callback,
+                    )
+
+    for motor_id, (summed, samples) in current_sums.items():
+        if samples:
+            joint = hand.config.motor_to_joint_dict[motor_id]
+            state.drive_currents.setdefault(joint, {})[
+                step_direction[motor_id]] = summed / samples
+            state.joints_measured.add(joint)
+
+    for motor_id in pwm_retries:
+        try:
+            client.write_pwm_fraction([motor_id], 1.0)
+        except Exception as e:
+            logger.warning(
+                "could not restore full PWM output on motor %d: %s", motor_id, e
+            )
+
+    if should_stop():
+        return None
+
+    _report_motionless_sweeps(
+        hand,
+        step_joints=step_joints,
+        directions=directions,
+        start_positions=start_positions,
+        progress_callback=progress_callback,
+    )
+
+    # Motors are still pressing their hardstops with calibration current:
+    # sample encoder anchors before the release so counts match that pose.
+    if encoder_pass is not None:
+        _run_joint_encoder_pass_for_step(
+            hand,
+            step_joints=step_joints,
+            directions=directions,
+            encoder_pass=encoder_pass,
+            progress_callback=progress_callback,
+        )
+
+    # Release torque so tendon tension doesn't bias the reading, then
+    # capture the relaxed motor position as the limit and re-engage.
+    for motor_id in directions.keys():
+        if not motor_reached_limit.get(motor_id):
+            continue
+        if _skips_torque_release(hand, motor_id):
+            continue
+        idx = hand.config.motor_id_to_idx_dict[motor_id]
+
+        # A failed torque release leaves the tendon tensioned, so a limit
+        # read now would be biased. A None return reports no failed motors.
+        failed_release = hand.disable_torque([motor_id])
+        if failed_release:
+            _report(
+                progress_callback,
+                "torque_release_failed",
+                logging.WARNING,
+                "torque release failed for motor %d; limit not recorded",
+                motor_id,
+                motor=motor_id,
+                joint=hand.config.motor_to_joint_dict[motor_id],
+            )
+            continue
+        time.sleep(TINY_SLEEP)
+        avg_limit = float(read_motor_pos_checked(hand)[idx])
+
+        if (
+            hand.motor_client.requires_offset_calibration
+            and motor_id not in state.motors_with_final_offset
+        ):
+            is_positive = directions[motor_id] > 0
+            # A failed offset command leaves the motor frame un-shifted;
+            # recording the limit would persist a wrong-frame value.
+            if not hand.motor_client.calibrate_offset(motor_id, upper=is_positive):
+                _report(
+                    progress_callback,
+                    "offset_calibration_failed",
+                    logging.WARNING,
+                    "offset calibration failed for motor %d; limit not recorded",
+                    motor_id,
+                    motor=motor_id,
+                    joint=hand.config.motor_to_joint_dict[motor_id],
+                )
+                hand.enable_torque([motor_id])
+                continue
+            time.sleep(TINY_SLEEP)
+            avg_limit = float(read_motor_pos_checked(hand)[idx])
+            state.motors_with_final_offset.add(motor_id)
+
+        _record_limit(
+            hand, pending_limits, motor_id, directions[motor_id],
+            avg_limit, progress_callback,
+        )
+
+        hand.enable_torque([motor_id])
+
+    return directions
+
+
+def _manual_prompt(prompt_callback: Optional[ManualPromptCallback], **payload) -> str:
+    """Ask the operator what to do with this hardstop; default to skipping."""
+    if prompt_callback is None:
+        raise ValueError(
+            "manual calibration needs a prompt_callback to ask the operator "
+            "when each joint is at its hardstop"
+        )
+    try:
+        answer = prompt_callback({"action": "capture_limit", **payload})
+    except Exception:
+        logger.exception("manual calibration prompt failed")
+        return MANUAL_ABORT
+    answer = str(answer).strip().lower()
+    return answer if answer in MANUAL_ACTIONS else MANUAL_SKIP
+
+
+def _capture_step_manually(
+    hand: "OrcaHand",
+    *,
+    step_joints: Dict[str, str],
+    state: _DriveState,
+    encoder_pass: Optional[_EncoderPass],
+    progress_callback: Optional[ProgressCallback],
+    prompt_callback: Optional[ManualPromptCallback],
+    should_stop: ShouldStop,
+    step_index: int = 0,
+) -> Dict[int, int] | str | None:
+    """Record each joint's hardstop from a pose the operator sets by hand.
+
+    Torque stays off for the whole step, so the reading is already
+    tension-free and needs no release: the operator holds the joint on its
+    hardstop and confirms, and the motor position at that moment becomes the
+    limit. This is the path for a joint whose motor cannot drive itself onto
+    the stop — a stalling tendon, or a motor latched off by a hardware error.
+
+    Returns the per-motor direction signs, ``MANUAL_BACK`` if the operator
+    asked for the previous step again, or ``None`` if the operator aborted or
+    ``should_stop`` fired.
+    """
+    hand.disable_torque()
+
+    if should_stop():
+        return None
+
+    directions: Dict[int, int] = {}
+    motors = {joint: hand.config.joint_to_motor_map[joint] for joint in step_joints}
+    first = next(iter(step_joints))
+
+    for joint, direction in step_joints.items():
+        _emit(
+            progress_callback,
+            "manual_capture_started",
+            joint=joint,
+            motor=motors[joint],
+            direction=direction,
+        )
+
+    # One answer covers the whole step: the operator holds every joint in it on
+    # its stop at once (e.g. all finger abductions swept to one side).
+    answer = _manual_prompt(
+        prompt_callback,
+        joint=first,
+        motor=motors[first],
+        direction=step_joints[first],
+        joints=dict(step_joints),
+        motors=dict(motors),
+        step_index=step_index,
+        can_back=step_index > 0,
+    )
+    if answer == MANUAL_ABORT or should_stop():
+        return None
+    if answer == MANUAL_BACK:
+        if step_index == 0:
+            # Nothing before the first step: ask for it again.
+            return _capture_step_manually(
+                hand,
+                step_joints=step_joints,
+                state=state,
+                encoder_pass=encoder_pass,
+                progress_callback=progress_callback,
+                prompt_callback=prompt_callback,
+                should_stop=should_stop,
+                step_index=step_index,
+            )
+        return MANUAL_BACK
+    if answer == MANUAL_SKIP:
+        for joint, direction in step_joints.items():
+            _report(
+                progress_callback,
+                "manual_capture_skipped",
+                logging.INFO,
+                "manual calibration: %s %s skipped",
+                joint,
+                direction,
+                joint=joint,
+                motor=motors[joint],
+                direction=direction,
+            )
+        return directions
+
+    positions = read_motor_pos_checked(hand)
+    for joint, direction in step_joints.items():
+        motor_id = motors[joint]
+        sign = _direction_sign(hand, joint, direction)
+        position = float(positions[hand.config.motor_id_to_idx_dict[motor_id]])
+        _record_limit(
+            hand, state.pending_limits, motor_id, sign, position, progress_callback,
+            message="motor %d (%s) hand-held limit recorded at %.4f rad",
+        )
+        directions[motor_id] = sign
+
+    # The operator is still holding the joints on their stops; the anchors have
+    # to be sampled now, not after they let go.
+    if encoder_pass is not None and directions:
+        _run_joint_encoder_pass_for_step(
+            hand,
+            step_joints=dict(step_joints),
+            directions=directions,
+            encoder_pass=encoder_pass,
+            progress_callback=progress_callback,
+        )
+
+    return directions
+
+
+def _drive_calibration(
+    hand: "OrcaHand",
+    *,
+    force_wrist: bool,
+    joints: list[str] | None,
+    joint_encoder_client,
+    progress_callback: Optional[ProgressCallback],
+    should_stop: ShouldStop,
+    persist: bool,
+    manual: bool = False,
+    prompt_callback: Optional[ManualPromptCallback] = None,
+) -> CalibrationResult | None:
+    """Execute the calibration routine and return a :class:`~orca_core.CalibrationResult`.
+
+    Drives each joint through its mechanical limits following ``calibration_sequence``
+    from ``config.yaml``, records motor positions at each limit, and persists
+    the resulting motor limits and joint-to-motor ratios to ``calibration.yaml``
+    after every step. Returns ``None`` on early exit (stop requested).
+
+    Per-step sequencing: drive the step's motors onto their hardstops, sample
+    encoder anchors while still under torque, then release torque per motor to
+    read the tension-free motor-side limit before committing the step.
+
+    Wrist calibration logic:
+    - Wrist is calibrated independently of fingers (tracked by `wrist_calibrated` in calibration file).
+    - Wrist steps write `wrist_calibration_current`, though the wrist motor's
+      multi_turn_position mode ignores current caps (PWM-limited torque).
+    - If already calibrated (and calibration run is not forcing), skip wrist
+      steps — unless the encoder pass is active and the wrist still lacks an
+      encoder anchor, in which case the wrist steps run to capture it.
+    - If missing from the sequence, wrist flex/extend steps are appended.
+    - If force_wrist=True, or in a manual run, always include wrist in calibration steps.
+    - `wrist_calibrated` turns true only once both wrist limits are captured;
+      a persisted flag without stored wrist limits is treated as uncalibrated.
+    """
+    # Manual capture has its own sequence: its steps are what one answer records.
+    source_sequence = (
+        hand.config.manual_calibration_sequence
+        if manual and hand.config.manual_calibration_sequence
+        else hand.config.calibration_sequence
+    )
+    wrist_in_sequence = any(WRIST in step[JOINTS] for step in source_sequence)
+    calibration_sequence = list(source_sequence)
+
+    encoder_pass_active = (
+        getattr(hand.config, "joint_feedback_enabled", False)
+        and joint_encoder_client is not None
+    )
+
+    # A calibrated flag without recorded wrist limits is inconsistent; treat
+    # the wrist as uncalibrated so it is driven again rather than skipped.
+    wrist_motor_id = hand.config.joint_to_motor_map.get(WRIST)
+    prior_wrist_limits = hand.calibration.motor_limits_dict.get(
+        wrist_motor_id, [None, None]
+    )
+    wrist_calibrated = (
+        hand.calibration.wrist_calibrated and None not in prior_wrist_limits
+    )
+
+    # An encoder-backed wrist without an anchor still needs its steps: the
+    # anchor is sampled at the wrist FLEX hardstop during the sweep. A
+    # ``joints`` restriction that excludes the wrist keeps the plain skip.
+    wrist_anchor_needed = (
+        encoder_pass_active
+        and (joints is None or WRIST in joints)
+        and WRIST in set(hand._encoder_backed_joints())
+        and WRIST not in hand.calibration.joint_encoder_calibration_dict
+    )
+    if wrist_anchor_needed and wrist_calibrated and not force_wrist:
+        logger.info(
+            "wrist is motor-calibrated but missing its encoder anchor; "
+            "running wrist steps to capture it"
+        )
+
+    # A manual run always asks for the wrist: the operator chose to set every stop by hand.
+    if wrist_calibrated and not force_wrist and not wrist_anchor_needed and not manual:
+        if wrist_in_sequence:
+            _report(
+                progress_callback,
+                "wrist_skipped",
+                logging.WARNING,
+                "wrist already calibrated; skipping wrist steps "
+                "(force_wrist=True overrides)",
+            )
+        calibration_sequence = [
+            step for step in calibration_sequence if WRIST not in step[JOINTS]
+        ]
+    elif not wrist_in_sequence:
+        calibration_sequence.append(
+            {STEP: len(calibration_sequence) + 1, JOINTS: {WRIST: FLEX}}
+        )
+        calibration_sequence.append(
+            {STEP: len(calibration_sequence) + 1, JOINTS: {WRIST: EXTEND}}
+        )
+
+    absent = set(hand.absent_joints)
+    if absent:
+        requested = (
+            list(joints)
+            if joints is not None
+            else [j for step in calibration_sequence for j in step[JOINTS]]
+        )
+        skipped = sorted(absent & set(requested))
+        if skipped:
+            _report(progress_callback, "joints_skipped", logging.WARNING,
+                    "no motor answered for %s; calibration leaves them out", skipped,
+                    joints=skipped, reason="motor did not answer at connect")
+        joints = [j for j in requested if j not in absent]
+    if joints is not None:
+        joints_set = set(joints)
+        filtered = []
+        for step in calibration_sequence:
+            step_joints = {j: d for j, d in step[JOINTS].items() if j in joints_set}
+            if step_joints:
+                filtered.append({STEP: step[STEP], JOINTS: step_joints})
+        logger.info(
+            "calibrating %d joint(s) across %d step(s) (out of %d total)",
+            len(joints_set),
+            len(filtered),
+            len(calibration_sequence),
+        )
+        calibration_sequence = filtered
+
+    # motor_limits commits only once both directions land for a joint;
+    # pending_limits holds the in-flight half so partial runs keep old values.
+    motor_limits = {
+        motor_id: list(limits)
+        for motor_id, limits in hand.calibration.motor_limits_dict.items()
+    }
+    pending_limits: Dict[int, list] = {
+        motor_id: [None, None] for motor_id in hand.config.motor_ids
+    }
+    joint_to_motor_ratios = dict(hand.calibration.joint_to_motor_ratios_dict)
+    # What a manual Back restores for a joint whose pair it undoes.
+    limits_before_run = {motor_id: list(limits) for motor_id, limits in motor_limits.items()}
+    ratios_before_run = dict(joint_to_motor_ratios)
+
+    joint_encoder_calibration: Dict[str, JointEncoderCal] = dict(
+        hand.calibration.joint_encoder_calibration_dict
+    )
+    joint_roms_measured: Dict[str, list] = {
+        joint: list(rom)
+        for joint, rom in hand.calibration.joint_roms_measured_dict.items()
+    }
+    # Existing anchors stay until their replacement is sampled, so an aborted
+    # or failed run never loses anchors of joints it did not re-anchor.
+    joints_to_anchor: set[str] = set()
+    pending_anchors: Dict[str, int] = {}
+    if encoder_pass_active:
+        joints_to_anchor = {
+            joint
+            for step in calibration_sequence
+            for joint, direction in step[JOINTS].items()
+            if direction == FLEX
+        }
+
+    hand._compute_wrap_offsets_dict()
+
+    for step in calibration_sequence:
+        for joint in step[JOINTS].keys():
+            motor_id = hand.config.joint_to_motor_map[joint]
+            hand._clear_wrap_offset(motor_id)
+
+    drive_state = _DriveState(
+        pending_limits=pending_limits,
+        drive_currents={joint: dict(per_direction) for joint, per_direction
+                        in hand.calibration.drive_current_measured_dict.items()},
+    )
+    encoder_pass = (
+        _EncoderPass(
+            client=joint_encoder_client,
+            joints_to_anchor=joints_to_anchor,
+            pending_anchors=pending_anchors,
+            joint_encoder_calibration=joint_encoder_calibration,
+            joint_roms_measured=joint_roms_measured,
+        )
+        if encoder_pass_active
+        else None
+    )
+
+    motor_travel_measured: Dict[str, float] = dict(
+        hand.calibration.motor_travel_measured_dict
+    )
+    previous_drive_currents: Dict[str, Dict[str, float]] = {
+        joint: dict(per_direction) for joint, per_direction
+        in hand.calibration.drive_current_measured_dict.items()
+    }
+    boosted_joints: Dict[str, float] = {}
+
+    calibrated_joints: dict = {}
+
+    if manual:
+        # Nothing is driven, and the hand has to stay limp enough to move by
+        # hand for the whole run.
+        hand.disable_torque()
+    else:
+        hand.set_control_mode(CURRENT_BASED_POSITION)
+        hand.set_max_current(_calibration_currents(hand))
+
+    _emit(
+        progress_callback,
+        "calibration_started",
+        steps=len(calibration_sequence),
+        joints=sorted({j for step in calibration_sequence for j in step[JOINTS]}),
+    )
+
+    saved_to: list[str] = []
+
+    def commit_result(
+        drive_current_measured: Dict[str, Dict[str, float]] | None = None,
+    ) -> CalibrationResult:
+        """Build the result from the run's state, apply it to the hand and persist it.
+
+        The run's first write starts a new calibration on disk (the one it
+        replaces is kept as the previous); later writes update it in place.
+        """
+        result = _build_calibration_result(
+            motor_limits=motor_limits,
+            joint_to_motor_ratios=joint_to_motor_ratios,
+            wrist_calibrated=wrist_calibrated,
+            joint_encoder_calibration_dict=joint_encoder_calibration,
+            joint_roms_measured_dict=joint_roms_measured,
+            motor_travel_measured_dict=motor_travel_measured,
+            drive_current_measured_dict=drive_current_measured,
+        )
+        hand.calibration = result
+        if persist:
+            path = hand._save_calibration(
+                result, include_encoder=encoder_pass_active,
+                start_run=not saved_to, stamp=True,
+                in_progress=drive_current_measured is None)
+            if not saved_to:
+                saved_to.append(path)
+                _report(progress_callback, "calibration_file", logging.INFO,
+                        "calibration is being written to %s", path, path=path)
+        return result
+
+    # An index rather than a for loop: a manual run can step back to re-capture
+    # the previous step's hardstops.
+    step_index = 0
+    while step_index < len(calibration_sequence):
+        step = calibration_sequence[step_index]
+        if should_stop():
+            _emit(progress_callback, "calibration_aborted")
+            return None
+
+        _emit(
+            progress_callback,
+            "step_started",
+            index=step_index,
+            total=len(calibration_sequence),
+            joints={j: d for j, d in step[JOINTS].items()},
+        )
+
+        directions = (
+            _capture_step_manually(
+                hand,
+                step_joints=step[JOINTS],
+                state=drive_state,
+                encoder_pass=encoder_pass,
+                progress_callback=progress_callback,
+                prompt_callback=prompt_callback,
+                should_stop=should_stop,
+                step_index=step_index,
+            )
+            if manual
+            else _drive_step(
+                hand,
+                step_joints=step[JOINTS],
+                current_for=_nominal_step_current(hand),
+                state=drive_state,
+                encoder_pass=encoder_pass,
+                progress_callback=progress_callback,
+                should_stop=should_stop,
+            )
+        )
+        # Mid-drive stop: joints are not at their hardstops, so bail before
+        # anything captured from an arbitrary pose is committed.
+        if directions is None:
+            _emit(progress_callback, "calibration_aborted")
+            return None
+        if directions == MANUAL_BACK:
+            step_index -= 1
+            previous = calibration_sequence[step_index]
+            # Forget what the previous step captured: a Skip on the re-asked step
+            # must not commit the bound it recorded the first time.
+            for joint, direction in previous[JOINTS].items():
+                motor_id = hand.config.joint_to_motor_map[joint]
+                sign = _direction_sign(hand, joint, direction)
+                pending_limits[motor_id][1 if sign == 1 else 0] = None
+                motor_travel_measured.pop(joint, None)
+                # A pair the previous step completed was already committed: undo it too.
+                if motor_id in limits_before_run:
+                    motor_limits[motor_id] = list(limits_before_run[motor_id])
+                else:
+                    motor_limits.pop(motor_id, None)
+                if motor_id in ratios_before_run:
+                    joint_to_motor_ratios[motor_id] = ratios_before_run[motor_id]
+                else:
+                    joint_to_motor_ratios.pop(motor_id, None)
+            commit_result()
+            _emit(
+                progress_callback,
+                "manual_capture_back",
+                index=step_index,
+                joints={j: d for j, d in previous[JOINTS].items()},
+            )
+            continue
+
+        calibrated_joints = {}
+        for joint in step[JOINTS].keys():
+            motor_id = hand.config.joint_to_motor_map[joint]
+            if (
+                pending_limits[motor_id][0] is None
+                or pending_limits[motor_id][1] is None
+            ):
+                continue
+
+            # Both bounds are in, so the joint's motor travel is known and can
+            # be checked against its baseline before the limits are committed.
+            if not _resolve_short_travel(
+                hand,
+                joint,
+                motor_id,
+                state=drive_state,
+                encoder_pass=encoder_pass,
+                motor_travel_measured=motor_travel_measured,
+                boosted_joints=boosted_joints,
+                progress_callback=progress_callback,
+                should_stop=should_stop,
+                manual=manual,
+            ):
+                _emit(progress_callback, "calibration_aborted")
+                return None
+
+            candidate = list(pending_limits[motor_id])
+            delta_motor = candidate[1] - candidate[0]
+            # Two limits this close together are not two hardstops — the motor
+            # never turned (a latched hardware error refusing torque does
+            # this). Committing the pair would write a ~zero joint-to-motor
+            # ratio, which makes the joint uncommandable, and would leave the
+            # wrap detector comparing live positions against a single point:
+            # the corruption then survives into every later run. Keep whatever
+            # calibration the joint already had and say so.
+            if abs(delta_motor) < MIN_MOTOR_TRAVEL_RAD:
+                _report(
+                    progress_callback,
+                    "limits_rejected",
+                    logging.ERROR,
+                    "joint %s (motor %d) swept only %.2f deg of motor travel: "
+                    "its two limits are the same point, so the motor did not "
+                    "turn. Refusing to record it — check that the motor "
+                    "accepts torque (a latched hardware error needs a power "
+                    "cycle) and that the tendon is connected.",
+                    joint,
+                    motor_id,
+                    motor_travel_deg(candidate) or 0.0,
+                    joint=joint,
+                    motor=motor_id,
+                    travel_deg=motor_travel_deg(candidate),
+                    reason="degenerate",
+                )
+                motor_travel_measured.pop(joint, None)
+                drive_state.drive_currents.pop(joint, None)
+                continue
+
+            motor_limits[motor_id] = candidate
+            # The encoder pass for this step has already run, so a joint whose
+            # travel was measured this run fits its ratio against the measured
+            # span — putting the map's degrees in the encoders' own units. The
+            # rest fall back to the config nominal. Ranges measured on the hand win over both.
+            rom = (hand.config.measured_joint_roms_dict.get(joint)
+                   or joint_roms_measured.get(joint) or hand.config.joint_roms_dict[joint])
+            delta_joint = rom[1] - rom[0]
+            joint_to_motor_ratios[motor_id] = float(delta_motor / delta_joint)
+            _report(
+                progress_callback,
+                "joint_calibrated",
+                logging.INFO,
+                "joint calibrated: %s",
+                joint,
+                joint=joint,
+                ratio=joint_to_motor_ratios[motor_id],
+            )
+            calibrated_joints[joint] = 0.0
+
+        if WRIST in calibrated_joints:
+            wrist_calibrated = True
+        # Partial progress is committed after every step so an interrupted run
+        # never loses the work already done.
+        commit_result()
+
+        if calibrated_joints and not manual:
+            hand.set_joint_positions(
+                calibrated_joints, num_steps=NUM_STEPS, step_size=STEP_SIZE
+            )
+
+        _emit(
+            progress_callback,
+            "step_done",
+            index=step_index,
+            total=len(calibration_sequence),
+        )
+        step_index += 1
+
+        # TODO(fracapuano): Is this necessary?
+        time.sleep(0.1)
+
+    # A pending anchor whose joint saw no extend step this run could not be
+    # sweep-validated; commit it so such sequences keep their anchors.
+    for joint, count in list(pending_anchors.items()):
+        _commit_anchor(
+            hand,
+            joint,
+            count,
+            joint_encoder_calibration=joint_encoder_calibration,
+            joints_to_anchor=joints_to_anchor,
+            progress_callback=progress_callback,
+        )
+    pending_anchors.clear()
+
+    drive_current_measured = {
+        joint: dict(per_direction)
+        for joint, per_direction in drive_state.drive_currents.items()
+        if joint in hand.config.joint_ids
+    }
+    final_result = commit_result(drive_current_measured)
+
+    if calibrated_joints and not manual:
+        hand.set_joint_positions(
+            calibrated_joints, num_steps=NUM_STEPS, step_size=STEP_SIZE
+        )
+
+    hand.set_max_current(hand.config.max_current)
+
+    if boosted_joints:
+        logger.warning(
+            "%d joint(s) needed a re-drive to reach their motor "
+            "travel baseline: %s. That is a symptom of over-tensioned tendons; "
+            "re-run tensioning if it persists.",
+            len(boosted_joints),
+            ", ".join(
+                f"{joint} @ {current:.0f} mA"
+                for joint, current in sorted(boosted_joints.items())
+            ),
+        )
+
+    # calibration.yaml keeps every joint's figure; the table shows only this run's.
+    measured_this_run = {
+        joint: per_direction for joint, per_direction in drive_current_measured.items()
+        if joint in drive_state.joints_measured
+    }
+    if measured_this_run:
+        table = _drive_current_table(hand, measured_this_run, previous_drive_currents)
+        logger.info(table)
+        _emit(progress_callback, "drive_currents_measured", table=table)
+
+    if saved_to:
+        logger.info("calibration written to %s", saved_to[0])
+    _emit(
+        progress_callback,
+        "calibration_done",
+        calibration_path=saved_to[0] if saved_to else None,
+        boosted_joints=dict(boosted_joints),
+        motor_travel_deg=dict(motor_travel_measured),
+        drive_current_ma=dict(drive_current_measured),
+        drive_current_previous_ma=dict(previous_drive_currents),
+        drive_current_measured_joints=sorted(measured_this_run),
+    )
+    return final_result
+
+
+def _redrive_joint(
+    hand: "OrcaHand",
+    joint: str,
+    motor_id: int,
+    *,
+    current: float,
+    state: _DriveState,
+    encoder_pass: Optional[_EncoderPass],
+    progress_callback: Optional[ProgressCallback],
+    should_stop: ShouldStop,
+) -> bool:
+    """Re-drive one joint onto both hardstops at ``current`` and re-take its limits.
+
+    The per-motor drive currents are restored before returning, however the
+    drive ended. Returns ``False`` if ``should_stop`` fired, leaving the
+    joint's limits incomplete.
+    """
+    state.pending_limits[motor_id] = [None, None]
+
+    # The stored anchor and measured ROM were sampled at the hardstops this
+    # re-drive is about to replace, so they are re-sampled alongside them. A
+    # re-drive that fails to commit a new anchor keeps the previous one, as
+    # everywhere else in this routine.
+    if encoder_pass is not None and joint in set(hand._encoder_backed_joints()):
+        encoder_pass.pending_anchors.pop(joint, None)
+        encoder_pass.joints_to_anchor.add(joint)
+
+    current_for = lambda _joint: current  # noqa: E731
+    try:
+        for direction in (FLEX, EXTEND):
+            if (
+                _drive_step(
+                    hand,
+                    step_joints={joint: direction},
+                    current_for=current_for,
+                    state=state,
+                    encoder_pass=encoder_pass,
+                    progress_callback=progress_callback,
+                    should_stop=should_stop,
+                )
+                is None
+            ):
+                return False
+    finally:
+        hand.set_max_current(_calibration_currents(hand))
+    return True
+
+
+def _resolve_short_travel(
+    hand: "OrcaHand",
+    joint: str,
+    motor_id: int,
+    *,
+    state: _DriveState,
+    encoder_pass: Optional[_EncoderPass],
+    motor_travel_measured: Dict[str, float],
+    boosted_joints: Dict[str, float],
+    progress_callback: Optional[ProgressCallback],
+    should_stop: ShouldStop,
+    manual: bool = False,
+) -> bool:
+    """Check the joint's motor travel against its baseline, re-driving if short.
+
+    An over-tensioned tendon makes the drive stall before the hardstop, so the
+    joint's two limits come out closer together than the spool geometry allows
+    and every angle derived from them is wrong. When the travel falls below
+    ``joint_motor_travel[joint]`` by more than ``calibration_travel_margin``,
+    the joint is re-driven — up to ``calibration_travel_retries`` attempts —
+    and the best travel achieved is kept. The drive is already at the motor's
+    own current ceiling, so a re-drive repeats it rather than pushing harder;
+    it earns its keep on a joint that was blocked or caught mid-drive. Travel *above* the baseline is reported but not re-driven: more
+    current cannot shorten a span, and the cause is a slipped tendon or a stale
+    baseline rather than tension.
+
+    Only v2.1 hardware is checked; on any other a single plain pass is kept.
+    A joint with no configured baseline is measured and left alone, as is a
+    motor whose torque the current cap does not govern. Returns ``False`` if
+    ``should_stop`` fired during a re-drive.
+    """
+    config = hand.config
+    measured = motor_travel_deg(state.pending_limits[motor_id])
+    motor_travel_measured[joint] = measured
+    if not config.uses_motor_travel:
+        return True
+    expected = config.expected_motor_travel_deg(joint)
+
+    if expected is None:
+        _report(
+            progress_callback,
+            "travel_baseline_missing",
+            logging.INFO,
+            "joint %s (motor %d) motor travel %.2f deg; no joint_motor_travel "
+            "baseline configured, so it was not checked",
+            joint,
+            motor_id,
+            measured,
+            joint=joint,
+            motor=motor_id,
+            travel_deg=measured,
+        )
+        return True
+
+    margin = config.calibration_travel_margin
+    lower, upper = expected * (1 - margin), expected * (1 + margin)
+    _emit(
+        progress_callback,
+        "travel_checked",
+        joint=joint,
+        motor=motor_id,
+        travel_deg=measured,
+        expected_deg=expected,
+        deviation=travel_deviation(measured, expected),
+        bounds_deg=[lower, upper],
+        within_margin=lower <= measured <= upper,
+    )
+
+    if measured > upper:
+        _report(
+            progress_callback,
+            "travel_excess",
+            logging.WARNING,
+            "joint %s (motor %d) travelled %.2f deg, %+.0f%% past the %.2f deg "
+            "baseline. Raising the current cannot shorten a span: check the "
+            "tendon for slip and the joint_motor_travel baseline for staleness.",
+            joint,
+            motor_id,
+            measured,
+            100 * travel_deviation(measured, expected),
+            expected,
+            joint=joint,
+            motor=motor_id,
+            travel_deg=measured,
+            expected_deg=expected,
+            deviation=travel_deviation(measured, expected),
+        )
+        return True
+
+    if measured >= lower:
+        logger.info(
+            "joint %s (motor %d) motor travel %.2f deg (%+.0f%% of the %.2f deg "
+            "baseline), within the %.0f%% margin",
+            joint,
+            motor_id,
+            measured,
+            100 * travel_deviation(measured, expected),
+            expected,
+            100 * margin,
+        )
+        return True
+
+    logger.warning(
+        "joint %s (motor %d) travelled only %.2f deg of the %.2f deg baseline "
+        "(%.0f%% short, margin %.0f%%); it stopped before its hardstop, which "
+        "an over-tensioned tendon does.",
+        joint,
+        motor_id,
+        measured,
+        expected,
+        -100 * travel_deviation(measured, expected),
+        100 * margin,
+    )
+
+    # A multi-turn wrist is PWM-limited: its mode ignores the current cap, so
+    # a re-drive would repeat the same drive with the same torque.
+    if _skips_torque_release(hand, motor_id):
+        _report(
+            progress_callback,
+            "travel_retry_unavailable",
+            logging.ERROR,
+            "joint %s (motor %d) travelled only %.2f deg of its %.2f deg "
+            "baseline. Its control mode ignores the current cap, so raising "
+            "the current cannot help: check the hardstop and the tendon.",
+            joint,
+            motor_id,
+            measured,
+            expected,
+            joint=joint,
+            motor=motor_id,
+            travel_deg=measured,
+            expected_deg=expected,
+        )
+        return True
+
+    # A joint at a few percent of its baseline did not travel and then stall;
+    # it never left its starting point. More current cannot free a motor that
+    # is blocked, unpowered, or disconnected from its tendon — it just drives
+    # a stalled motor harder, which is how the calibration current cooks a
+    # motor. Report and leave it to the operator.
+    if measured < expected * MIN_TRAVEL_FRACTION:
+        _report(
+            progress_callback,
+            "travel_retry_skipped",
+            logging.ERROR,
+            "joint %s (motor %d) travelled %.2f deg of its %.2f deg baseline "
+            "(under the %.0f%% floor): it did not move at all, so no "
+            "re-drive was attempted. Check that the motor "
+            "accepts torque, that the tendon is connected, and that nothing "
+            "is blocking the joint.",
+            joint,
+            motor_id,
+            measured,
+            expected,
+            100 * MIN_TRAVEL_FRACTION,
+            joint=joint,
+            motor=motor_id,
+            travel_deg=measured,
+            expected_deg=expected,
+            floor_deg=expected * MIN_TRAVEL_FRACTION,
+        )
+        return True
+
+    if manual or config.calibration_travel_retries < 1:
+        _report(
+            progress_callback,
+            "travel_retry_disabled",
+            logging.ERROR,
+            "joint %s (motor %d) is calibrated over a shortened range: %s, so "
+            "no re-drive was attempted.",
+            joint,
+            motor_id,
+            "this is a hand-held calibration and nothing is driven"
+            if manual else "calibration_travel_retries is 0",
+            joint=joint,
+            motor=motor_id,
+            travel_deg=measured,
+            expected_deg=expected,
+            reason="manual" if manual else "retries_disabled",
+        )
+        return True
+
+    best_limits = list(state.pending_limits[motor_id])
+    best_travel = measured
+
+    # The first pass already drove at the motor's own ceiling, so the retry
+    # ladder has nothing higher to escalate to: a re-drive repeats the drive
+    # at the same current, and must never drop below the first pass.
+    uncapped = _drive_currents(hand).get(motor_id)
+    if uncapped is not None and config.retry_current_for_attempt(
+            config.calibration_travel_retries, joint) <= uncapped:
+        logger.info(
+            "joint %s (motor %d) is re-driven at its %.0f mA ceiling: the "
+            "calibration drive is already uncapped, so the retry current ramp "
+            "has no higher current to reach for.",
+            joint, motor_id, uncapped,
+        )
+
+    top_current = max(config.retry_current_for_attempt(
+        config.calibration_travel_retries, joint), uncapped or 0.0)
+
+    for attempt in range(1, config.calibration_travel_retries + 1):
+        current = max(config.retry_current_for_attempt(attempt, joint),
+                      uncapped or 0.0)
+        _report(
+            progress_callback,
+            "travel_retry_started",
+            logging.WARNING,
+            "joint %s (motor %d) re-drive %d/%d at %.0f mA",
+            joint,
+            motor_id,
+            attempt,
+            config.calibration_travel_retries,
+            current,
+            joint=joint,
+            motor=motor_id,
+            attempt=attempt,
+            attempts=config.calibration_travel_retries,
+            current=current,
+            travel_deg=best_travel,
+            expected_deg=expected,
+        )
+
+        if not _redrive_joint(
+            hand,
+            joint,
+            motor_id,
+            current=current,
+            state=state,
+            encoder_pass=encoder_pass,
+            progress_callback=progress_callback,
+            should_stop=should_stop,
+        ):
+            # Aborted mid-re-drive: restore the best limits seen so the run's
+            # partial results stay usable rather than half-captured.
+            state.pending_limits[motor_id] = best_limits
+            motor_travel_measured[joint] = best_travel
+            return False
+
+        retried = motor_travel_deg(state.pending_limits[motor_id])
+        if retried is None:
+            # The re-drive lost a bound (a failed release or offset command);
+            # the previous attempt's limits are the better record.
+            state.pending_limits[motor_id] = list(best_limits)
+            continue
+        if retried > best_travel:
+            best_travel, best_limits = retried, list(state.pending_limits[motor_id])
+
+        if retried >= lower:
+            motor_travel_measured[joint] = retried
+            boosted_joints[joint] = current
+            _report(
+                progress_callback,
+                "travel_retry_succeeded",
+                logging.WARNING,
+                "joint %s (motor %d) reached %.2f deg of its %.2f deg baseline "
+                "on re-drive %d at %.0f mA (was %.2f deg); calibrated from the "
+                "re-driven limits",
+                joint,
+                motor_id,
+                retried,
+                expected,
+                attempt,
+                current,
+                measured,
+                joint=joint,
+                motor=motor_id,
+                attempt=attempt,
+                current=current,
+                travel_deg=retried,
+                expected_deg=expected,
+                deviation=travel_deviation(retried, expected),
+            )
+            return True
+
+        logger.warning(
+            "joint %s (motor %d) still only %.2f deg of %.2f deg after re-drive "
+            "%d/%d at %.0f mA",
+            joint,
+            motor_id,
+            retried,
+            expected,
+            attempt,
+            config.calibration_travel_retries,
+            current,
+        )
+
+    state.pending_limits[motor_id] = list(best_limits)
+    motor_travel_measured[joint] = best_travel
+    if best_travel > measured:
+        boosted_joints[joint] = top_current
+    _report(
+        progress_callback,
+        "travel_retry_exhausted",
+        logging.ERROR,
+        "joint %s (motor %d) never reached its %.2f deg baseline: best %.2f deg "
+        "after %d re-drive(s) up to %.0f mA. The joint is calibrated over a "
+        "shortened range - slacken the tendon, check the hardstop, or update "
+        "the joint_motor_travel baseline.",
+        joint,
+        motor_id,
+        expected,
+        best_travel,
+        config.calibration_travel_retries,
+        top_current,
+        joint=joint,
+        motor=motor_id,
+        attempts=config.calibration_travel_retries,
+        travel_deg=best_travel,
+        expected_deg=expected,
+        deviation=travel_deviation(best_travel, expected),
+    )
+    return True
+
+
+def _commit_anchor(
+    hand: "OrcaHand",
+    joint: str,
+    anchor_count: int,
+    *,
+    joint_encoder_calibration: Dict[str, JointEncoderCal],
+    joints_to_anchor: set,
+    progress_callback: Optional[ProgressCallback],
+) -> None:
+    joint_encoder_calibration[joint] = JointEncoderCal(
+        enc_at_anchor_count=anchor_count,
+    )
+    joints_to_anchor.discard(joint)
+    anchor_angle_deg = float(hand.config.joint_roms_dict[joint][1])
+    _report(
+        progress_callback,
+        "encoder_anchor_recorded",
+        logging.INFO,
+        "joint %s encoder anchor sampled: anchor_count=%d (at ROM upper %.2f deg)",
+        joint,
+        anchor_count,
+        anchor_angle_deg,
+        joint=joint,
+        anchor_count=anchor_count,
+        anchor_angle_deg=anchor_angle_deg,
+    )
+
+
+def _commit_measured_rom(
+    hand: "OrcaHand",
+    joint: str,
+    span_deg: float,
+    *,
+    flex_count: int,
+    extend_count: int,
+    joint_roms_measured: Dict[str, list],
+    progress_callback: Optional[ProgressCallback],
+) -> None:
+    """Record the ROM implied by an encoder-measured hardstop-to-hardstop span.
+
+    The anchor pose — the flex hardstop, held to be the config ROM upper — is
+    the fixed reference of the encoder frame, so the measured span places the
+    lower endpoint and the upper carries through unchanged. A span implying a
+    lower endpoint too far from nominal is rejected, leaving the joint on its
+    config ROM.
+
+    Both events carry the raw magnet counts sampled at the two hardstops
+    (``flex_count``/``extend_count``) so successive calibrations can be
+    compared for magnet drift.
+    """
+    rom_lower, rom_upper = hand.config.joint_roms_dict[joint]
+    measured_lower = rom_upper - span_deg
+    deviation = measured_lower - rom_lower
+
+    if abs(deviation) > MEASURED_ROM_REJECT_TOL_DEG:
+        joint_roms_measured.pop(joint, None)
+        _report(
+            progress_callback,
+            "measured_rom_rejected",
+            logging.WARNING,
+            "joint %s measured span %.2f deg puts its lower hardstop %+.2f deg "
+            "from the configured %.2f deg, beyond the %.1f deg limit; keeping "
+            "the configured ROM. Check the hardstop, the encoder wiring, and "
+            "the configured ROM.",
+            joint,
+            span_deg,
+            deviation,
+            rom_lower,
+            MEASURED_ROM_REJECT_TOL_DEG,
+            joint=joint,
+            span_deg=span_deg,
+            deviation_deg=deviation,
+            flex_count=flex_count,
+            extend_count=extend_count,
+        )
+        return
+
+    if abs(deviation) > MEASURED_ROM_WARN_TOL_DEG:
+        logger.warning(
+            "joint %s measured span %.2f deg puts its lower hardstop %+.2f deg "
+            "from the configured %.2f deg",
+            joint,
+            span_deg,
+            deviation,
+            rom_lower,
+        )
+
+    joint_roms_measured[joint] = [float(measured_lower), float(rom_upper)]
+    _report(
+        progress_callback,
+        "measured_rom_recorded",
+        logging.INFO,
+        "joint %s measured ROM: [%.2f, %.2f] deg (span %.2f, %+.2f deg vs config)",
+        joint,
+        measured_lower,
+        rom_upper,
+        span_deg,
+        deviation,
+        joint=joint,
+        rom=[float(measured_lower), float(rom_upper)],
+        deviation_deg=deviation,
+        flex_count=flex_count,
+        extend_count=extend_count,
+    )
+
+
+def _run_joint_encoder_pass_for_step(
+    hand: "OrcaHand",
+    *,
+    step_joints: Dict[str, str],
+    directions: Dict[int, int],
+    encoder_pass: _EncoderPass,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> None:
+    """Sample and sweep-validate anchor counts for the joints in a step.
+
+    A FLEX-direction joint still awaiting an anchor is sampled at its flex
+    hardstop into ``pending_anchors``; its later EXTEND step samples the
+    opposite hardstop and commits the anchor only when the two counts differ
+    by a meaningful fraction of the ROM span. A dead or unwired slot reads a
+    constant and is rejected — including any previously stored anchor for it.
+    The caller must hold the step's motors torqued at their hardstops. A
+    failed sample keeps the previously persisted anchor.
+
+    The same pair of hardstop samples measures the joint's actual travel, so a
+    committed anchor also commits a measured ROM (see
+    :func:`_commit_measured_rom`).
+    """
+    from ..hardware.sensing.constants import JOINT_TO_ENCODER_SLOT
+
+    joints_to_anchor = encoder_pass.joints_to_anchor
+    pending_anchors = encoder_pass.pending_anchors
+    joint_encoder_calibration = encoder_pass.joint_encoder_calibration
+    joint_roms_measured = encoder_pass.joint_roms_measured
+    joint_encoder_client = encoder_pass.client
+
+    encoder_backed = set(hand._encoder_backed_joints())
+
+    for joint, direction in step_joints.items():
+        if joint not in encoder_backed:
+            continue
+        slot = JOINT_TO_ENCODER_SLOT[joint]
+        motor_id = hand.config.joint_to_motor_map.get(joint)
+        if motor_id is None or motor_id not in directions:
+            continue
+
+        if direction == FLEX and joint in joints_to_anchor:
+            try:
+                pending_anchors[joint] = int(
+                    sample_anchor_count_from_client(joint_encoder_client, slot=slot)
+                )
+            except JointEncoderCalibrationError as e:
+                _report(
+                    progress_callback,
+                    "encoder_anchor_failed",
+                    logging.WARNING,
+                    "encoder anchor sample failed for joint %s: %s",
+                    joint,
+                    e,
+                    joint=joint,
+                    error=str(e),
+                )
+        elif direction == EXTEND and joint in pending_anchors:
+            try:
+                extend_count = int(
+                    sample_anchor_count_from_client(joint_encoder_client, slot=slot)
+                )
+            except JointEncoderCalibrationError as e:
+                pending_anchors.pop(joint)
+                _report(
+                    progress_callback,
+                    "encoder_anchor_failed",
+                    logging.WARNING,
+                    "encoder sweep check failed for joint %s: %s",
+                    joint,
+                    e,
+                    joint=joint,
+                    error=str(e),
+                )
+                continue
+
+            rom_lower, rom_upper = hand.config.joint_roms_dict[joint]
+            expected = (rom_upper - rom_lower) * ENCODER_COUNTS_PER_REV / 360.0
+            threshold = max(
+                MIN_ANCHOR_SWEEP_COUNTS, MIN_ANCHOR_SWEEP_FRACTION * expected
+            )
+            delta = _count_delta(pending_anchors[joint], extend_count)
+            if delta < threshold:
+                pending_anchors.pop(joint)
+                # A slot proven dead now also invalidates any stored anchor and
+                # the measured ROM derived from the same samples.
+                joint_encoder_calibration.pop(joint, None)
+                joint_roms_measured.pop(joint, None)
+                _report(
+                    progress_callback,
+                    "encoder_anchor_failed",
+                    logging.WARNING,
+                    "joint %s encoder slot %d did not track the calibration "
+                    "sweep (%d of ~%d expected counts); no anchor recorded",
+                    joint,
+                    slot,
+                    delta,
+                    int(expected),
+                    joint=joint,
+                    error=f"slot {slot} did not track the sweep ({delta} of "
+                        f"~{int(expected)} expected counts) — encoder dead or "
+                        "unwired; joint stays open-loop",
+                )
+                continue
+
+            flex_count = pending_anchors[joint]
+            _commit_anchor(
+                hand,
+                joint,
+                pending_anchors.pop(joint),
+                joint_encoder_calibration=joint_encoder_calibration,
+                joints_to_anchor=joints_to_anchor,
+                progress_callback=progress_callback,
+            )
+            # The two hardstop samples that validated the anchor also measure
+            # the joint's actual travel. The span is wrap-aware and unsigned,
+            # so it is independent of the slot's mounting polarity.
+            _commit_measured_rom(
+                hand,
+                joint,
+                delta * ENCODER_LSB_DEG,
+                flex_count=flex_count,
+                extend_count=extend_count,
+                joint_roms_measured=joint_roms_measured,
+                progress_callback=progress_callback,
+            )

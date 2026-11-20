@@ -1,0 +1,387 @@
+"""Constants for ORCA tactile sensing and joint encoders."""
+
+# ---------------------------------------------------------------------------
+# Baud-rate defaults (the motor-bus default lives in orca_core/constants.py)
+# ---------------------------------------------------------------------------
+
+DEFAULT_SENSOR_BAUDRATE = 921600
+"""Tactile link on its own adapter; the ``sensors.baudrate`` config key overrides."""
+
+DEFAULT_ENCODER_BAUDRATE = 2_000_000
+"""Joint-encoder link, also carrying tactile when both share one port; the
+``encoder_baudrate`` config key overrides."""
+
+# ---------------------------------------------------------------------------
+# Serial discovery
+# ---------------------------------------------------------------------------
+
+FTDI_VID = 0x0403
+"""USB vendor ID for FTDI USB-serial adapters, used as a discovery fallback
+(see serial_discovery.detect_encoder_stream)."""
+
+# ---------------------------------------------------------------------------
+# Client configuration defaults
+# ---------------------------------------------------------------------------
+
+VALID_SENSOR_IDS = set(range(5))
+DEFAULT_SENSOR_PORT = "auto"
+DEFAULT_FINGER_TO_SENSOR_ID = {
+    "thumb": 0, "index": 1, "middle": 2, "ring": 3, "pinky": 4,
+}
+
+# Default taxel counts per finger (must match sensor model configs)
+DEFAULT_TAXEL_COUNTS = {
+    "thumb": 51, "index": 87, "middle": 87, "ring": 87, "pinky": 51,
+}
+
+# Paxini part number of the fingertip each finger carries; the sensor reports
+# it in its name string (connector-board slot identity registers).
+FINGER_SENSOR_PART = {
+    "thumb": "PXSR-CMDDP18A",
+    "index": "PXSR-CMDDP18B",
+    "middle": "PXSR-CMDDP18B",
+    "ring": "PXSR-CMDDP18B",
+    "pinky": "PXSR-CMDDP18C",
+}
+
+# Sensor model (taxel-geometry YAML under sensing/models/) per finger.
+FINGER_MODELS = {
+    "thumb": "touch-sensor-thumb",
+    "index": "touch-sensor-finger",
+    "middle": "touch-sensor-finger",
+    "ring": "touch-sensor-finger",
+    "pinky": "touch-sensor-pinky",
+}
+
+# ---------------------------------------------------------------------------
+# Protocol wire format (shared between I/O layer and codec)
+# ---------------------------------------------------------------------------
+
+PROTOCOL_HEADER_REQUEST = bytes([0x55, 0xAA])
+PROTOCOL_HEADER_RESPONSE = bytes([0xAA, 0x55])
+PROTOCOL_HEADER_AUTO = bytes([0xAA, 0x56])
+PROTOCOL_RESERVED = 0x00
+FUNC_CODE_READ = 0x03
+FUNC_CODE_WRITE = 0x10
+
+# Frame-type tag
+PROTOCOL_BYTE_RESPONSE = PROTOCOL_HEADER_RESPONSE[1]  # 0x55
+PROTOCOL_BYTE_AUTO = PROTOCOL_HEADER_AUTO[1]          # 0x56
+
+# ---------------------------------------------------------------------------
+# Register addresses (used by tactile_client for read/write targets)
+# ---------------------------------------------------------------------------
+
+ADDR_CONNECTED_SENSORS_START = 0x0010
+ADDR_CONNECTED_SENSORS_LENGTH = 4
+ADDR_NUM_TAXELS_START = 0x0030
+ADDR_NUM_TAXELS_LENGTH = 56
+ADDR_RESULTANT_FORCE_START = 0x0500
+RESULTANT_BLOCK_SIZE = 168
+ADDR_AUTO_DATA_TYPE = 0x0016
+ADDR_AUTO_ENABLE = 0x0017
+
+# Version string (Paxini's VERSION_MSG): connector firmware before 1.0 reads
+# zeros, newer reads "ORCA<major>.<minor><-|+><commit>", a Paxini board its own.
+ADDR_VERSION = 0x0000
+VERSION_LENGTH = 16
+VERSION_PREFIX_ORCA = "ORCA"
+ADDR_RESET = 0x0022
+# Connector firmware 1.0+: Paxini's error report layout plus ORCA counters.
+ADDR_TOTAL_ERROR = 0x0023
+ADDR_MODULE_ERRORS = 0x0700
+MODULE_ERRORS_LENGTH = 56
+ADDR_SLOT_COUNTERS = 0x6480
+SLOT_COUNTER_STRIDE = 16
+FINGERTIP_ERROR_GONE = 0x01
+FINGERTIP_ERROR_RESULTANT_READ = 0x02
+FINGERTIP_ERROR_TAXEL_READ = 0x04
+# First connector firmware with sensor-side zeroing, the error report and 32-byte slot names.
+CONNECTOR_FIRMWARE_1_0 = (1, 0)
+# The board takes this long to reboot and answer again (measured ~70 ms).
+BOARD_REBOOT_TIMEOUT_S = 1.0
+# Wait before the first read after a reset: the board reboots 50 ms after acking it.
+BOARD_REBOOT_SETTLE_S = 0.1
+# Host-link stat counters, cleared by a reboot; the first u32 counts received requests.
+ADDR_BOARD_STATS = 0x6400
+ADDR_BOARD_STATS_LEGACY = 0x0700
+
+# Register write values
+REGISTER_ENABLE = bytes([0x01])
+REGISTER_DISABLE = bytes([0x00])
+
+# ORCA extension registers of the connector board (unused by Paxini's map).
+# Firmware without them reads zeros here, so EXT_ID gates everything below.
+ADDR_EXT_ID = 0x6100
+EXT_ID_LENGTH = 4
+EXT_ID_MAGIC = b"OX"
+EXT_CAP_FINGERTIP_NUMBERING = 0x01
+EXT_CAP_SLOT_IDENTITY = 0x02
+EXT_CAP_NUMBERING_SET_AT = 0x04
+ADDR_NUMBERING_COMMAND = 0x6110
+ADDR_NUMBERING_STATUS = 0x6120
+NUMBERING_STATUS_LENGTH = 16
+ADDR_NUMBERING_IDENTITY = 0x6130
+ADDR_NUMBERING_RAW_REPLY = 0x6150
+ADDR_SLOT_IDENTITY_START = 0x6200
+SLOT_IDENTITY_STRIDE = 0x20
+SLOT_IDENTITY_LENGTH = 24
+SLOT_IDENTITY_LENGTH_1_0 = 32
+NUMBERING_OP_SCAN = 0x01
+NUMBERING_OP_SET = 0x02
+NUMBERING_OP_SET_AT = 0x03
+NUMBERING_OP_ZERO = 0x04
+NUMBERING_SET_KEY = b"MN"
+ZERO_KEY = b"ZR"
+# Per-fingertip outcome of a sensor zero: the fingertip's reply status (0 = took it) or these.
+ZERO_BAD_REPLY = 0xFE
+ZERO_NO_REPLY = 0xFF
+NUMBERING_MAX_MODULE = 5
+# No finger reads this number, so a fingertip can wait on it while others are swapped.
+NUMBERING_SPARE_MODULE = 5
+
+# ---------------------------------------------------------------------------
+# Codec internals (used by protocol.py decoders)
+# ---------------------------------------------------------------------------
+
+# Auto data type bitmasks
+AUTO_DATA_RESULTANT = 0x01
+AUTO_DATA_TAXELS = 0x02
+
+# Force resolution
+RESOLUTION_N_PER_LSB = 0.1
+
+# Decimal places to round returned force values to (matches RESOLUTION_N_PER_LSB granularity).
+FORCE_ROUND_DECIMALS = 1
+
+# Highest resultant fz the wire carries (one unsigned byte); a press past it still reads this.
+RESULTANT_FZ_CEILING_N = round(255 * RESOLUTION_N_PER_LSB, FORCE_ROUND_DECIMALS)
+
+# Decimal places for averaged zeroing offsets: finer than the sensor's 0.1 N
+# resolution to avoid bias; subtracted forces still round to FORCE_ROUND_DECIMALS.
+OFFSET_CAPTURE_DECIMALS = 2
+
+# Headroom on each taxel's measured dither when it becomes a noise gate. The
+# capture window is a few seconds, so its worst observed excursion is not the
+# taxel's worst: sizing a gate at exactly that still leaves the noisiest taxels
+# flickering, always the same ones within a run. The scale is multiplicative on
+# purpose — it widens noisy taxels without costing quiet ones any sensitivity.
+# These are the knobs to turn if dither still shows through after zeroing.
+NOISE_GATE_SCALE = 1.5
+NOISE_GATE_MARGIN_N = RESOLUTION_N_PER_LSB
+
+# Byte sizes per data element
+BYTES_PER_RESULTANT = 6  # 3 axes × 2-byte slot (low byte = data, high byte = padding)
+BYTES_PER_TAXEL = 3      # fx(int8) + fy(int8) + fz(uint8)
+
+# Frame metadata sizes
+RESPONSE_META_SIZE = 6
+"""Bytes between response header and variable data: reserved(1) + func(1) + addr(2) + count/nbytes(2)."""
+
+AUTO_FRAME_META_SIZE = 3
+"""Bytes between auto-stream header and payload: reserved(1) + effective_length(2)."""
+
+# Minimum valid frame sizes
+MIN_READ_RESPONSE_SIZE = 9
+"""Minimum valid read response frame: header(2) + meta(6) + LRC(1)."""
+
+MIN_WRITE_RESPONSE_SIZE = 9
+"""Minimum valid write response frame: header(2) + meta(6) + LRC(1)."""
+
+# Maximum valid effective frame length in auto-stream frames.
+# Typical payloads are 6-200 bytes; this guards against corrupted effective_length fields.
+MAX_AUTO_FRAME_EFFECTIVE_LENGTH = 8192
+
+# Same bound applied to the ``count`` field in AA 55 register responses — a
+# higher value is treated as corruption rather than a multi-megabyte read.
+MAX_RESPONSE_DATA_LEN = MAX_AUTO_FRAME_EFFECTIVE_LENGTH
+
+# Register block structure
+MODULES_PER_SLOT = 4
+"""Modules per sensor slot in the resultant force register block (proximal, middle, distal, nail)."""
+
+DISTAL_MODULE_OFFSET = 2
+"""Offset of the distal phalanx module within a slot's module group."""
+
+# Slot bit positions (byte_idx, bit_pos) in the connected-sensors register.
+# Hardware-fixed; finger mapping is applied on top via finger_to_sensor_id.
+SLOT_CONNECTED_BIT_POSITIONS = [(0, 2), (0, 6), (1, 2), (1, 6), (2, 2)]
+
+# Register address per slot for distal-phalanx taxel count. Hardware-fixed.
+SLOT_DISTAL_TAXEL_REGISTER_OFFSETS = [0x0034, 0x003C, 0x0044, 0x004C, 0x0054]
+
+# ---------------------------------------------------------------------------
+# Encoder auto-stream
+# ---------------------------------------------------------------------------
+
+PROTOCOL_HEADER_AUTO_ENC = bytes([0xAA, 0xA9])
+PROTOCOL_BYTE_AUTO_ENC = PROTOCOL_HEADER_AUTO_ENC[1]  # 0xA9
+
+AUTO_ENC_NUM_JOINTS = 17
+"""16 finger-joint encoders + 1 wrist slot"""
+
+AUTO_ENC_PAYLOAD_BYTES = AUTO_ENC_NUM_JOINTS * 2
+AUTO_ENC_PAYLOAD_OFFSET = 6
+"""Byte offset to the joint payload (past header + reserved + effective_length + error_byte)."""
+
+AUTO_ENC_EFFECTIVE_LENGTH = 1 + AUTO_ENC_PAYLOAD_BYTES
+"""Value of the effective_length field for a valid encoder frame: error byte + payload."""
+
+AUTO_ENC_FRAME_SIZE = AUTO_ENC_PAYLOAD_OFFSET + AUTO_ENC_PAYLOAD_BYTES + 1
+"""Wire size: header(2) + reserved(1) + effective_length(2) + error_byte(1) + payload + LRC(1)."""
+
+# Per-joint u16 layout in the encoder payload
+AUTO_ENC_PARITY_BIT = 1 << 15
+AUTO_ENC_ANGLE_ERROR_BIT = 1 << 14
+AUTO_ENC_ANGLE_MASK = 0x3FFF
+
+# Encoder hardware properties (14-bit absolute rotary encoder)
+ENCODER_COUNTS_PER_REV = 16384
+ENCODER_LSB_DEG = 360.0 / ENCODER_COUNTS_PER_REV
+
+# Joint name → encoder slot.
+JOINT_TO_ENCODER_SLOT = {
+    "thumb_dip":  0, "thumb_mcp":  1, "thumb_abd":  2, "thumb_cmc":  3,
+    "index_pip":  4, "index_mcp":  5, "index_abd":  6,
+    "middle_pip": 7, "middle_mcp": 8, "middle_abd": 9,
+    "ring_pip":  10, "ring_mcp":  11, "ring_abd":  12,
+    "pinky_pip": 13, "pinky_mcp": 14, "pinky_abd": 15,
+    "wrist":     16,
+}
+ENCODER_SLOT_TO_JOINT = {v: k for k, v in JOINT_TO_ENCODER_SLOT.items()}
+
+# Sentinel for ``config.joint_encoder_joints``: a single ``"all"`` entry selects every
+# slotted, motor-driven joint (the sensing-hand default); an explicit list narrows it.
+ENCODER_JOINTS_ALL = "all"
+
+# Per-joint encoder polarity, fixed by encoder mounting + magnet orientation:
+# +1 when raw counts rise as the joint moves toward its flex hardstop (ROM upper,
+# where the calibration anchor is sampled). Measured per side on hardware.
+JOINT_ENCODER_POLARITY = {
+    "thumb_cmc": -1, "thumb_abd": -1, "thumb_mcp": 1, "thumb_dip": -1,
+    "index_abd": 1, "index_mcp": 1, "index_pip": -1,
+    "middle_abd": 1, "middle_mcp": 1, "middle_pip": -1,
+    "ring_abd": 1, "ring_mcp": 1, "ring_pip": -1,
+    "pinky_abd": 1, "pinky_mcp": 1, "pinky_pip": -1,
+    "wrist": -1,
+}
+
+# The mirrored assembly flips the abduction-type axes (thumb_cmc, thumb_abd and
+# every finger abd) and leaves the flexion axes and the wrist alone.
+JOINT_ENCODER_POLARITY_LEFT = {
+    "thumb_cmc": 1, "thumb_abd": 1, "thumb_mcp": 1, "thumb_dip": -1,
+    "index_abd": -1, "index_mcp": 1, "index_pip": -1,
+    "middle_abd": -1, "middle_mcp": 1, "middle_pip": -1,
+    "ring_abd": -1, "ring_mcp": 1, "ring_pip": -1,
+    "pinky_abd": -1, "pinky_mcp": 1, "pinky_pip": -1,
+    "wrist": -1,
+}
+
+# Polarity tables by hand side; a side is absent until its table is measured
+# on hardware, so an unrecognised 'type:' never decodes with borrowed signs.
+JOINT_ENCODER_POLARITY_BY_SIDE = {
+    "right": JOINT_ENCODER_POLARITY,
+    "left": JOINT_ENCODER_POLARITY_LEFT,
+}
+
+
+def joint_encoder_polarity_for_side(side):
+    """Per-joint encoder polarity table for hands of ``side``.
+
+    Raises ``ValueError`` for sides without a measured table, so closed-loop
+    consumers fail loudly instead of decoding with wrong signs.
+    """
+    try:
+        return JOINT_ENCODER_POLARITY_BY_SIDE[side]
+    except KeyError:
+        raise ValueError(
+            f"hand side {side!r} (config field 'type') has no validated "
+            f"joint-encoder polarity table, so encoder angles cannot be "
+            f"decoded. Set 'type:' in config.yaml to one of "
+            f"{sorted(JOINT_ENCODER_POLARITY_BY_SIDE)}."
+        ) from None
+
+# Slots the production hand ships with encoders wired (all 17, wrist included).
+# Diagnostics treat a stuck slot outside this set as reserved rather than faulty.
+EXPECTED_ENCODER_SLOTS = frozenset(range(17))
+
+# ---------------------------------------------------------------------------
+# Hand serial link
+# ---------------------------------------------------------------------------
+
+LINK_RESPONSE_QUEUE_MAXSIZE = 4
+LINK_DEMUX_READ_TIMEOUT_S = 0.5
+"""Serial-port read timeout. Bounds how long the demuxer waits before re-checking
+its run flag, so disconnect joins promptly."""
+
+LINK_READ_CHUNK_BYTES = 4096
+"""Most bytes the demuxer takes per read. It reads whatever has arrived, so a busy
+process costs it one thread switch per batch of frames, not one per byte."""
+
+LINK_HANDLER_ERROR_LOG_INTERVAL_S = 1.0
+"""Per-second-byte rate limit for handler-exception traceback logging."""
+
+LINK_DEFAULT_BAUDRATE = DEFAULT_ENCODER_BAUDRATE
+"""Transport default for ``HandSerialLink`` when no explicit baud is given."""
+
+LINK_DEFAULT_RESPONSE_TIMEOUT_S = 0.5
+"""Default wait for a register response before ``send_register_request`` raises."""
+
+TACTILE_REGISTER_ATTEMPTS = 5
+"""Times a tactile register read/write is attempted before giving up. A single
+round-trip is occasionally lost on a busy link; retrying recovers it. Reads are
+pure and the register writes are idempotent, so re-sending is safe."""
+
+TACTILE_PORT_OPEN_SETTLE_S = 2.0
+"""Pause after opening a fresh tactile serial link before the first register
+request. Some USB-CDC sensor adapters reset on DTR assertion (the underlying
+effect of opening the port), and a register request sent before that reset
+finishes gets no reply — this loses the race with
+:data:`TACTILE_REGISTER_ATTEMPTS`'s retries often enough to matter."""
+
+LINK_DEMUX_JOIN_TIMEOUT_S = 1.0
+"""How long ``disconnect`` waits for the demuxer thread to exit."""
+
+ENCODER_FIRST_FRAME_TIMEOUT_S = 0.1
+"""How long ``JointEncoderClient.start_stream`` waits for the first valid
+AA A9 frame before raising ``EncodersNotAvailableError``."""
+
+ENCODER_FILTER_CUTOFF_HZ = 5.0
+"""Cutoff of the low-pass ``JointEncoderClient`` applies to the count stream.
+Only display and monitoring consumers see this — the control loop and the
+calibration sweep read the unfiltered stream."""
+
+ENCODER_FRAME_PERIOD_S = 0.002
+"""Nominal spacing of encoder frames (the board streams at about 466 Hz). The
+low-pass assumes it when a coarse clock stamps consecutive frames identically
+and no measured interval is known yet."""
+
+# ---------------------------------------------------------------------------
+# Auto-stream timing
+# ---------------------------------------------------------------------------
+
+# One auto-stream period @ ~1 kHz. Used after clearing offsets so the reader
+# emits at least one fresh frame before averaging.
+OFFSET_CLEAR_SETTLE_S = 0.01
+
+# After a sensor zero: the next fingertip poll (<= 20 ms) carries it and the
+# next 50 Hz AA 56 frame streams it; wait a little past both before capturing.
+SENSOR_ZERO_SETTLE_S = 0.06
+
+OFFSET_CAPTURE_POLL_S = 0.002
+"""Poll interval while collecting frames to average into zeroing offsets."""
+
+OFFSET_CAPTURE_FRAME_BUDGET_S = 0.05
+"""Slowest per-frame budget assumed when deriving the default offset-capture
+deadline; well above any real stream period so healthy captures never trip it."""
+
+TACTILE_FIRST_FRAME_TIMEOUT_S = 2.0
+"""Default wait for the first stored tactile frame in ``wait_for_first_frame``."""
+
+TACTILE_STREAM_STALE_REARM_S = 2.0
+"""Mid-stream silence (seconds) after which a read triggers a stream re-arm.
+"""
+
+TACTILE_STREAM_REARM_MIN_INTERVAL_S = 5.0
+"""Minimum spacing between re-arm attempts, so a genuinely dead device can't
+cause a register-write retry storm from a fast reader loop."""

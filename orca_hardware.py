@@ -92,8 +92,25 @@ Ahora:
 La interfaz NO cambia: conectar(), enviar_posiciones(array), desconectar() y el
 atributo .conectado. Nuevo: estado_real() para leer la mano (lo usa
 diagnostico_mano_real.py).
+
+SIN TIRONES AL CONECTAR / DESCONECTAR Y ORCA_CORE 0.14 (20-nov)
+---------------------------------------------------------------
+  · Conectar: init_joints(move_to_neutral=False). Antes iba a la neutra en 0,5 s y (orca_core
+    viejo) en modo POSITION, sin límite de corriente, con tres cortes de par; y al volver a
+    current_based_position el Dynamixel resetea Goal Current a Current Limit: la mano iba sin
+    el max_current del config.yaml (probable causa de las sobrecargas del motor 15). Ahora la
+    mano se queda donde está, se reescribe max_current y el primer movimiento va despacio
+    (ORCA_HW_ARRANQUE_S / ORCA_HW_VEL_LENTA / ORCA_HW_ACEL_LENTA).
+  · Desconectar: a la neutra por el propio hilo, despacio, y luego se quita el par (antes:
+    set_neutral_position en 0,12 s).
+  · thumb_mcp (motor 15) sin sobrecarrera por defecto (ORCA_HW_SOBRECARRERA_JOINT).
+  · Funciona con el orca_core viejo y con el 0.14: config.yaml y calibration.yaml de la mano en
+    orca_mano/ (fuera del SDK; los copia actualizar_orca_core.sh), calibración pasada siempre
+    con calibration_path (crear_orcahand), lectura de corrientes con la API nueva o la vieja y,
+    con 0.14, poll_faults() cada ORCA_HW_FALLOS_CADA_S (ya no reinicia solo los motores).
 """
 
+import inspect
 import math
 import os
 import sys
@@ -108,9 +125,32 @@ _ORCA_CORE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "orca
 if _ORCA_CORE_PATH not in sys.path:
     sys.path.insert(0, _ORCA_CORE_PATH)
 
-_CONFIG_PATH = os.path.join(
+# config.yaml + calibration.yaml de TU mano. Desde el 20-nov viven FUERA del SDK, en orca_mano/,
+# para poder cambiar de versión de orca_core sin perderlos (actualizar_orca_core.sh los copia
+# ahí). Si orca_mano/ aún no existe, se usan los de dentro del orca_core viejo (como antes).
+_MANO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "orca_mano")
+_CONFIG_SDK_VIEJO = os.path.join(
     _ORCA_CORE_PATH, "orca_core", "models", "v2", "orcahand_right", "config.yaml"
 )
+_CONFIG_PATH = (os.path.join(_MANO_DIR, "config.yaml")
+                if os.path.isfile(os.path.join(_MANO_DIR, "config.yaml")) else _CONFIG_SDK_VIEJO)
+
+
+def ruta_calibracion(config_path=None):
+    """calibration.yaml que va con un config.yaml: el de su misma carpeta."""
+    return os.path.join(os.path.dirname(os.path.abspath(config_path or _CONFIG_PATH)),
+                        "calibration.yaml")
+
+
+def crear_orcahand(clase=None, config_path=None):
+    """OrcaHand con NUESTRO config.yaml y NUESTRO calibration.yaml, en cualquier versión de
+    orca_core. La 0.14 ya no busca la calibración junto al config.yaml (la guardaría en
+    ~/.orca/hands/… y, al no encontrarla, init_joints() recalibraría la mano entera), así que
+    se le pasa siempre la ruta. Con la versión vieja es lo mismo que hacía por defecto."""
+    if clase is None:
+        from orca_core import OrcaHand as clase
+    ruta = config_path or _CONFIG_PATH
+    return clase(config_path=ruta, calibration_path=ruta_calibracion(ruta))
 
 # ── Parámetros de fluidez: se leen de config.py; si no existen, estos valores ──
 try:
@@ -210,6 +250,9 @@ class OrcaHardwareWrapper:
     # Sentido del ángulo sim (MJCF) → orca_core. Ver cabecera, punto 1: en tu mano, igual.
     SIGNOS_DEFECTO = {}
 
+    # Sobrecarrera por articulación (config.ORCA_HW_SOBRECARRERA_JOINT la sustituye entera)
+    SOBRECARRERA_JOINT_DEFECTO = {"thumb_mcp": 0.0}
+
     # Rangos de las articulaciones en el MJCF de la OrcaHand v2 derecha (grados), para
     # comprobar que los joint_roms del config.yaml del SDK dicen lo mismo (cabecera, 2b).
     RANGO_MJCF_DEG = {
@@ -277,6 +320,26 @@ class OrcaHardwareWrapper:
         self.fiel = (min(max(float(fiel[0]), 0.05), 0.9), min(max(float(fiel[1]), 0.1), 0.95))
         self.sobrecarrera      = max(0.0, float(_param("ORCA_HW_SOBRECARRERA_DEG", 4.0)))
         self.sobrecarrera_ext  = max(0.0, float(_param("ORCA_HW_SOBRECARRERA_EXT_DEG", 0.0)))
+        # Sobrecarrera por articulación (grados, como máximo la general). Por defecto el pulgar
+        # (thumb_mcp, motor 15) va sin sobrecarrera: empujaba contra su tope hasta la sobrecarga.
+        self.sobrecarrera_joint = dict(_param("ORCA_HW_SOBRECARRERA_JOINT",
+                                              self.SOBRECARRERA_JOINT_DEFECTO))
+        # Arranque suave (20-nov): los primeros segundos tras conectar, la mano va despacio
+        # hacia el primer objetivo (p. ej. la postura del guante) en vez de a ORCA_HW_VEL_MAX.
+        self.arranque_s   = max(0.0, float(_param("ORCA_HW_ARRANQUE_S", 2.0)))
+        self.vel_lenta    = max(0.1, float(_param("ORCA_HW_VEL_LENTA", 1.5)))     # rad/s
+        self.acel_lenta   = max(1.0, float(_param("ORCA_HW_ACEL_LENTA", 10.0)))   # rad/s²
+        self._lento_hasta = 0.0          # perf_counter hasta el que se usan los límites lentos
+        # Al desconectar: a la postura neutra por el propio hilo, despacio (antes: 0,12 s)
+        self.neutra_al_salir = bool(_param("ORCA_HW_NEUTRA_AL_DESCONECTAR", True))
+        self.aparcar_max_s   = max(0.5, float(_param("ORCA_HW_APARCAR_MAX_S", 4.0)))
+        self._aparcando      = False
+        # orca_core ≥ 0.14 ya no reinicia solo un motor en sobrecarga: hay que llamar a
+        # poll_faults(). Cada cuánto (s); 0 = nunca. Con el orca_core viejo no hace nada.
+        self.fallos_cada_s = max(0.0, float(_param("ORCA_HW_FALLOS_CADA_S", 1.0)))
+        # Si falta calibrar alguna articulación, ¿dejar que init_joints() calibre la mano entera
+        # al conectar? Por defecto NO: se calibra a propósito, no cada vez que arranca el programa.
+        self.autocalibrar = bool(_param("ORCA_HW_AUTOCALIBRAR", False))
         self.seguimiento     = bool(_param("ORCA_HW_SEGUIMIENTO", True))
         self.cada_s_seg      = float(_param("ORCA_HW_SEGUIMIENTO_CADA_S", 3.0))
         self.umbral_seg      = float(_param("ORCA_HW_SEGUIMIENTO_UMBRAL_DEG", 6.0))
@@ -313,11 +376,7 @@ class OrcaHardwareWrapper:
     def conectar(self):
         print(f"🔌 [ORCA HARDWARE] Conectando en {self.puerto} @ {self.baudrate} bps...")
         try:
-            clase = self._clase_mano
-            if clase is None:
-                from orca_core import OrcaHand
-                clase = OrcaHand
-            self._hand = clase(config_path=self._config_path)
+            self._hand = crear_orcahand(self._clase_mano, self._config_path)
             # El puerto lo manda config.PUERTO_HARDWARE, no el "port:" del config.yaml de orca_core
             # (antes self.puerto solo se imprimía). Si falla, orca_core sigue con su autodetección.
             cfg_mano = getattr(self._hand, "config", None)
@@ -329,17 +388,40 @@ class OrcaHardwareWrapper:
                 except Exception as e_p:
                     print(f"⚠️  [ORCA HARDWARE] No pude fijar el puerto {self.puerto} ({e_p}): "
                           f"uso el del config.yaml ({getattr(cfg_mano, 'port', '?')}).")
-            ok, msg = self._hand.connect()
+            # orca_core ≥ 0.14: sin el menú interactivo de puertos (bloquearía el programa)
+            try:
+                interactivo = "interactive" in inspect.signature(self._hand.connect).parameters
+            except (TypeError, ValueError):
+                interactivo = False
+            ok, msg = self._hand.connect(interactive=False) if interactivo else self._hand.connect()
             if not ok:
                 print(f"❌ [ORCA HARDWARE] Fallo al conectar: {msg}")
                 return False
             self._sdk_abierto = True
-            print("⚙️  [ORCA HARDWARE] Inicializando articulaciones...")
-            self._hand.init_joints()
+            print("⚙️  [ORCA HARDWARE] Inicializando articulaciones (sin ir a la neutra)...")
+            # move_to_neutral=False (20-nov): la mano se queda donde está. Antes init_joints() la
+            # llevaba a la neutra en 0,5 s y, en el orca_core viejo, pasando a modo POSITION
+            # (sin límite de corriente) y vuelta: tres cortes de par (tirón) y, al cambiar de
+            # modo, el motor pone Goal Current = Current Limit, así que se perdía max_current.
+            # El primer movimiento ya sale de la postura real, despacio (arranque suave).
+            if self.autocalibrar or bool(getattr(self._hand, "calibrated", True)):
+                self._hand.init_joints(move_to_neutral=False)
+            else:
+                # init_joints() CALIBRARÍA LA MANO ENTERA si falta una sola articulación (en
+                # orca_core 0.14, cada vez que se conecta). Se prepara igual, sin calibrar.
+                print("⚠️  [ORCA HARDWARE] La mano no está calibrada del todo: NO se calibra sola "
+                      "(ORCA_HW_AUTOCALIBRAR = False). Las articulaciones sin calibrar no se moverán; "
+                      "calíbralas a mano con h.calibrate(joints=[...]).")
+                self._hand.enable_torque()
+                self._hand.set_control_mode(self._hand.config.control_mode)
+                self._hand._compute_wrap_offsets_dict()
+            self._aplicar_max_current()
             self._preparar_traduccion()
 
             self._reiniciar_generador()
             self._q_leida = self._leer_postura()
+            self._aparcando = False
+            self._lento_hasta = 0.0
             self.conectado = True
             self._activo   = True
             self._hilo = threading.Thread(target=self._bucle_envio,
@@ -355,6 +437,21 @@ class OrcaHardwareWrapper:
             print(f"❌ [ORCA HARDWARE] Error: {e}")
             traceback.print_exc()
             return False
+
+    def _aplicar_max_current(self):
+        """Vuelve a escribir max_current del config.yaml (Goal Current) en todos los motores.
+        init_joints() ya lo hace, pero si calibra, o en el orca_core viejo tras cualquier cambio
+        de modo, se perdía (los Dynamixel lo resetean a Current Limit al cambiar de modo)."""
+        try:
+            i_max = float(self._hand.config.max_current)
+        except (TypeError, ValueError, AttributeError):
+            return                     # "default" (orca_core ≥ 0.14): ya lo pone orca_core
+        try:
+            with self.lock_sdk:
+                self._hand.set_max_current(i_max)
+            print(f"🔋 [ORCA HARDWARE] Goal Current = {i_max:.0f} (max_current del config.yaml)")
+        except Exception as e:
+            print(f"⚠️  [ORCA HARDWARE] No pude fijar max_current: {e}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # TRADUCCIÓN SIM (MJCF, rad) ↔ ORCA_CORE (grados)
@@ -394,11 +491,18 @@ class OrcaHardwareWrapper:
         ext_f = self.sobrecarrera if self._motor_directo else 0.0
         ext_e = self.sobrecarrera_ext if self._motor_directo else 0.0
         self._rango_sdk, self._tramos = {}, {}
+        for j in self.sobrecarrera_joint:
+            if j not in self._joints:
+                print(f"⚠️  [ORCA HARDWARE] ORCA_HW_SOBRECARRERA_JOINT: joint desconocido '{j}'")
+        ext_f_general = ext_f
         for j in self._joints:
             lo, hi = self._rom[j]
             if j not in self.FLEXION:
                 self._rango_sdk[j] = (lo, hi)
                 continue
+            ext_f = ext_f_general
+            if j in self.sobrecarrera_joint:
+                ext_f = min(ext_f_general, max(0.0, float(self.sobrecarrera_joint[j])))
             self._rango_sdk[j] = (lo - ext_e, hi + ext_f)
             x_a = self._extremo_sim_grados(j, "min")
             x_c = self._extremo_sim_grados(j, "max")
@@ -432,7 +536,12 @@ class OrcaHardwareWrapper:
                 ce = (f"cerrado {xs[-1]:6.1f} → {ys[-1]:6.1f}" if abs(xs[-1] - ys[-1]) > 0.05
                       else "cerrado igual que el sim")
                 print(f"       {j:10s} {ab}   ·   {ce}")
-        print(f"   · sobrecarrera: {ext_f:.0f}° al cerrar, {ext_e:.0f}° al abrir"
+        excepciones = ", ".join(f"{j} {self._rango_sdk[j][1] - self._rom[j][1]:.0f}°"
+                                for j in self.sobrecarrera_joint if j in self.FLEXION
+                                and j in self._rango_sdk)
+        print(f"   · sobrecarrera: {ext_f_general:.0f}° al cerrar"
+              + (f" (salvo {excepciones})" if excepciones and ext_f_general > 0 else "")
+              + f", {ext_e:.0f}° al abrir"
               + ("" if self._motor_directo or (self.sobrecarrera == 0 and self.sobrecarrera_ext == 0)
                  else "  (desactivada: este SDK no expone _joint_to_motor_pos/_set_motor_pos)"))
         print(f"   · modo {getattr(cfg, 'control_mode', '?')}, max_current = "
@@ -480,12 +589,16 @@ class OrcaHardwareWrapper:
             pose[j] = min(max(g, lo), hi)
         return pose
 
-    def _desde_sdk(self, grados):
-        """{joint: grados orca_core} → q (orden de motor, rad, convención sim) o None."""
+    def _desde_sdk(self, grados, parcial=False):
+        """{joint: grados orca_core} → q (orden de motor, rad, convención sim) o None.
+        Con parcial=True, las articulaciones que faltan (sin calibrar) quedan en NaN."""
         q = np.empty(self._n)
         for k, j in enumerate(self._joints):
             g = grados.get(j)
             if g is None:
+                if parcial:
+                    q[k] = np.nan
+                    continue
                 return None
             t = self._tramos.get(j)
             if t is not None:
@@ -502,17 +615,23 @@ class OrcaHardwareWrapper:
         leer, devuelve None y se parte del primer objetivo (como antes).
         (Antes no funcionaba: get_joint_position() devuelve un OrcaJointPositions, no un
         dict ni una lista, y siempre se caía al "no se pudo leer".)
+        Una articulación SIN CALIBRAR (p. ej. thumb_mcp) queda en NaN y solo ella parte del
+        primer objetivo; antes, por una sola, TODA la mano saltaba al primer objetivo (tirón).
         """
         try:
             with self.lock_sdk:
                 r = self._hand.get_joint_position()
             grados = r.as_dict() if hasattr(r, "as_dict") else dict(r)
-            q = self._desde_sdk(grados)
-            if q is None or not np.all(np.isfinite(q)):
-                raise ValueError("faltan articulaciones sin calibrar")
+            q = self._desde_sdk(grados, parcial=True)
+            if q is None or not np.any(np.isfinite(q)):
+                raise ValueError("no hay ninguna articulación calibrada")
+            faltan = [j for k, j in enumerate(self._joints) if not np.isfinite(q[k])]
             print(f"📍 [ORCA HARDWARE] Postura inicial leída (muñeca {grados['wrist']:.0f}°, "
                   f"índice MCP {grados['index_mcp']:.0f}°): el primer movimiento saldrá de "
                   f"ahí, sin salto.")
+            if faltan:
+                print(f"⚠️  [ORCA HARDWARE] Sin calibrar (no se pueden leer ni mover): "
+                      f"{', '.join(faltan)}. Recalíbralas.")
             return q
         except Exception as e:
             print(f"ℹ️  [ORCA HARDWARE] No se pudo leer la postura inicial ({e}): el primer "
@@ -526,13 +645,21 @@ class OrcaHardwareWrapper:
         """
         if self._hand is None:
             return {}
+        cliente = self._hand._motor_client
         with self.lock_sdk:
-            pos, _vel, cur = self._hand._motor_client.read_pos_vel_cur()
+            if hasattr(cliente, "read_position_velocity_current"):     # orca_core ≥ 0.14
+                r = cliente.read_position_velocity_current()
+                pos, cur = r.position, r.current
+            else:                                                      # orca_core viejo
+                pos, _vel, cur = cliente.read_pos_vel_cur()
             reales = self._hand._motor_to_joint_pos(pos)
         cfg = self._hand.config
-        lector = getattr(self._hand._motor_client, "_pos_vel_cur_reader", None)
+        lector = getattr(cliente, "_pos_vel_cur_reader", None)
         escala = float(getattr(lector, "cur_scale", 1.0) or 1.0)   # misma unidad que Goal Current
-        i_max = max(float(cfg.max_current), 1.0)
+        try:
+            i_max = max(float(cfg.max_current), 1.0)
+        except (TypeError, ValueError):                             # max_current: default
+            i_max = float(getattr(cliente, "default_max_current_ma", 300.0))
         idx = {mid: i for i, mid in enumerate(cfg.motor_ids)}
         pedida = self._ult_pose or {}
         out = {}
@@ -564,7 +691,7 @@ class OrcaHardwareWrapper:
         sim) y vuelve enseguida. Quien habla con los servos es el hilo de envío.
         Se puede llamar a cualquier ritmo (en teleoperación, una vez por fotograma).
         """
-        if not self.conectado:
+        if not self.conectado or self._aparcando:    # al desconectar manda la neutra, no tú
             return False
         try:
             obj = np.array([float(array_radianes[i]) for i in range(self._n)])
@@ -573,12 +700,16 @@ class OrcaHardwareWrapper:
             return False
         if not np.all(np.isfinite(obj)):
             return False
+        self._publicar(obj)
+        return True
 
+    def _publicar(self, obj):
+        """Deja 'obj' (rad, orden de motor, sim) como objetivo del hilo de envío."""
         ahora = time.perf_counter()
         with self._lock_obj:
             if self._obj_fin is None:                        # primer objetivo
                 inicio = self._q_leida if self._q_leida is not None else obj
-                self._obj_ini = inicio.copy()
+                self._obj_ini = np.where(np.isfinite(inicio), inicio, obj)
             else:
                 dt = ahora - self._t_obj
                 if dt > 1e-4:                                # periodo real entre objetivos
@@ -589,7 +720,6 @@ class OrcaHardwareWrapper:
             self._obj_fin = obj
             self._t_obj   = ahora
             self._dur     = self.MARGEN_TRAMO * self._dt_med if self.interpolar else 1e-6
-        return True
 
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -597,10 +727,14 @@ class OrcaHardwareWrapper:
         """Lleva el comando hacia 'ref' con velocidad y aceleración limitadas."""
         e  = ref - self._q
         ae = np.abs(e)
+        vmax, amax = self._vmax, self._amax
+        if self._aparcando or time.perf_counter() < self._lento_hasta:   # arranque / aparcar
+            vmax = np.minimum(vmax, self.vel_lenta)
+            amax = np.minimum(amax, self.acel_lenta)
         # velocidad máxima con la que aún se puede FRENAR a tiempo (perfil trapezoidal)
-        v_des = np.sign(e) * np.minimum(np.minimum(self._vmax, np.sqrt(2.0 * self._amax * ae)),
+        v_des = np.sign(e) * np.minimum(np.minimum(vmax, np.sqrt(2.0 * amax * ae)),
                                         ae / dt)
-        self._v += np.clip(v_des - self._v, -self._amax * dt, self._amax * dt)
+        self._v += np.clip(v_des - self._v, -amax * dt, amax * dt)
         self._q += self._v * dt
 
     def _enviar_sdk(self):
@@ -636,6 +770,8 @@ class OrcaHardwareWrapper:
         aviso_lento = False
         errores, t_ult_error = 0, 0.0
         t_seg = time.perf_counter()
+        t_fallos = time.perf_counter()
+        vigilar_fallos = self.fallos_cada_s > 0 and callable(getattr(self._hand, "poll_faults", None))
 
         while self._activo:
             ahora = time.perf_counter()
@@ -644,9 +780,11 @@ class OrcaHardwareWrapper:
 
             if ref is not None:                       # hasta el primer objetivo, no se envía nada
                 if self._q is None:                   # arranque: desde la postura real
-                    self._q = (self._q_leida if self._q_leida is not None else ref).copy()
+                    ini = self._q_leida if self._q_leida is not None else ref
+                    self._q = np.where(np.isfinite(ini), ini, ref)
                     self._v[:] = 0.0
                     t_prev = ahora
+                    self._lento_hasta = ahora + self.arranque_s     # arranque suave
                 dt = min(max(ahora - t_prev, 1e-3), 0.1)
                 t_prev = ahora
                 self._paso_generador(ref, dt)
@@ -668,6 +806,25 @@ class OrcaHardwareWrapper:
                         self.conectado = False
                         self._activo   = False
                         break
+
+            # ── Fallos de los motores (orca_core ≥ 0.14): sobrecarga, temperatura… ──
+            # orca_core los detecta, pero solo actúa (reiniciar el motor y devolverle modo,
+            # Goal Current y par) cuando se le llama. Tras 5 reinicios por carga de un mismo
+            # motor lo deja parado: es un problema mecánico (tendón, tope) y hay que mirarlo.
+            if vigilar_fallos and ahora - t_fallos >= self.fallos_cada_s:
+                t_fallos = ahora
+                try:
+                    with self.lock_sdk:
+                        acciones = self._hand.poll_faults()
+                    for a in acciones or ():
+                        if a.kind in ("log", "notify"):      # esos ya los escribe orca_core
+                            continue
+                        joint = self._hand.config.motor_to_joint_dict.get(a.motor_id, "?")
+                        print(f"🩺 [ORCA HARDWARE] Motor {a.motor_id} ({joint}): {a.kind} — "
+                              f"{getattr(a, 'reason', '')}")
+                except Exception as e:
+                    vigilar_fallos = False
+                    print(f"⚠️  [ORCA HARDWARE] Vigilancia de fallos desactivada: {e}")
 
             # ── Seguimiento: ¿llega la mano real a lo que se le pide? ──
             if self.seguimiento and self._ult_pose is not None and ahora - t_seg >= self.cada_s_seg:
@@ -708,17 +865,47 @@ class OrcaHardwareWrapper:
             h.join(timeout=1.0)
         self._hilo = None
 
+    def _aparcar(self):
+        """Lleva la mano a la postura neutra del config.yaml A TRAVÉS DEL HILO DE ENVÍO, con
+        los límites lentos (ORCA_HW_VEL_LENTA / ACEL_LENTA), y espera a que llegue (como mucho
+        ORCA_HW_APARCAR_MAX_S). Sustituye a set_neutral_position(num_steps=6, step_size=0.02):
+        0,12 s hasta la neutra desde donde estuviera (tirón) y, en el orca_core viejo, en modo
+        POSITION sin límite de corriente. Devuelve True si ha llegado."""
+        if not (self._activo and self._hilo is not None and self._hilo.is_alive()):
+            return False
+        neutra = getattr(self._hand.config, "neutral_position", None) or {}
+        q_neutra = self._desde_sdk({j: float(v) for j, v in neutra.items()})
+        if q_neutra is None or not np.all(np.isfinite(q_neutra)):
+            return False
+        if self._q is None and self._q_leida is None:
+            return False               # no se sabe dónde está la mano: mejor no moverla
+        print("🔌 [ORCA HARDWARE] Volviendo despacio a la posición neutral...")
+        self._aparcando = True
+        self._publicar(q_neutra)
+        t_fin = time.perf_counter() + self.aparcar_max_s
+        while time.perf_counter() < t_fin and self._activo:
+            q, v = self._q, self._v
+            if q is not None and np.max(np.abs(q - q_neutra)) < 0.02 and np.max(np.abs(v)) < 0.05:
+                time.sleep(0.15)       # que los servos terminen de llegar
+                return True
+            time.sleep(0.02)
+        print("⚠️  [ORCA HARDWARE] La mano no ha llegado del todo a la neutra (sigo).")
+        return False
+
     def desconectar(self):
+        if self.neutra_al_salir and self.conectado:
+            try:
+                self._aparcar()
+            except Exception as e:
+                print(f"⚠️  [ORCA HARDWARE] No pude llevarla a la neutra: {e}")
         self._parar_hilo()                            # primero se calla el hilo de envío
         self.conectado = False
+        self._aparcando = False
         if self._hand is None or not self._sdk_abierto:
             return
         try:
             with self.lock_sdk:
-                print("🔌 [ORCA HARDWARE] Volviendo a posición neutral...")
-                self._hand.set_neutral_position(num_steps=6, step_size=0.02)
-                self._hand.stop_task()
-                self._hand.disconnect()
+                self._hand.disconnect()               # quita el par y cierra el puerto
             print("✅ [ORCA HARDWARE] Mano desconectada.")
         except Exception as e:
             print(f"⚠️  [ORCA HARDWARE] Error al desconectar: {e}")

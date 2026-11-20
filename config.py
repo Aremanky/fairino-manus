@@ -539,6 +539,14 @@ ORCA_HW_LIMITES_JOINT = {      # excepciones por articulación: "joint": (vel. m
 }
 ORCA_HW_DEBUG_TIEMPOS = True   # imprime los envíos/s reales y lo que tarda el SDK en cada envío
 ORCA_HW_DEBUG_CADA_S  = 5.0
+# Sin tirones al conectar/desconectar (20-nov):
+ORCA_HW_ARRANQUE_S    = 2.0    # s tras conectar en los que la mano va despacio al primer objetivo
+ORCA_HW_VEL_LENTA     = 1.5    # rad/s en el arranque y al volver a la neutra
+ORCA_HW_ACEL_LENTA    = 10.0   # rad/s²  "      "
+ORCA_HW_NEUTRA_AL_DESCONECTAR = True   # al salir, despacio a la neutral_position del config.yaml
+ORCA_HW_APARCAR_MAX_S = 4.0    # espera máx. a que llegue a la neutra antes de quitar el par
+ORCA_HW_AUTOCALIBRAR  = False  # True = si falta calibrar algo, orca_core calibra TODA la mano al conectar
+ORCA_HW_FALLOS_CADA_S = 1.0    # orca_core ≥ 0.14: cada cuánto se revisan sobrecargas/temperatura (0 = nunca)
 
 # ── Cámara ──
 # Hands en PARALELO: el recorte de la mano se calcula con la Pose del fotograma
@@ -714,6 +722,7 @@ MANUS_RANGO_ROBOT = {
 ORCA_HW_SIGNOS             = {}      # tu mano va en el MISMO sentido que el sim (comprobado)
 ORCA_HW_CIERRE_COMPLETO    = True    # "cerrado" del sim → tope de flexión calibrado + sobrecarrera
 ORCA_HW_SOBRECARRERA_DEG   = 4.0     # grados más allá del tope de flexión (empuja con max_current)
+ORCA_HW_SOBRECARRERA_JOINT = {"thumb_mcp": 0.0}   # excepciones (motor 15 sin sobrecarrera: se sobrecargaba)
 ORCA_HW_APERTURA_EXTRA_DEG = 5.0     # dedo recto del sim → 5° más estirado en la mano real (no el pulgar)
 ORCA_HW_APERTURA_COMPLETA  = False   # True = "abierto" del sim → tope de EXTENSIÓN (hiperextiende)
 ORCA_HW_TRAMO_FIEL         = (0.25, 0.60)   # zona central sin estirar (fracción del recorrido)
@@ -1111,7 +1120,7 @@ FR5_CPU          = None          # núcleo fijo para el proceso (None = cualquie
 # "colisión" sin tocar nada. Valores en diagnosticos/ajustar_gemelo.py (apartado 3).
 # None = no tocar lo que ya tenga la controladora. Solo se escriben fuera de SIMULACRO.
 # Comprobación: en modo arrastre de la WebApp, al soltar el brazo debe quedarse QUIETO.
-FR5_CARGA_KG            = 2.2     # mano + adaptador, pesados el 10-nov
+FR5_CARGA_KG            = 1.5     # mano + adaptador, pesados el 10-nov
 FR5_CARGA_CDM_MM        = None    # centro de masas en la brida, mm (x, y, z). Sin medir: sacadlo con
                                   # la identificación de carga de la WebApp y ponedlo aquí
 # 10-nov: herramienta (TCP) = centro de la palma de la ORCA, sacado del modelo de MuJoCo

@@ -1,0 +1,139 @@
+schema: 1
+calibrated: false
+wrist_calibrated: true
+motor_limits:
+  1:
+  - 1.5071359872817993
+  - 4.523095607757568
+  2:
+  - 0.19328157603740692
+  - 2.1475729942321777
+  3:
+  - 0.05982524901628494
+  - 2.3914761543273926
+  4:
+  - 1.211844801902771
+  - 2.0586023330688477
+  5:
+  - 0.03834952041506767
+  - 1.0768544673919678
+  6:
+  - 4.773748397827148
+  - 5.634311199188232
+  7:
+  - 2.9391071796417236
+  - 5.367398738861084
+  8:
+  - -0.11198059469461441
+  - 2.004912853240967
+  9:
+  - 4.793689727783203
+  - 7.0823893547058105
+  10:
+  - 0.40957286953926086
+  - 3.2474372386932373
+  11:
+  - -0.3206019699573517
+  - 1.4864274263381958
+  12:
+  - 5.46864128112793
+  - 7.550253391265869
+  13:
+  - 4.419398784637451
+  - 5.591360092163086
+  14:
+  - 5.453301906585693
+  - 6.286253452301025
+  15:
+  - 5.893554210662842
+  - 5.893554210662842
+  16:
+  - 2.8731460571289062
+  - 4.767612457275391
+  17:
+  - 2.698272228240967
+  - 3.5465636253356934
+sequence: 6
+calibrated_at: '2026-11-20T08:31:36Z'
+motor_travel_measured:
+  thumb_cmc: 48.6
+  thumb_abd: 47.72
+  thumb_dip: 108.54
+  index_abd: 48.52
+  middle_abd: 59.5
+  ring_abd: 49.31
+  pinky_abd: 67.15
+  index_mcp: 133.59
+  middle_mcp: 162.6
+  ring_mcp: 139.13
+  pinky_mcp: 119.27
+  index_pip: 111.97
+  middle_pip: 131.13
+  ring_pip: 121.29
+  pinky_pip: 103.54
+drive_current_measured:
+  index_abd:
+    extend: 141.4
+    flex: 158.2
+  index_mcp:
+    extend: 89.0
+    flex: 105.6
+  index_pip:
+    extend: 99.1
+    flex: 105.8
+  middle_abd:
+    extend: 115.5
+    flex: 153.8
+  middle_mcp:
+    extend: 70.6
+    flex: 85.1
+  middle_pip:
+    extend: 76.2
+    flex: 87.0
+  pinky_abd:
+    extend: 107.5
+    flex: 218.2
+  pinky_mcp:
+    extend: 85.2
+    flex: 99.5
+  pinky_pip:
+    extend: 265.6
+    flex: 239.0
+  ring_abd:
+    extend: 134.5
+    flex: 201.0
+  ring_mcp:
+    extend: 92.9
+    flex: 108.2
+  ring_pip:
+    extend: 87.2
+    flex: 97.0
+  thumb_abd:
+    extend: 147.0
+    flex: 243.3
+  thumb_cmc:
+    extend: 142.0
+    flex: 169.7
+  thumb_dip:
+    extend: 130.5
+    flex: 152.2
+  thumb_mcp:
+    flex: 175.5
+fingerprint:
+  index_abd: +4 extend,flex
+  index_mcp: +3 extend,flex
+  index_pip: +2 extend,flex
+  middle_abd: +5 extend,flex
+  middle_mcp: +10 extend,flex
+  middle_pip: +9 extend,flex
+  pinky_abd: -13 extend,flex
+  pinky_mcp: +12 extend,flex
+  pinky_pip: -11 extend,flex
+  ring_abd: +6 extend,flex
+  ring_mcp: -7 extend,flex
+  ring_pip: +8 extend,flex
+  thumb_abd: +14 extend,flex
+  thumb_cmc: +17 extend,flex
+  thumb_dip: +16 extend,flex
+  thumb_mcp: +15 extend,flex
+  wrist: -1 extend,flex
