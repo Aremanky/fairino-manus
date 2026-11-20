@@ -1583,8 +1583,8 @@ AUTONOMO_TAREA_PELOTA_APOYO_TOL = 0.04   # m que puede corregir (si la mesa medi
 # instalado o falla, se usa el camino propio. "propio": solo el de siempre. Lo instala ./arrancar_nivel6.sh si falta
 AUTONOMO_TAREA_PLANIFICADOR = "curobo"
 AUTONOMO_CUROBO_ROBOT = "curobo_fr5/fr5_orca.yml"   # la genera python -m skill_shield.autonomo.curobo_fr5.robot
-AUTONOMO_CUROBO_INTENTOS = 4               # intentos de cuRobo por tramo (con RRT a partir del 2º)
-AUTONOMO_CUROBO_SEMILLAS = 8               # trayectorias que optimiza A LA VEZ en la GPU por tramo (se queda la mejor)
+AUTONOMO_CUROBO_INTENTOS = 6               # intentos de cuRobo por tramo (con RRT a partir del 2º)
+AUTONOMO_CUROBO_SEMILLAS = 32               # trayectorias que optimiza A LA VEZ en la GPU por tramo (se queda la mejor)
 # Lo que la cámara NO ha visto: para cuRobo es «cerca de un obstáculo» (esfera más gruesa + esto, en m): no es
 # choque, pero su optimizador lo PENALIZA y busca caminos por lo visto. None = no penalizarlo
 AUTONOMO_CUROBO_DESCONOCIDO_EXTRA = 0.02
@@ -1638,7 +1638,7 @@ AUTONOMO_TAREA_MANO_PELOTA_APRETAR = {0: 0.0, 1: -0.15, 2: 1.00, 3: 0.90, 4: -0.
 # conocida se tratan como antes. "completo": todo como antes (discos, suelos, zonas de apoyo…).
 AUTONOMO_TAREA_MUNDO = "simple"
 AUTONOMO_TAREA_MARGEN_BRAZO = 0.02            # m brazo ↔ cubos del mapa (cápsulas y mallas), con el mundo simple
-AUTONOMO_TAREA_HOLGURA_MESA_BRAZO = 0.02      # m brazo ↔ mesas (losas)
+AUTONOMO_TAREA_HOLGURA_MESA_BRAZO = 0.01      # m brazo ↔ mesas (losas)
 # Huecos de la MANO en la tarea: fijos, no dependen de la postura de inicio (eso es de la calibración).
 AUTONOMO_TAREA_HUECOS_DESDE_INICIO = False    # True = las reglas de la calibración (como antes)
 AUTONOMO_TAREA_MANO_HOLGURA = 0.05            # m mano ↔ brazo y giro del J4 (la pieza que se rompe, cables)
@@ -1668,7 +1668,7 @@ AUTONOMO_TAREA_AFINAR_EN_HILO = True
 # GPU: un fallo de cuRobo o de la comprobación en lote ya no la apaga para toda la sesión: se avisa en la web
 # y se vuelve a probar en el siguiente plan, hasta este número de fallos
 AUTONOMO_TAREA_GPU_FALLOS_MAX = 3
-AUTONOMO_TAREA_RRT_CON_CUROBO = False         # con cuRobo, sin el RRT en CPU (6-25 s) cuando un tramo choca
+AUTONOMO_TAREA_RRT_CON_CUROBO = True         # con cuRobo, sin el RRT en CPU (6-25 s) cuando un tramo choca
 AUTONOMO_TAREA_LOTE_IK = 512                  # soluciones de IK que se comprueban de una vez (GPU si hay)
 AUTONOMO_CUROBO_PELOTA_DIAMETRO = 0.07        # la pelota cogida, en las esferas de la mano de cuRobo
 # cuRobo elige en la GPU, de UNA vez, la mejor de varias formas de llegar a cada sitio y su camino (goalset)
