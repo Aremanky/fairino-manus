@@ -1120,7 +1120,7 @@ FR5_CPU          = None          # núcleo fijo para el proceso (None = cualquie
 # "colisión" sin tocar nada. Valores en diagnosticos/ajustar_gemelo.py (apartado 3).
 # None = no tocar lo que ya tenga la controladora. Solo se escriben fuera de SIMULACRO.
 # Comprobación: en modo arrastre de la WebApp, al soltar el brazo debe quedarse QUIETO.
-FR5_CARGA_KG            = 1.5     # mano + adaptador, pesados el 10-nov
+FR5_CARGA_KG            = 1.3     # mano + adaptador (23-nov: 1,3 kg)
 FR5_CARGA_CDM_MM        = None    # centro de masas en la brida, mm (x, y, z). Sin medir: sacadlo con
                                   # la identificación de carga de la WebApp y ponedlo aquí
 # 10-nov: herramienta (TCP) = centro de la palma de la ORCA, sacado del modelo de MuJoCo
@@ -1177,6 +1177,11 @@ SLIDERS_SUAVE_ACEL        = 3.0     # rad/s²
 SLIDERS_VELOCIDAD_INICIAL = 0.3     # % de velocidad con el que abre la ventana (0.05-1.0)
 SLIDERS_MARGEN_DEG        = 5.0     # margen respecto a los topes del FR5 / límites blandos
 SLIDERS_LIMITES_DEG       = None    # ((min, max) × 6) en grados para fijarlos a mano; None = auto
+# 23-nov: límite del J4. La mano no puede acercarse al giro del J4 (rompería una pieza de la mano):
+# se comprueba el hueco mano ↔ giro del J4 con las mallas del gemelo (skill_shield/interfaz/limite_j4.py).
+# Con 5 cm, la muñeca recta tiene ~6 cm y el tope queda en |J5| ≈ 120°.
+SLIDERS_LIMITE_J4         = True
+SLIDERS_J4_HOLGURA        = 0.05    # m: hueco mínimo mano ↔ giro del J4 (el mismo que en la tarea autónoma)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # IA: GRABAR BRAZO + MANO, ENTRENAR Y REPRODUCIR (5-nov)
@@ -1251,9 +1256,13 @@ GRABACION_AFINAR_S      = 1.0   # quieto al llegar, para que la cámara de cabez
 # ═══════════════════════════════════════════════════════════════════════════
 # FUNCIONAMIENTO AUTÓNOMO (10-nov) — última opción del menú (skill_shield/autonomo/)
 # ═══════════════════════════════════════════════════════════════════════════
-# Paso 2 de la hoja de ruta: cámara de cabeza + gemelo en MuJoCo + web, SIN mover el robot
-# (fr5_servo va siempre en simulacro en este modo, diga lo que diga FR5_SIMULACRO).
-AUTONOMO_CON_FR5      = True             # arrancar fr5_servo (solo lectura) para el gemelo
+# Cámara de cabeza (+ cámara A) + gemelo en MuJoCo + web + tarea. La tarea mueve el FR5 REAL solo
+# con AUTONOMO_FR5_SIMULACRO = False (más abajo, bloque de la tarea) y con el pedal de la web.
+# (23-nov) Sin FR5 (apagado, sin conexión o AUTONOMO_CON_FR5 = False) la tarea se hace solo en el gemelo.
+AUTONOMO_CON_FR5      = True             # arrancar fr5_servo (pose real para el gemelo; la tarea lo mueve)
+# (23-nov) Postura del gemelo al arrancar sin FR5 (de ella parte la primera tarea en el gemelo). Sin choques:
+# POSICION_STANDBY_BRAZO deja la mano pegada al soporte. Esta es la 1ª postura de calib_posturas.json.
+AUTONOMO_GEMELO_REPOSO_DEG = (79.0, -29.0, 76.5, 22.5, 105.5, 46.0)
 AUTONOMO_FR5_RECONECTAR = True           # 13-nov: si el FR5 se apaga y se vuelve a encender (o no estaba
                                          # encendido al arrancar), se reconecta solo, sin reiniciar el
                                          # programa (como la OrcaHand y los táctiles). Hay que volver a armar.
@@ -1271,6 +1280,7 @@ AUTONOMO_HZ           = 60.0             # refresco del gemelo
 AUTONOMO_PYTHON_PERCEPCION = None        # intérprete de OTRO venv para la cámara/percepción
                                          # (p. ej. si YOLO choca con numpy<2); None = el mismo
 AUTONOMO_CON_MANO     = True             # vigilar la OrcaHand (SOLO LECTURA: no activa el par)
+AUTONOMO_MANO_REINTENTO_S = 2.0          # (23-nov) mano con par de la tarea caída → reintento cada estos s
 AUTONOMO_MANO_POSTURA_PERIODO_S = 0.1   # leer la postura de la mano (muñeca + dedos) para el gemelo y
                                          # el mapa cada estos s (solo lectura); None = no leerla
 AUTONOMO_CON_TACTIL   = True             # lanzar el puente de los táctiles (si ORCA_TACTIL_ACTIVO)

@@ -1,12 +1,16 @@
 """
-Funcionamiento autónomo (10-nov) — paso 2 de la hoja de ruta: el esqueleto.
+Funcionamiento autónomo (desde el 10-nov): cámara(s) + gemelo + web + tarea.
 
 Lo lanza la última opción del menú de arranque (MODO_EJECUCION = "AUTONOMO"), con su propio
 bucle, separado del main() de teleoperación de Skill_Shield_Nivel_6.py.
 
-Qué hace ahora (criterio de «hecho» del paso 2):
-  1. FR5Servo, arrancado LO PRIMERO (usa fork), SIEMPRE en simulacro y sin habilitar:
-     solo lee la pose real. En este paso el robot NO se puede mover de ninguna forma.
+Qué hace:
+  1. FR5Servo, arrancado LO PRIMERO (usa fork). Con AUTONOMO_FR5_SIMULACRO = False la tarea mueve
+     el FR5 REAL, solo con el pedal de la web (o con el pedal desactivado desde la web, si
+     AUTONOMO_PERMITIR_SIN_PEDAL). Se reconecta solo si se apaga (AUTONOMO_FR5_RECONECTAR).
+     (23-nov) Sin FR5 (apagado, sin conexión o AUTONOMO_CON_FR5 = False) la tarea se planifica
+     desde la pose del gemelo y se hace solo en el gemelo; el gemelo arranca en
+     AUTONOMO_GEMELO_REPOSO_DEG.
   2. Proceso de cámara (skill_shield/autonomo/camara.py): la cámara de cabeza.
   3. Proceso web (skill_shield/autonomo/web.py, FastAPI): imagen, estado y mandos.
   4. MuJoCo con el brazo copiando la pose REAL del FR5 (gemelo digital), en una ventana
@@ -25,8 +29,8 @@ Qué hace ahora (criterio de «hecho» del paso 2):
 
 Mandos de la web (los decide ESTE proceso, la web solo los pide):
   · Pedal de la web: «movimiento permitido» solo mientras llega su latido. Con el pedal
-    desactivado (opción de la web, por defecto activado) se permite sin pedal.
-    En el paso 2 no hay nada que mover: el permiso se calcula y se enseña, nada más.
+    desactivado (opción de la web, por defecto activado) la tarea avanza sin pedal mientras el
+    proceso de la web siga vivo (si se cae o se reinicia, vuelve a «pedal obligatorio» y se para).
   · Reinicio tras falsa colisión: FR5Servo.resetear() → ResetAllError, disable, enable.
 
 Reparto en procesos, comunicados por memoria compartida (canal.py):
@@ -151,13 +155,20 @@ class Control:
             self._reset_visto = rid
         return nuevo
 
-    def movimiento_permitido(self, robot_listo):
-        return bool(robot_listo) and (self.pedal_pisado or not self.pedal_obligatorio)
+    def permiso_tarea(self):
+        """(23-nov) Lo que se le pasa a la tarea como «pedal»: pedal pisado o, con el pedal desactivado
+        desde la web, siempre que el proceso de la web siga vivo (si se cae, se para)."""
+        return self.web_viva and (self.pedal_pisado or not self.pedal_obligatorio)
 
-    def estado(self, robot_listo, mueve=False):
+    def movimiento_permitido(self, robot_listo):
+        return bool(robot_listo) and self.permiso_tarea()
+
+    def estado(self, robot_listo, mueve=False, gemelo=False):
         permitido = self.movimiento_permitido(robot_listo)
         if not robot_listo:
             motivo = "FR5 sin conexión o con error"
+        elif gemelo and self.permiso_tarea():
+            motivo = ("pedal pisado" if self.pedal_obligatorio else "pedal desactivado") + " · solo el gemelo"
         elif self.pedal_obligatorio and not self.pedal_pisado:
             motivo = "esperando al pedal"
         else:
@@ -334,7 +345,11 @@ def ejecutar(cfg):
             ctrl_idx = list(range(6))
         EntornoTaller(modelo, datos)                    # se cargan escondidos (paso 6: herramientas)
         EntornoTaladro(modelo, datos)
-        reposo = cfg.get("POSICION_STANDBY_BRAZO", [0.0] * 6)
+        # (23-nov) sin FR5, la tarea parte de aquí: una postura sin choques (la de reposo de la
+        # teleoperación deja la mano pegada al soporte y el planificador no saldría de ella)
+        rep_deg = cfg.get("AUTONOMO_GEMELO_REPOSO_DEG")
+        reposo = (np.radians(rep_deg).tolist() if rep_deg is not None
+                  else cfg.get("POSICION_STANDBY_BRAZO", [0.0] * 6))
         sincronizar_mujoco(modelo, datos, reposo, qpos_idx, dof_idx, ctrl_idx)
         off = int(cfg.get("OFFSET_MANO", 6))
         for i, v in enumerate(cfg.get("POSICION_STANDBY", [])):
@@ -392,9 +407,9 @@ def ejecutar(cfg):
             t0 = time.monotonic()
             dt_vuelta, t_ant = min(t0 - t_ant, 0.1), t0
             q = fr5.q_real_rad() if fr5 is not None else None
-            if tarea is not None and tarea.mano_activa is not None:
-                mano = tarea.mano_activa                    # la tarea conectó la mano con par
-            qm = mano.postura() if mano is not None else None      # muñeca de la Orca y dedos (rad)
+            # la tarea conectó la mano con par: desde entonces se lee de ella (el monitor ya está cerrado)
+            mano_ver = tarea.mano_activa if tarea is not None and tarea.mano_activa is not None else mano
+            qm = mano_ver.postura() if mano_ver is not None else None      # muñeca de la Orca y dedos (rad)
             q_vista = q_tarea_sim if q_tarea_sim is not None else q    # simulacro: el gemelo hace la tarea
             if q_vista is not None or qm is not None:
                 with visor.lock() if visor is not None else contextlib.nullcontext():
@@ -484,33 +499,39 @@ def ejecutar(cfg):
                     # (19-nov) lo que ve la cámara A (pelotas, con su calibración): la tarea lo usa si ve la misma
                     from skill_shield.autonomo.camara_a import leer_canal
                     lista_a, T_a = leer_canal(canal_herr_a)
-                    return dict(q_real=q, herramientas=lista, objetivo_id=(mando or {}).get("objetivo_id"), mapa=mp,
-                                visto=visto, T_mundo_cam=T_mundo_cam, herramientas_a=lista_a, T_mundo_cam_a=T_a)
+                    q_gem = np.array([datos.qpos[a] for a in qpos_idx], float)   # (23-nov) sin FR5
+                    return dict(q_real=q, q_gemelo=q_gem, herramientas=lista,
+                                objetivo_id=(mando or {}).get("objetivo_id"), mapa=mp, visto=visto,
+                                T_mundo_cam=T_mundo_cam, herramientas_a=lista_a, T_mundo_cam_a=T_a)
                 tarea.orden(mando, _contexto)
-                q_tarea_sim = tarea.paso(dt_vuelta, q, control.web_viva and control.pedal_pisado, _contexto)
+                q_tarea_sim = tarea.paso(dt_vuelta, q, control.permiso_tarea(), _contexto)
             if canal_congelar is not None and t0 - t_congelar >= 0.2:
                 t_congelar = t0                         # (18-nov) con tarea en marcha: autocorrección congelada
                 canal_congelar.escribir(json.dumps(dict(
                     congelar=bool(tarea is not None and getattr(tarea, "congelar_autocalib", False)))).encode())
-            robot_listo = fr5 is not None and fr5.conectado
+            # (23-nov) sin FR5 la tarea va al gemelo: también puede «moverse» (solo en el gemelo)
+            en_gemelo = tarea is not None and tarea.solo_gemelo()
+            robot_listo = (fr5 is not None and fr5.conectado) or en_gemelo
             permitido = control.movimiento_permitido(robot_listo)
             if permitido != permitido_antes:
                 permitido_antes = permitido
-                print("🟢 Pedal pisado (" if permitido else "⛔ Movimiento bloqueado (",
-                      control.estado(robot_listo)["motivo"], ")" + ("" if tarea is not None and not simulacro
-                                                                  else " — el FR5 está en simulacro"), sep="")
+                print("🟢 Movimiento permitido (" if permitido else "⛔ Movimiento bloqueado (",
+                      control.estado(robot_listo, gemelo=en_gemelo)["motivo"], ")"
+                      + ("" if tarea is not None and not en_gemelo
+                         else " — el FR5 está en simulacro" if simulacro else " — sin FR5: solo el gemelo"), sep="")
 
             if t0 - t_estado >= 0.1:
                 t_estado = t0
                 canal_estado.escribir(json.dumps(dict(
-                    modo=("AUTÓNOMO · tarea · FR5 REAL" if tarea is not None and not simulacro
-                          else "AUTÓNOMO · FR5 en simulacro"),
+                    modo=("AUTÓNOMO · FR5 en simulacro" if simulacro or tarea is None
+                          else "AUTÓNOMO · sin FR5: solo el gemelo" if en_gemelo
+                          else "AUTÓNOMO · tarea · FR5 REAL"),
                     fr5=_estado_fr5(fr5, simulacro),
-                    mano=mano.estado() if mano is not None else dict(estado="desactivado",
-                                                                     texto="desactivada en config"),
+                    mano=mano_ver.estado() if mano_ver is not None else dict(estado="desactivado",
+                                                                             texto="desactivada en config"),
                     tactil=estado_tactil(tactil),
                     gemelo="copiando la pose real" if sincronizado else "sin pose real",
-                    control=control.estado(robot_listo, mueve=tarea is not None and not simulacro),
+                    control=control.estado(robot_listo, mueve=tarea is not None and not en_gemelo, gemelo=en_gemelo),
                     calibracion=calib_estado,
                     calibracion_a=calib_a_estado,                 # (19-nov) None = sin cámara A
                     tarea=tarea.estado_web() if tarea is not None else None,

@@ -13,6 +13,7 @@ Ejecución de un plan de la tarea en el tiempo (18-nov: separado de tarea.py).
   · ManoActiva: la OrcaHand con par.
 """
 import math
+import threading
 import time
 
 import numpy as np
@@ -305,53 +306,115 @@ class Ejecutor:
 
 class ManoActiva:
     """La OrcaHand con par (OrcaHardwareWrapper), para la tarea. Misma cara que MonitorMano
-    (estado() y postura()) para que modo.py la use igual. Al conectar, orca_core la lleva a su
-    postura neutra; al cerrar el modo, también (desconectar())."""
+    (estado() y postura()) para que modo.py la use igual. Al conectar se queda donde está y arranca
+    despacio hacia el primer objetivo; al cerrar el modo, va a su neutra y quita el par (desconectar()).
 
-    def __init__(self, puerto="/dev/ttyUSB0", fabrica=None):
+    23-nov: con iniciar(), un hilo la conecta y la VIGILA: si el wrapper deja de poder enviarle (cable
+    USB, alimentación), lista pasa a False (la tarea en marcha se aborta), estado() lo dice y se
+    reintenta cada reintento_s hasta que vuelve. conectar() sigue siendo un único intento."""
+
+    def __init__(self, puerto="/dev/ttyUSB0", fabrica=None, reintento_s=2.0):
         self.puerto = puerto
         self._fabrica = fabrica
+        self.reintento_s = max(0.2, float(reintento_s))
         self.w = None
         self.lista = False
         self.error = None
+        self.perdidas = 0                    # veces que se ha caído estando lista
+        self.reconecta = False               # True con iniciar()
+        self._parar = threading.Event()
+        self._hilo = None
         self._postura, self._t_postura, self._t_leida = None, 0.0, 0.0
 
+    @staticmethod
+    def _soltar(w):
+        if w is None:
+            return
+        try:
+            w.desconectar()
+        except Exception:
+            pass
+
     def conectar(self):
+        """Un intento. True si queda conectada y con par."""
+        w = None
         try:
             if self._fabrica is not None:
-                self.w = self._fabrica()
+                w = self._fabrica()
             else:
                 from orca_hardware import OrcaHardwareWrapper
-                self.w = OrcaHardwareWrapper(puerto=self.puerto)
-            if not self.w.conectar():
+                w = OrcaHardwareWrapper(puerto=self.puerto)
+            if not w.conectar():
                 self.error = "no se pudo conectar la mano con par (mira la terminal)"
+                self._soltar(w)
                 return False
-            self.lista = True
+            if self._parar.is_set():                    # se cerró mientras conectaba
+                self._soltar(w)
+                return False
+            self.w, self.error, self.lista = w, None, True
             return True
         except Exception as e:
             self.error = f"error al conectar la mano: {e}"
+            self._soltar(w)
             return False
+
+    def iniciar(self):
+        """Conecta y vigila en un hilo (reconexión automática)."""
+        self.reconecta = True
+        self._parar.clear()
+        self._hilo = threading.Thread(target=self._bucle, daemon=True, name="ManoActiva")
+        self._hilo.start()
+        return self
+
+    def _viva(self):
+        w = self.w
+        return w is not None and bool(getattr(w, "conectado", True))
+
+    def _bucle(self):
+        avisado = False
+        while not self._parar.is_set():
+            if not self.lista:
+                if self.conectar():
+                    if self.perdidas:
+                        print("✅ OrcaHand con par: reconectada.")
+                    avisado = False
+                    continue
+                if not avisado:
+                    print(f"⚠️  OrcaHand con par: {self.error}. Reintento cada {self.reintento_s:.0f} s.")
+                    avisado = True
+                self._parar.wait(self.reintento_s)
+            elif not self._viva():
+                self.lista = False
+                self.perdidas += 1
+                self.error = "se ha desconectado (¿cable USB o alimentación?); reconectando"
+                print(f"❌ OrcaHand con par: {self.error}…")
+                w, self.w = self.w, None
+                self._soltar(w)
+                avisado = True
+            else:
+                self._parar.wait(0.2)
 
     def enviar(self, postura_ctrl):
         """postura_ctrl: {índice de ctrl de la mano 0..16: rad}."""
-        if not self.lista:
-            return False
         w = self.w
+        if not self.lista or w is None:
+            return False
         arr = [float(postura_ctrl.get(w.JOINT_A_CTRL[j], 0.0)) for j in w._joints]
         return w.enviar_posiciones(arr)
 
     def postura(self, max_edad_s=1.0):
         """{joint de orca_core: rad (sim)} real, leída como mucho cada 0,1 s."""
-        if not self.lista:
+        w = self.w
+        if not self.lista or w is None:
             return None
         ahora = time.time()
         if ahora - self._t_leida >= 0.1:
             self._t_leida = ahora
             try:
-                e = self.w.estado_real()
-                q = self.w._desde_sdk({j: v[1] for j, v in e.items()})
+                e = w.estado_real()
+                q = w._desde_sdk({j: v[1] for j, v in e.items()})
                 if q is not None and np.all(np.isfinite(q)):
-                    self._postura, self._t_postura = dict(zip(self.w._joints, (float(v) for v in q))), ahora
+                    self._postura, self._t_postura = dict(zip(w._joints, (float(v) for v in q))), ahora
             except Exception:
                 pass
         if self._postura is None or ahora - self._t_postura > max_edad_s:
@@ -359,15 +422,21 @@ class ManoActiva:
         return dict(self._postura)
 
     def estado(self):
+        if self.lista and self._viva():
+            n = len(getattr(self.w, "_joints", []) or [])
+            return dict(estado="ok", texto="con par · la mueve la tarea", motores_ok=n, motores_total=n,
+                        par_activo=n, puerto=self.puerto, postura=self._postura is not None)
         if self.error:
-            return dict(estado="error", texto=self.error, puerto=self.puerto)
-        if not self.lista:
-            return dict(estado="aviso", texto="conectando con par…", puerto=self.puerto)
-        n = len(getattr(self.w, "_joints", []) or [])
-        return dict(estado="ok", texto="con par · la mueve la tarea", motores_ok=n, motores_total=n,
-                    par_activo=n, puerto=self.puerto, postura=self._postura is not None)
+            return dict(estado="error", texto=self.error + (" · reintentando" if self.reconecta else ""),
+                        puerto=self.puerto)
+        return dict(estado="aviso", texto="conectando con par…", puerto=self.puerto)
 
     def cerrar(self):
-        if self.w is not None and self.lista:
-            self.w.desconectar()
+        self._parar.set()
+        h = self._hilo
+        if h is not None and h.is_alive() and h is not threading.current_thread():
+            h.join(timeout=5.0)
+        self._hilo = None
+        w, self.w = self.w, None
         self.lista = False
+        self._soltar(w)

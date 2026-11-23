@@ -143,24 +143,28 @@ def main():
     # ── MENÚ DE ARRANQUE CON ZENITY (compatible con Wayland/GNOME) ──────────
     # zenity es la herramienta de diálogos nativa de GNOME, siempre visible.
     # Si no está instalada: sudo apt install zenity
-    # La misma pregunta de siempre, con CINCO botones (tres --extra-button), en este orden:
+    # La misma pregunta de siempre, con SEIS botones (cuatro --extra-button), en este orden:
     #   [Extra 1] 💻 Simulación             → SIMULACION
     #   [Extra 2] 🎚️ Gemelo (sliders)        → GEMELO_SLIDERS: mano física + guante igual que
     #             HARDWARE_REAL, pero el BRAZO se mueve con la ventana de sliders
     #             (skill_shield/interfaz/sliders_brazo.py)
     #   [Extra 3] 🤖 Mano Física + Gemelo   → HARDWARE_REAL
-    #   [OK]      🎥 Grabación              → GRABACION (16-nov): HARDWARE_REAL + cámara de cabeza
+    #   [Extra 4] 🎥 Grabación              → GRABACION (16-nov): HARDWARE_REAL + cámara de cabeza
     #             (herramientas, pelotas, mapa de obstáculos y frenado) para grabar demos
-    #   [Cancel]  🧠 Funcionamiento autónomo → AUTONOMO (10-nov; paquete skill_shield/autonomo/)
+    #   [OK]      🧠 Funcionamiento autónomo → AUTONOMO (10-nov; paquete skill_shield/autonomo/)
+    #   [Cancel]  ✖ Salir
     # zenity devuelve 1 tanto para Cancel como para los botones extra; los extra se distinguen
-    # porque escriben su etiqueta en stdout.
-    # OJO: cerrar la ventana (X / Esc) equivale a Cancel → hoy entra en AUTONOMO. Mientras el
-    # modo autónomo no mueva nada da igual; cuando mueva el FR5, exigir siempre el pedal.
+    # porque escriben su etiqueta en stdout. Cerrar la ventana (X / Esc) devuelve lo mismo que
+    # Cancel: por eso Cancel es «Salir» (23-nov) y cerrar la ventana termina el programa. Con
+    # --default-cancel, Intro también es «Salir» (nunca arranca un modo por accidente).
     import subprocess
     global MODO_EJECUCION
     _BOTON_SIMULACION = "💻  Simulación Virtual (MuJoCo)"
     _BOTON_SLIDERS    = "🎚️  Gemelo Digital (sliders)"
     _BOTON_MANO       = "🤖  Mano Física (USB) + Gemelo Digital"
+    _BOTON_GRABACION  = "🎥  Grabación (teleoperación + objetos)"
+    _botones = {_BOTON_SIMULACION: "SIMULACION", _BOTON_SLIDERS: "GEMELO_SLIDERS",
+                _BOTON_MANO: "HARDWARE_REAL", _BOTON_GRABACION: "GRABACION"}
     try:
         resultado = subprocess.run(
             [
@@ -170,8 +174,10 @@ def main():
                 f'--extra-button={_BOTON_SIMULACION}',                  # 1º
                 f'--extra-button={_BOTON_SLIDERS}',                     # 2º
                 f'--extra-button={_BOTON_MANO}',                        # 3º
-                '--ok-label=🎥  Grabación (teleoperación + objetos)',   # 4º
-                '--cancel-label=🧠  Funcionamiento autónomo',            # 5º (el último)
+                f'--extra-button={_BOTON_GRABACION}',                   # 4º
+                '--ok-label=🧠  Funcionamiento autónomo',               # 5º
+                '--cancel-label=✖  Salir',                              # 6º (el último)
+                '--default-cancel',
                 '--width=420',
                 '--height=50',
             ],
@@ -180,21 +186,15 @@ def main():
         stderr_txt = resultado.stderr.decode(errors="ignore").strip() if resultado.stderr else ""
         stdout_txt = resultado.stdout.decode(errors="ignore").strip() if resultado.stdout else ""
 
-        if resultado.returncode == 1 and stdout_txt == _BOTON_SIMULACION:
-            # Botón extra 1 → Simulación
-            MODO_EJECUCION = "SIMULACION"
-        elif resultado.returncode == 1 and stdout_txt == _BOTON_SLIDERS:
-            # Botón extra 2 → gemelo digital con el brazo en sliders
-            MODO_EJECUCION = "GEMELO_SLIDERS"
-        elif resultado.returncode == 1 and stdout_txt == _BOTON_MANO:
-            # Botón extra 3 → mano física + gemelo digital normal
-            MODO_EJECUCION = "HARDWARE_REAL"
+        if resultado.returncode == 1 and stdout_txt in _botones:
+            MODO_EJECUCION = _botones[stdout_txt]          # uno de los botones extra
         elif resultado.returncode == 0:
-            # Botón OK → grabación: teleoperación + cámara de cabeza (16-nov)
-            MODO_EJECUCION = "GRABACION"
-        elif resultado.returncode == 1 and not stdout_txt and not stderr_txt:
-            # Botón Cancelar (el último) → funcionamiento autónomo
+            # Botón OK → funcionamiento autónomo
             MODO_EJECUCION = "AUTONOMO"
+        elif resultado.returncode == 1 and not stdout_txt and not stderr_txt:
+            # «Salir», o la ventana cerrada con la X / Esc → no se arranca nada
+            print("👋 Ventana cerrada: no se inicia ningún modo.")
+            return
         else:
             # Cualquier otro código, o zenity escribió algo en stderr → no sabemos si el
             # usuario llegó a ver la ventana. Por seguridad, NUNCA asumimos hardware real.
@@ -215,7 +215,7 @@ def main():
 
     # ── FUNCIONAMIENTO AUTÓNOMO: paquete aparte con su propio bucle (no usa el de abajo) ──
     # Se sale de main() ANTES de arrancar fr5_servo, la mano o las cámaras: el paquete
-    # arranca las suyas (FR5 en simulacro, cámara de cabeza, web y gemelo en MuJoCo).
+    # arranca las suyas (FR5, cámaras, web y gemelo en MuJoCo).
     if MODO_EJECUCION == "AUTONOMO":
         from skill_shield.autonomo.modo import ejecutar as ejecutar_autonomo
         ejecutar_autonomo(globals())
@@ -260,9 +260,13 @@ def main():
         elif fr5 is None or not fr5.conectado:
             sliders.mensaje("Sin conexión con el FR5: los sliders solo mueven el simulador.")
     fr5_al_inicio = fr5 is not None and fr5.conectado   # (si falla luego, los sliders desarman)
-    # ─────────────────────────────────────────────────────────────────────────
-    # ─────────────────────────────────────────────────────────
-    # ────────────────────────────────────────────────────
+    # 23-nov: límite del J4 (la mano no se acerca al giro del J4: rompería una pieza). Se prepara
+    # en un hilo DESPUÉS de los fork de fr5_servo y de la ventana de sliders.
+    limite_j4 = None
+    if modo_sliders and globals().get("SLIDERS_LIMITE_J4", True):
+        from skill_shield.interfaz.limite_j4 import LimiteJ4
+        limite_j4 = LimiteJ4.desde_config(globals()).iniciar()
+    obj_sl_ok, aviso_j4 = None, False    # último objetivo de los sliders que ha pasado el límite del J4
 
     # — Cargar modelo MuJoCo (UNA SOLA VEZ) —
     modelo = mujoco.MjModel.from_xml_path(RUTA_XML)
@@ -2194,8 +2198,12 @@ def main():
                             sliders.estado_fr5(FR5_ENVIANDO if fr5_enviando else FR5_ESPERA)
 
                         if sliders.recien_armado():
+                            obj_sl_ok, aviso_j4 = None, False
                             if _q_vis_sl is None:
                                 sliders.desarmar("No se arma: no hay lectura reciente de la pose del FR5.")
+                            elif limite_j4 is not None and not limite_j4.listo:
+                                sliders.desarmar("No se arma: " + (limite_j4.error or "preparando el límite del "
+                                                                   "J4 (unos segundos); vuelve a ARMAR."))
                             elif sliders.fuera_de_rango(_q_vis_sl):
                                 sliders.desarmar("No se arma: " + ", ".join(f"J{_j}" for _j in sliders.fuera_de_rango(_q_vis_sl)) + " fuera "
                                                  "del rango de los sliders (muévelo con la WebApp).")
@@ -2209,7 +2217,32 @@ def main():
                                          " (solo simulador)"))
                         if sliders.armado:
                             gen_brazo.factor = sliders.velocidad
-                            _enviar_brazo(range(6), sliders.objetivo_rad(), de_sliders=True)
+                            _obj_sl = np.asarray(sliders.objetivo_rad(), float)
+                            if limite_j4 is not None:
+                                # 23-nov: límite del J4. Desde donde va el brazo (el comando) hasta lo
+                                # pedido; si no pasa, se queda en el último objetivo válido.
+                                _q_cmd_sl = np.array([datos.ctrl[_i] for _i in _idx_ctrl_fr5], float)
+                                if obj_sl_ok is None or np.max(np.abs(_obj_sl - obj_sl_ok)) > 1e-4:
+                                    _ok_j4, _h_j4 = limite_j4.permitido(_q_cmd_sl, _obj_sl)
+                                    if _ok_j4:
+                                        obj_sl_ok = _obj_sl
+                                        if aviso_j4:
+                                            aviso_j4 = False
+                                            sliders.mensaje("")
+                                    else:
+                                        if obj_sl_ok is None:
+                                            obj_sl_ok = _q_cmd_sl
+                                        if not aviso_j4:
+                                            aviso_j4 = True
+                                            _txt_j4 = (f"LÍMITE DEL J4: ahí la mano quedaría a {100 * _h_j4:.1f} cm "
+                                                       f"del giro del J4 (mín. {100 * limite_j4.holgura:.0f} cm). "
+                                                       "El brazo se queda en la última postura válida.")
+                                            sliders.mensaje(_txt_j4)
+                                            print("⛔ SLIDERS: " + _txt_j4)
+                                _obj_sl = obj_sl_ok
+                            _enviar_brazo(range(6), _obj_sl, de_sliders=True)
+                        else:
+                            obj_sl_ok = None
                         cv2.putText(frame_bgr,
                                     "BRAZO: SLIDERS " + ("ARMADO" if sliders.armado else "DESARMADO (quieto)"),
                                     (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55,

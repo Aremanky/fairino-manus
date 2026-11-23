@@ -880,3 +880,122 @@ def test_correccion_fija_de_la_pelota_vista_desde_la_camara():
     Tc[:3, :3] = np.array([[-1.0, 0, 0], [0, 0, -1.0], [0, -1.0, 0]])  # mira hacia -y (x de la imagen = -x del mundo)
     T = t._corregir_pelota(np.eye(4), Tc)
     assert np.allclose(T[:3, 3], (0.015, -0.02, 0.005))               # 1,5 cm a la izquierda de la imagen, 2 cm más lejos
+
+
+# ══════════════════════ (23-nov) sin FR5, mano con par caída, pedal desactivado ══════════════════════
+def test_sin_fr5_planifica_y_ejecuta_en_el_gemelo():
+    """FR5 apagado (o AUTONOMO_CON_FR5 = False): la tarea sale de la pose del gemelo y se hace solo en
+    el gemelo, aunque AUTONOMO_FR5_SIMULACRO sea False."""
+    for fr5 in (None, FR5Falso()):
+        if fr5 is not None:
+            fr5.conectado = False                               # encendido nunca / apagado
+        t = TA.Tarea(dict(G, AUTONOMO_TAREA_MOVER_MANO=False), ".", fr5, simulacro=False,
+                     fabrica_planificador=PlanFalso)
+        q_gem = np.radians([10.0, -20.0, 30.0, 0.0, 40.0, 0.0])
+        ctx = lambda: dict(q_real=None, q_gemelo=q_gem, herramientas=HERR, objetivo_id=20, mapa=None)
+        assert t.solo_gemelo()
+        t.orden({"tarea": dict(accion="planificar", id="g-1")}, ctx)
+        t0 = time.time()
+        while t.estado == "planificando" and time.time() - t0 < 5:
+            time.sleep(0.01)
+            t.paso(0.0, None, False, ctx)
+        assert t.estado == "lista" and np.allclose(t.plan.q0, q_gem) and t.solo_gemelo()
+        t.orden({"tarea": dict(accion="ejecutar", id="g-2")}, ctx)
+        assert t.estado == "pausada"
+        q_vista = None
+        for _ in range(3000):
+            q_vista = t.paso(1 / 60, None, True, ctx)
+            if t.estado == "terminada":
+                break
+        assert t.estado == "terminada" and q_vista is not None      # el gemelo enseña la tarea
+        if fr5 is not None:
+            assert fr5.hab == [] and fr5.pub == []                   # el FR5 real ni se toca
+
+
+def test_plan_del_gemelo_no_se_vuelve_con_el_fr5_real():
+    fr5 = FR5Falso()
+    fr5.conectado = False
+    t = TA.Tarea(dict(G, AUTONOMO_TAREA_MOVER_MANO=False), ".", fr5, simulacro=False, fabrica_planificador=PlanFalso)
+    q_gem = np.zeros(6)
+    ctx_g = lambda: dict(q_real=None, q_gemelo=q_gem, herramientas=HERR, objetivo_id=20, mapa=None)
+    t.orden({"tarea": dict(accion="planificar", id="v-1")}, ctx_g)
+    t0 = time.time()
+    while t.estado == "planificando" and time.time() - t0 < 5:
+        time.sleep(0.01)
+        t.paso(0.0, None, False, ctx_g)
+    assert t._q_inicio is not None and t._q_inicio_gemelo
+    fr5.conectado = True                                        # ahora el FR5 está: «volver» con el real, no
+    t.orden({"tarea": dict(accion="volver", id="v-2")},
+            lambda: dict(q_real=fr5.q, q_gemelo=q_gem, herramientas=HERR, objetivo_id=20, mapa=None))
+    assert t.estado == "error" and "gemelo" in t.texto
+
+
+class _WrapperFalso:
+    JOINT_A_CTRL = {"a": 0}
+    _joints = ["a"]
+
+    def __init__(self, n):
+        self.n, self.conectado, self.desconectada = n, False, False
+
+    def conectar(self):
+        self.conectado = True
+        return True
+
+    def enviar_posiciones(self, arr):
+        return self.conectado
+
+    def desconectar(self):
+        self.desconectada = True
+
+
+def test_mano_activa_se_reconecta_sola_y_lo_dice():
+    from skill_shield.autonomo.ejecucion import ManoActiva
+    creados = []
+    m = ManoActiva("/dev/falso", fabrica=lambda: creados.append(_WrapperFalso(len(creados))) or creados[-1],
+                   reintento_s=0.2).iniciar()
+    try:
+        t0 = time.time()
+        while not m.lista and time.time() - t0 < 2:
+            time.sleep(0.01)
+        assert m.lista and m.estado()["estado"] == "ok"
+        creados[0].conectado = False                            # se cae (cable / alimentación)
+        t0 = time.time()
+        while m.perdidas == 0 and time.time() - t0 < 2:
+            time.sleep(0.01)
+        assert m.perdidas == 1 and creados[0].desconectada
+        t0 = time.time()
+        while not m.lista and time.time() - t0 < 3:
+            time.sleep(0.01)
+        assert m.lista and len(creados) == 2 and m.estado()["estado"] == "ok"
+    finally:
+        m.cerrar()
+    assert not m.lista and creados[-1].desconectada
+
+
+def test_mano_caida_a_mitad_aborta_la_tarea():
+    t, fr5, mano, mon = _tarea(mover_mano=True)
+    _orden(t, "planificar", 1, fr5)
+    _esperar_plan(t, fr5)
+    _orden(t, "ejecutar", 2, fr5)
+    t0 = time.time()
+    while not mano.lista and time.time() - t0 < 2:
+        t.paso(1 / 60, fr5.q, True)
+        time.sleep(0.01)
+    for _ in range(20):
+        t.paso(1 / 60, fr5.q, True)
+    assert t.estado == "ejecutando" and fr5.hab == [True]
+    mano.lista = False                                          # se cae la mano
+    t.paso(1 / 60, fr5.q, True)
+    assert t.estado == "error" and "OrcaHand" in t.texto and fr5.hab[-1] is False
+
+
+def test_pedal_desactivado_permite_mover_mientras_la_web_vive():
+    from skill_shield.autonomo.modo import Control
+    c = Control()
+    ahora = 1000.0
+    c.actualizar(dict(pedal_obligatorio=False, pedal=False), ahora, ahora)
+    assert c.permiso_tarea() and c.movimiento_permitido(True)
+    c.actualizar(dict(pedal_obligatorio=True, pedal=False), ahora, ahora)
+    assert not c.permiso_tarea()
+    c.actualizar(dict(pedal_obligatorio=False, pedal=False), ahora - 5, ahora)    # web caída
+    assert not c.permiso_tarea()

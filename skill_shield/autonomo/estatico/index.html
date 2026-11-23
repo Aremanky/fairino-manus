@@ -223,7 +223,7 @@ footer b{color:var(--azul)}
   <span class="chip"><i class="punto" id="pGem"></i><b>Gemelo</b><span id="cGem">—</span></span>
   <span class="chip"><i class="punto" id="pCal"></i><b>Calibración</b><span id="cCal">—</span></span>
   <span class="chip"><i class="punto" id="pMapa"></i><b>Obstáculos</b><span id="cMapa">—</span></span>
-  <span class="paso" id="paso">Paso 2 · solo lectura</span>
+  <span class="paso" id="paso">Sin datos</span>
 </div></div>
 
 <main>
@@ -317,7 +317,7 @@ footer b{color:var(--azul)}
         </button>
         <div class="mov"><span id="movEtq" class="etq neutro">—</span><span class="motivo" id="movMotivo"></span></div>
         <div class="aviso-paso" id="avisoPaso"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v5M12 16h.01"/></svg>
-          <span>Paso 2: el FR5 está en simulacro. El pedal se registra, pero el robot no se mueve.</span></div>
+          <span id="avisoPasoTxt">El FR5 real no se mueve: la tarea se hace solo en el gemelo.</span></div>
         <div class="interruptor">
           <div class="txt"><b>Pedal obligatorio</b><span id="swTxt">Hombre muerto: el robot solo se mueve mientras se mantiene pulsado.</span></div>
           <label class="sw"><input type="checkbox" id="swPedal" checked aria-label="Pedal obligatorio"><span class="pista"></span></label>
@@ -491,8 +491,11 @@ function pintar(e){
   etq($("movEtq"), perm ? "Movimiento permitido" : "Movimiento bloqueado", perm ? (oblig ? "ok" : "aviso") : "mal");
   $("movMotivo").textContent = vivo ? (k.motivo || "") : "sin datos del modo autónomo";
   $("avisoPaso").style.display = k.paso_mueve ? "none" : "";
+  $("avisoPasoTxt").textContent = (e.tarea && e.tarea.solo_gemelo)
+    ? "Sin FR5 (apagado o sin conexión): la tarea se hace solo en el gemelo."
+    : "El FR5 está en simulacro: la tarea se hace solo en el gemelo, el robot no se mueve.";
   $("btnReset").disabled = !autorizado;
-  $("paso").textContent = (e.modo || "").includes("paso 2") ? "Paso 2 · solo lectura" : (e.modo || "Sin datos");
+  $("paso").textContent = e.modo || "Sin datos";
 }
 
 async function refrescar(){
@@ -673,7 +676,7 @@ function pintarTarea(t, vivo){
   $("tareaTxt").textContent = !vivo ? "Sin datos del modo autónomo." : !t ? "La tarea está desactivada en config (AUTONOMO_TAREA)." : (t.texto || "")
     + (t.avisos && t.avisos.length && !(t.texto || "").includes("⚠️") ? " ⚠️ " + t.avisos.join(" · ") : "");
   $("tareaPaso").textContent = on && t.i && t.n ? `tramo ${t.i} de ${t.n}` : "";
-  $("tareaMeta").textContent = on ? (t.simulacro ? "simulacro · solo el gemelo" : `FR5 REAL · ${t.vel_deg_s}°/s`)
+  $("tareaMeta").textContent = on ? (t.solo_gemelo ? "sin FR5 · solo el gemelo" : t.simulacro ? "simulacro · solo el gemelo" : `FR5 REAL · ${t.vel_deg_s}°/s`)
     + (t.fuente_pelota === "a" ? " · pelota medida con la cámara A" : "") : "";
   $("tareaBarra").style.width = on ? Math.round((t.progreso || 0) * 100) + "%" : "0";
   $("tareaProg").classList.toggle("hecho", !!(on && t.estado === "terminada"));

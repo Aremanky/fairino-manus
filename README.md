@@ -1,194 +1,230 @@
-# brazo-robotico
+# Skill Shield Nivel 6 — FR5 + OrcaHand (fairino-manus)
 
+Teleoperación y funcionamiento autónomo de un brazo **Fairino FR5** con una **OrcaHand** en la brida,
+montados en una peana móvil (soporte de hombros), con un **gemelo digital en MuJoCo**.
 
-Creear entorno
-```bash
-python3 -m venv venv_nivel6
-```
-Activar entorno
-```bash
-source venv_nivel6/bin/activate
-```
-Descargar dependencias
-```bash
-pip install -r requirements.txt
-```
-`requirements.txt` ya lleva todo (opencv-contrib, depthai, mediapipe 0.10.14, mujoco, torch, fastapi…).
-**No instales `opencv-python` aparte**: choca con `opencv-contrib-python` y desaparece `cv2.aruco`.
+- **Teleoperación:** el brazo sigue al operario visto por cámaras **Luxonis OAK-D Pro** (o a una ventana
+  de sliders) y los dedos siguen al guante **MANUS** (o a la cámara). El FR5 real solo se mueve con el
+  pedal de hombre muerto.
+- **Grabación y entrenamiento:** las demostraciones se graban y una red **ACT** aprende a repetirlas
+  (`skill_shield/ia/`).
+- **Funcionamiento autónomo:** con la cámara de cabeza, el robot detecta objetos (pelotas, herramientas
+  con ArUco), hace un mapa de obstáculos, planifica (cuRobo en la GPU si está) y ejecuta la tarea
+  mandada desde una **web** abierta a la red local.
 
-Si mediapipe dice que no hay versión para tu Python, el entorno tiene que ser de Python 3.12:
-```bash
-rm -rf venv_nivel6
-python3.12 -m venv venv_nivel6
-source venv_nivel6/bin/activate
-pip install -r requirements.txt
-```
-Submódulo de los táctiles (una vez): `git submodule update --init orca_core_touch`
+Controladora del FR5: V4.0.0.x · SDK de FAIRINO en `fairino/Robot.py` (V4.0.0, SDK V2.2.8).
 
 ---
-O simplemente arrancar con la opción
+## Instalación y arranque
+
 ```bash
-./arrancar_nivel6.sh
-```
-Cada vez que se lanza comprueba e instala **solo lo que falte**: el submódulo de los táctiles, el entorno
-`venv_nivel6` (y `requirements.txt` si ha cambiado), **cuRobo** (PyTorch para la GPU, cuRobo V2 en
-`externos/curobo` y la configuración del robot) y **TOPP-RA**; luego arranca. cuRobo y TOPP-RA son opcionales: si no
-se pueden instalar, avisa y arranca igual.
-```bash
-./arrancar_nivel6.sh --comprobar     # solo dice qué falta (no instala ni arranca)
+./arrancar_nivel6.sh                 # comprueba, instala SOLO lo que falte y arranca
+./arrancar_nivel6.sh --comprobar     # solo dice qué falta
 ./arrancar_nivel6.sh --instalar      # instala lo que falte, sin arrancar
 ./arrancar_nivel6.sh --probar        # además prueba cuRobo y TOPP-RA (sin mover el robot)
 ```
+El script se encarga de: el submódulo de los táctiles (`orca_core_touch`), el entorno `venv_nivel6`
+(Python 3.12) con `requirements.txt` (lo vuelve a pasar si cambia), **cuRobo** (PyTorch con CUDA 13,
+cuRobo en `externos/curobo`) y **TOPP-RA**. cuRobo y TOPP-RA son opcionales: si no se pueden instalar,
+avisa y arranca igual.
 
-Paquetes del sistema (no van por pip): `sudo apt install zenity python3.12-tk`
+A mano, si se prefiere:
+```bash
+python3.12 -m venv venv_nivel6 && source venv_nivel6/bin/activate
+pip install -r requirements.txt
+git submodule update --init orca_core_touch
+python Skill_Shield_Nivel_6.py
+```
+- Paquetes del sistema: `sudo apt install zenity python3.12-tk`.
+- **No instales `opencv-python` aparte**: choca con `opencv-contrib-python` y desaparece `cv2.aruco`.
+- Todos los ajustes están en `config.py`, agrupados por bloques (`TELEOP_*`, `SLIDERS_*`, `GRABACION_*`,
+  `IA_*`, `AUTONOMO_*`, `CALIB_*`, `FR5_*`, `ORCA_HW_*`…).
+- Contraseña de la web del modo autónomo: variable `SKILL_SHIELD_WEB_CLAVE` o `clave_web.txt`.
 
-Pruebas sin hardware (no hace falta robot, mano, guante ni cámaras), en `tests/`:
+---
+## Hardware
+
+| Pieza | Para qué | Dónde se configura |
+|---|---|---|
+| Fairino FR5 | brazo (ServoJ cada 8 ms en su propio proceso, `skill_shield/hardware/fr5_servo.py`) | `FR5_*` (carga, TCP, límites; IP `FR5_IP`, por defecto 192.168.58.2) |
+| OrcaHand | mano, por USB (`orca_hardware.py`, `orca_mano/`) | `PUERTO_HARDWARE`, `ORCA_HW_*` |
+| Táctiles de la OrcaHand | fuerza en las yemas (`puente_tactil.py`) | `ORCA_TACTIL_*` |
+| Guante MANUS Core 3 | dedos del operario (`skill_shield/mano/manus_guante.py`, `calibrar_manus.py`) | `FUENTE_DEDOS`, `MANUS_*` |
+| OAK-D Pro **A** | teleoperación y, en el modo autónomo, cámara fija de la mesa | `CAM_A_MXID`, `AUTONOMO_CAM_A_*` |
+| OAK-D Pro **B** | cámara de cabeza del robot (objetos y obstáculos) | `CAM_B_MXID`, `AUTONOMO_CAM_MXID` |
+| OAK-D Pro **C** | teleoperación (cruzada con la A) en «Grabación» | `CAM_C_MXID` |
+| Pedal | hombre muerto; de momento la tecla **P** mantenida | `TELEOP_FR5_PEDAL` |
+
+Varias OAK-D a la vez: cada una en un puerto USB3, mejor en controladores distintos. Para ver sus MxId:
+`python -c "from skill_shield.vision.multicamara import listar_camaras as l; print(l())"`.
+
+---
+## Modos (menú de arranque)
+
+| Botón | Mano | Brazo | FR5 real |
+|---|---|---|---|
+| 💻 Simulación Virtual | solo MuJoCo | cámaras | no (salvo `FR5_REAL_ACTIVO`) |
+| 🎚️ Gemelo Digital (sliders) | guante → OrcaHand | ventana de sliders | sí, con ARMAR (`SLIDERS_*`) |
+| 🤖 Mano Física + Gemelo Digital | guante → OrcaHand | cámaras (A + `CAM_B_MXID`) | sí, con el pedal (`TELEOP_REAL_*`) |
+| 🎥 Grabación | guante → OrcaHand | cámaras A + C; B = cabeza | sí, con el pedal (`TELEOP_REAL_*`) |
+| 🧠 Funcionamiento autónomo | la mueve la tarea | lo mueve la tarea | sí, con el pedal de la web (`AUTONOMO_*`) |
+| ✖ Salir | | | |
+
+Cerrar la ventana con la **X**, **Esc** o **Intro** es «Salir»: no arranca nada.
+
+En todos los modos con FR5, el gemelo enseña la **pose real** del brazo y un brazo «fantasma» con el
+objetivo. La seta física sigue siendo la parada de verdad.
+
+### Mano Física + Gemelo Digital (teleoperación)
+- **[A]** + T-pose: calibra. El robot **no** se mueve.
+- **Pedal** (P mantenida): mientras se mantiene, el FR5 entra despacio hacia tu postura y te sigue
+  (≤ `TELEOP_REAL_FR5_VEL_MAX_DEG_S`). Al soltarlo, o con **[S]**, **[A]**, **[I]** o **[Q]**: quieto.
+- `TELEOP_REAL_FR5_SIMULACRO = True` para probar sin que se mueva. Sin pedal configurado
+  (`TELEOP_FR5_PEDAL = None`) el FR5 real no se arma nunca.
+- La IK evita el soporte, el suelo y las cajas de `TELEOP_FR5_OBSTACULOS` (la mesa).
+
+### Gemelo Digital (sliders)
+- Una ventana con un slider por articulación, en **grados de la controladora** (los de la WebApp).
+- **[A]** en la ventana de la cámara activa la mano. Las cámaras no se abren (`SLIDERS_SIN_CAMARAS`).
+- **ARMAR**: el brazo (gemelo y FR5 real) sigue a los sliders con la velocidad limitada. Solo se arma
+  si el robot está dentro del rango de los sliders. **STOP / Esc / Espacio / cerrar la ventana** →
+  desarmado.
+- **Límite del J4** (`SLIDERS_LIMITE_J4`, `skill_shield/interfaz/limite_j4.py`): la mano nunca se acerca
+  al giro del J4 a menos de `SLIDERS_J4_HOLGURA` (5 cm, unos |J5| ≤ 120°), porque eso rompe una pieza
+  de la mano. Se comprueba el camino entero; si no pasa, el brazo se queda en la última postura válida
+  y la ventana lo dice. Se prepara unos segundos al arrancar.
+- Probar la ventana sola, sin robot: `python -m skill_shield.interfaz.sliders_brazo`.
+
+### Grabación (teleoperación + objetos)
+La teleoperación de arriba más lo que ve el modo autónomo con la cámara de cabeza (`skill_shield/ia/cabeza.py`):
+- **Cámaras:** A y C cruzadas para teleoperar (sin `CAM_C_MXID`, solo la A) y la B como cabeza:
+  herramientas con ArUco, pelotas y mapa de obstáculos. Extrínseca A↔C en `GRABACION_EXTRINSECAS_ARCHIVO`
+  (sola con el cuerpo al pulsar `[A]`, o con el tablero: `python calibrar_extrinseca.py --mxid-b <MxId de C>
+  --salida camaras_extrinsecas_ac.json`).
+- **Objetivo:** el objeto que se puede coger más cercano a la palma (`[O]` cambia de objeto).
+- **El brazo frena** contra los obstáculos del mapa (`GRABACION_FRENAR`), salvo alrededor del objetivo.
+- **Agarre asistido** (`GRABACION_AGARRE_ASISTIDO`): `[L]` lleva la mano a la postura de agarre con el
+  planificador del autónomo (con el pedal); al llegar, pisar el pedal pasa a modo **relativo** y empieza
+  a grabarse; al soltarlo se guarda. `[M]` marca el episodio como fallido, `[K]` vuelve a la
+  teleoperación normal, `[B]` bloquea el giro.
+
+---
+## IA: grabar, entrenar y reproducir
+
+`skill_shield/ia/` — red ACT que ve el objeto (desde la mano), los táctiles y la postura real de mano y brazo.
+Datos fuera del repo: `~/skill_shield_datos/episodios/<tarea>/` y `~/skill_shield_datos/modelos/`
+(`IA_DATOS_DIR` o `SKILL_SHIELD_DATOS`).
+
+- **[G]** empieza/termina un episodio (30 Hz). **[M]**: el último salió mal (no se entrena con él).
+- **[E]** entrena en segundo plano, o en la terminal:
+  ```bash
+  python -m skill_shield.ia.act coger_pelota                              # → modelos/coger_pelota.pth
+  python -m skill_shield.ia.act coger_pelota coger_destornillador --modelo agarre   # multitarea
+  python -m skill_shield.ia.act --todas
+  python -m skill_shield.ia.evaluar <modelo> --checkpoints
+  ```
+- **[I]** reproduce (con el FR5, arranca y para con el pedal). Cada acción pasa por el filtro de
+  seguridad (límites, velocidad, choques, saltos de la IK, distancia al objeto).
+
+---
+## Funcionamiento autónomo
+
+`skill_shield/autonomo/` — su propio bucle (`modo.py`) con procesos vigilados que se reinician solos
+si se caen (cámaras, web, gemelo de la web).
+
+- **Web** en `http://<IP del PC>:8080/` desde cualquier equipo de la red (`sudo ufw allow 8080/tcp` si
+  no carga). Lectura abierta (cámaras, gemelo, FR5, OrcaHand, táctiles, mapa); los mandos piden la
+  contraseña.
+- **Tarea:** se elige el objetivo (pelota o herramienta con ArUco) y se pulsa **Planificar** →
+  **Ejecutar**. Pelota: la coge en pinza desde arriba, la aprieta un poco y la deja en el punto de
+  dejada. Herramienta: finge el agarre, la «usa» en el punto de uso y la deja. Si el camino directo
+  choca, busca un rodeo.
+- **Pedal de la web:** botón grande (o barra espaciadora) que hay que mantener; si se suelta o se corta
+  la red, en ≤ 0,35 s se para. Con «Pedal obligatorio» desactivado (`AUTONOMO_PERMITIR_SIN_PEDAL`) la
+  tarea avanza sin pedal mientras la web siga en marcha; al reiniciarse la web vuelve a ser obligatorio.
+- **FR5:** con `AUTONOMO_FR5_SIMULACRO = False` la tarea mueve el robot real (≤ `AUTONOMO_FR5_VEL_MAX_DEG_S`);
+  se aborta si la controladora da error o si el robot no sigue lo mandado. Si el FR5 se apaga, se
+  reconecta solo (`AUTONOMO_FR5_RECONECTAR`) y nunca se arma solo.
+- **Sin FR5** (apagado, sin conexión o `AUTONOMO_CON_FR5 = False`): la tarea se planifica desde la pose
+  del gemelo y se hace **solo en el gemelo** (arranca en `AUTONOMO_GEMELO_REPOSO_DEG`). Un plan hecho
+  así nunca mueve el robot real, aunque luego se conecte.
+- **OrcaHand:** en solo lectura hasta la primera tarea; entonces se conecta con par y, si se cae, se
+  reconecta sola (`AUTONOMO_MANO_REINTENTO_S`). Si se cae con una tarea en marcha, la tarea se aborta.
+- **Cámaras:** cabeza = B (`AUTONOMO_CAM_MXID`); A fija mirando la mesa (`AUTONOMO_CAM_A`), que mide la
+  pelota de cerca al planificar y al afinar y aporta su profundidad al mapa.
+- **Mapa de obstáculos** (`mapa.py`): TSDF de la profundidad, sin el robot, el suelo ni el objetivo.
+  **Escena fija** (`escena_fija.py`): mesas y muebles escaneados una vez como cajas (`escena_fija.json`).
+- **Planificador:** comprueba siempre la mano entera contra el brazo (giro del J4 incluido), el soporte,
+  las mesas y el mapa (`choque_mano.py`, `mundo_tarea.py`); cuRobo con varias soluciones a la vez si está
+  instalado; TOPP-RA para los tramos articulares si está.
+- Para salir: cerrar la ventana de MuJoCo o Ctrl+C.
+- Probar por separado: `python -m skill_shield.autonomo.camara --ventana` · `python -m skill_shield.autonomo.web`.
+
+---
+## Calibraciones
+
+| Qué | Cómo | Resultado |
+|---|---|---|
+| Cámara de cabeza → robot | `python calibrar_camara_robot.py --auto` (tablero ChArUco en la mano, P mantenida) · comprobar con `--verificar` | `camara_robot.json` |
+| Cámara A → robot | `python calibrar_camara_robot.py --camara a --auto` | `camara_a_robot.json` |
+| Calibración a mano | `--manual` (arrastre en la WebApp + ESPACIO) o `--manual --sliders` (con la ventana de sliders y el pedal) · `--recalcular` con las muestras guardadas | |
+| Escala de la profundidad | `python calibrar_escala_profundidad.py` | `AUTONOMO_CAM_ESCALA_PROF` |
+| Extrínseca entre cámaras | `python calibrar_extrinseca.py` | `camaras_extrinsecas*.json` |
+| Guante MANUS | `python calibrar_manus.py` | `manus_calibracion.json` |
+| Carga de la brida | `python diagnosticos/identificar_carga.py` (`--leer` = la de la controladora) | `FR5_CARGA_*` |
+
+En la calibración, el robot solo se mueve con el pedal, a ≤ `CALIB_ROBOT_VEL_MAX_DEG_S`, y cada trayecto
+se comprueba antes (mano y tablero contra el brazo, el soporte, la cabeza, las cajas y el suelo; bloque
+`CALIB_*`). Generar el tablero: `--generar-tablero` (imprimir al 100 %, medir un cuadro con calibre).
+Marcadores de las herramientas: `python -m skill_shield.autonomo.herramientas --generar` (y `--probar`).
+Cierra antes el modo autónomo: la cámara y el robot tienen que estar libres.
+
+---
+## Diagnósticos (`diagnosticos/`)
+
+- `ajustar_gemelo.py` — que el gemelo coincida con el robot montado (giro de la base, instalación).
+- `medir_pelota.py --hoja` y luego `--diametro 0.070 --lado 0.035` — error real de la medida de la pelota.
+- `resumen_intentos.py [--desde AAAA-MM-DD]` — % de éxito de la tarea (cada intento se apunta en `diagnosticos/intentos.jsonl`).
+- `ver_estorbo.py [plan_fallido_….npz]` — qué cubos del mapa no dejan coger la pelota.
+- `banco_planes.py --guardar antes.json` / `--comparar antes.json` — comparar planes antes y después de un cambio.
+- `estimar_cdm_mano.py` — primera estimación del centro de masas de la mano.
+- `python -m skill_shield.autonomo.choque_mano [--mapa]` — huecos de la mano en posturas guardadas.
+
+---
+## Pruebas
+
+Sin hardware (ni robot, ni mano, ni guante, ni cámaras):
 ```bash
 python -m pytest tests -q
 ```
+Las de cuRobo y algunas de la IA necesitan la GPU / torch y se saltan si no están.
 
 ---
-## Modos de arranque (menú del principio)
+## Estructura
 
-| Modo | Mano (OrcaHand) | Brazo |
-|---|---|---|
-| 💻 Simulación Virtual | solo MuJoCo | cámaras (solo MuJoCo) |
-| 🎚️ Gemelo Digital (sliders) | guante/cámara → mano real por USB | **ventana de sliders** |
-| 🤖 Mano Física + Gemelo Digital | guante/cámara → mano real por USB | cámaras |
-| 🎥 Grabación (teleoperación + objetos) | guante → mano real por USB | cámaras A + C; la B es la cámara de cabeza (objetos y obstáculos) |
-| 🧠 Funcionamiento autónomo | *(en desarrollo)* | *(en desarrollo)* |
-
-### Grabación (teleoperación + objetos) — para grabar demos con el mundo
-La teleoperación de «Mano Física + Gemelo» (mismo pedal, mismo FR5 con `TELEOP_REAL_*`) más lo que ve el modo autónomo con la cámara de cabeza (`skill_shield/ia/cabeza.py`):
-- **Cámaras:** A y C cruzadas para teleoperar (pon el MxId de la C en `CAM_C_MXID`; sin ella, solo la A) y la **B como cámara de cabeza**, con el mismo proceso que el autónomo: herramientas con ArUco, pelotas y mapa de obstáculos. Necesita la calibración cámara de cabeza → robot (`camara_robot.json`).
-- **Extrínseca A↔C** en su propio archivo (`GRABACION_EXTRINSECAS_ARCHIVO`, no pisa la A↔B del modo normal): se calcula sola con el cuerpo al pulsar `[A]`, o con el tablero: `python calibrar_extrinseca.py --mxid-b <MxId de C> --salida camaras_extrinsecas_ac.json`.
-- **Objetivo automático:** el objeto que se puede coger más cercano a la palma; mientras se graba, el fijado al empezar el episodio. Se pinta en naranja en la ventana de MuJoCo, junto al resto de objetos y los obstáculos cercanos a la mano (cubos naranjas).
-- **El brazo frena** contra los obstáculos del mapa (la IK lo deja lo más cerca posible sin chocar; en la ventana de la cámara sale `FRENADO`). Alrededor del objetivo (`GRABACION_ZONA_OBJETO_M`) la mesa no frena —si no, no se podría coger— y en su lugar nada baja de la base del objeto. `GRABACION_FRENAR = False` para que solo se vean.
-- **Agarre asistido** (`skill_shield/ia/agarre_asistido.py`, `GRABACION_AGARRE_ASISTIDO`): así se graban las demos buenas.
-  1. `[A]` + T-pose como siempre. `[O]` cambia el objeto a coger (por defecto el más cercano a la mano).
-  2. `[L]`: el planificador del autónomo calcula cómo llevar la mano a la **postura de agarre** de ese objeto (la misma a la que llega la Tarea antes de bajar). Con el **pedal pisado** el brazo va; al soltarlo se para. Al llegar, un segundo quieto para que la cámara mida bien el objeto → `LISTO`.
-  3. Abre la mano y **pisa el pedal**: modo **relativo** con embrague —el robot copia tus desplazamientos y giros a la mitad (`GRABACION_ESCALA_POS`, `GRABACION_ESCALA_GIRO`), no tu postura— y **empieza a grabarse** el episodio. Coge el objeto y súbelo unos cm.
-  4. **Suelta el pedal**: el robot se para y el episodio se guarda. `[M]` si salió mal. Volver a pisar = relativo **sin grabar** (para dejar el objeto y apartarte). `[L]` otro agarre, `[K]` vuelta a la teleoperación normal, `[B]` bloquea el giro (solo traslación).
-  Así cada demo empieza donde empezará el agarre aprendido: tras el planificador. La mano la sigue llevando el guante.
-- **Entrenamiento:** los episodios llevan el objeto (con su orientación si es una herramienta) y si el brazo iba frenado. Con las pelotas, la red mide la mano en el **marco de agarre**: centro de la pelota, vertical del mundo y el eje lateral de la mano al empezar (`--marco mundo` para los ejes del mundo, como antes). Así el mismo gesto hecho desde otro lado de la mesa le parece igual. Los que pasan más del 20 % del tiempo frenados no se usan (`IA_MAX_FRENADO`, o `--max-frenado 1`). La red ve el objeto, no los obstáculos: de esos se encarga el filtro de seguridad.
-- Tres OAK-D a la vez: cada una en un puerto USB3, mejor en controladores distintos.
-
-### Funcionamiento autónomo (en desarrollo)
-- Última opción del menú. Fija `MODO_EJECUCION = "AUTONOMO"` y salta al paquete `skill_shield/autonomo/`, con su propio bucle.
-- **Paso 2 (ahora):** cámara de cabeza + gemelo en MuJoCo copiando la pose real del FR5 + estado de la OrcaHand y sus táctiles + web. **El robot no se mueve**: `fr5_servo` va siempre en simulacro en este modo y no se arma nunca. La OrcaHand se vigila en solo lectura (no se activa el par).
-- **Web (FastAPI)** en `http://<IP del PC>:8080/` desde cualquier equipo de la red. Necesita `./venv_nivel6/bin/pip install fastapi uvicorn`. Si no carga desde otro equipo: `sudo ufw allow 8080/tcp`.
-  - Lectura abierta: imagen de la cámara, FR5, OrcaHand, táctiles por dedo, gemelo.
-  - Mandos con contraseña (`AUTONOMO_WEB_CLAVE`, **cambiadla**): pedal, opción «Pedal obligatorio» y **Reiniciar tras colisión** (borrar error → disable → enable).
-  - **Pedal de la web:** botón grande (o barra espaciadora) que hay que mantener pulsado. Si se suelta, se corta la red o se cierra la pestaña, en ≤ 0,35 s el pedal cuenta como suelto. Con «Pedal obligatorio» desactivado se permite moverse sin pedal (se puede bloquear con `AUTONOMO_PERMITIR_SIN_PEDAL = False`). Siempre arranca activado.
-- **Gemelo en la web:** pestañas *Cámara · Gemelo · Las dos*. El gemelo se dibuja sin ventana (`render_gemelo.py`, solo la escena, sin los menús del visor): arrastrar para girar, Mayús+arrastrar para mover, rueda o +/− para acercar, y vistas Inicial/Frente/Lado/Arriba. La vista la comparten todos los que miran. Con `AUTONOMO_VENTANA_MUJOCO = False` ya no se abre la ventana de MuJoCo en el PC. Necesita OpenGL sin ventana (`AUTONOMO_SIM_GL = "egl"`; si falla prueba osmesa y glfw).
-- **Superponer gemelo** (con la calibración del paso 4): el gemelo visto desde la cámara calibrada, encima de la imagen real. Si la calibración está bien, el robot virtual tapa al real.
-- Cámara de cabeza = la antigua cámara B (`AUTONOMO_CAM_MXID`). Cámara A de la mesa (opcional): ver «Cámara A fija mirando la mesa».
-- Para salir: cerrar la ventana de MuJoCo o Ctrl+C.
-- Pruebas por separado: `python -m skill_shield.autonomo.camara --ventana` · `python -m skill_shield.autonomo.web`
-- Cerrar el menú con la X o Esc equivale a pulsar este botón (es el «Cancelar» de zenity).
-
-### Revisión del 18-nov (modo autónomo)
-Cambios de la revisión (todos con su clave en el bloque «(18-nov) Revisión del modo autónomo» de `config.py`, para poder volver atrás uno a uno):
-- **Pelota:** se apoya en la mesa deslizándola por el **rayo de la cámara** (no en vertical); centro por la **silueta** (ignora el lado en sombra), sin la distorsión de la lente y sin el sesgo de la mediana de profundidad.
-- **Escala de la profundidad:** `python calibrar_escala_profundidad.py` (tablero ChArUco: distancia por solvePnP frente a la del estéreo) → `AUTONOMO_CAM_ESCALA_PROF`.
-- **Autocorrección congelada** mientras hay una tarea (mide y lo dice en la terminal, pero no mueve nada a mitad de tarea).
-- **Planificador:** huecos de la mano **fijos** (`AUTONOMO_TAREA_MANO_HOLGURA`; ya no dependen de la postura de inicio); **mundo simple** (`mundo_tarea.py`: mesas = losas, el resto = cubos sin la capa de la mesa, tres márgenes); la postura de encima de la pelota se elige para que el brazo **no le tape la pelota a la cámara**; IK comprobada **en lote** (GPU si hay); la pinza se coge algo más arriba si los dedos bajarían de la holgura con la mesa.
-- **cuRobo** con la misma geometría y márgenes (mano + pelota cogida, mundo inflado); un fallo de la GPU ya no la apaga para toda la sesión (aviso en la web); sin RRT en CPU cuando está cuRobo.
-- **Agarre:** cierre con los **táctiles** (cada dedo hasta que toca, y desde ahí aprieta), **bajada vigilada** y **reintentos** (abre, sube y vuelve a planificar; `AUTONOMO_TAREA_REINTENTOS`).
-- **Ejecución:** tramos rectos a velocidad de la **palma** (lenta en los últimos 3 cm); desvío máximo 4° / 2 cm en la palma (comparado con lo mandado en los últimos 0,5 s); el afinado va en un hilo; ServoJ por UDP en este modo (vuelve solo a XML-RPC si no va); aviso si falta `FR5_CARGA_CDM_MM` (`python diagnosticos/estimar_cdm_mano.py` da una primera estimación).
-- **TOPP-RA** (opcional; lo instala `./arrancar_nivel6.sh` si falta): tramos articulares lo más rápidos posible respetando velocidad y aceleración de cada joint; sin él, el trapecio de siempre.
-- **cuRobo con goalset:** en cada sitio, una sola llamada a la GPU elige la mejor de varias formas de llegar (`AUTONOMO_TAREA_OPCIONES_GPU`) y su camino (`MotionPlanner.plan_pose` con varias poses).
-- **Carga de la brida:** `python diagnosticos/identificar_carga.py --leer` (la que tiene la controladora) y sin `--leer` la mide con el robot (pares de J4-J6 en ~12 posturas de la muñeca, con el pedal) → `FR5_CARGA_CDM_MM`.
-- **¿Dónde está DE VERDAD la pelota?** `python diagnosticos/medir_pelota.py --hoja` (imprimir al 100 % y pegar plana en la mesa) y luego `python diagnosticos/medir_pelota.py --diametro 0.070 --lado 0.035` (medidos con calibre; cierra antes el modo autónomo). La pelota encima de la esquina que marca la ventana, ESPACIO para medir. Da el error en mm (de lado y a lo largo del rayo) de lo que usa el robot y de la profundidad sola, sin depender de la calibración cámara→robot, y guarda los datos en `diagnosticos/medidas_pelota/`.
-- **Tasa de éxito:** cada intento se apunta solo en `diagnosticos/intentos.jsonl` (plan, afinado, táctiles, reintentos, final); `python diagnosticos/resumen_intentos.py [--desde AAAA-MM-DD]` da el % de éxito con su intervalo, por qué falla y si depende de la distancia o de la zona de la imagen.
-- **¿Qué no deja coger la pelota?** `python diagnosticos/ver_estorbo.py [plan_fallido_….npz]`: vuelve a planificar el plan fallido y dice qué cubos estorban (distancia, altura, lado visto desde la cámara) y deja una vista desde arriba en `diagnosticos/estorbo_*.png`.
-- **Código:** `ejecucion.py` (Ejecutor, ManoActiva) y `mundo_tarea.py` salen de `tarea.py`. **Banco de pruebas** con los planes guardados: `python diagnosticos/banco_planes.py --guardar antes.json` y, tras un cambio, `--comparar antes.json`.
-
-### Cámara A fija mirando la mesa (19-nov)
-Segunda OAK-D **fija** a ~0,4-0,5 m de la zona de agarre, mirándola desde otro lado que la cabeza (de frente o de lado al robot, inclinada hacia abajo). La cabeza sigue haciendo el mapa y viendo todo; la A solo mide la pelota de cerca. Bloque `AUTONOMO_CAM_A_*` de `config.py`.
-1. Montarla fija (si se mueve, recalibrar) y en otro controlador USB3 que la cabeza.
-2. `python calibrar_camara_robot.py --camara a --auto` (mismo tablero y mismo proceso; el tablero, de cara a la A) → `camara_a_robot.json`. Comprobar: `--camara a --verificar`.
-3. Probarla sola: `python -m skill_shield.autonomo.camara --rol a --ventana`.
-4. `AUTONOMO_CAM_A = True`. Se lanza su propio proceso (vigilado, como la cabeza) y en la web sale la pestaña **Cámara A**.
-- **Al planificar:** si la A ve la MISMA pelota que la cabeza (a ≤ `AUTONOMO_CAM_A_MAX_DIF_M`), estable y reciente, se usa su medida (y la mesa medida por ella, y se apoya por SU rayo). Si no la ve o no cuadra, la de cabeza, como antes.
-- **Al afinar** (parado encima): primero la A; si no la ve o el brazo se la tapa, la cabeza, como antes. El planificador elige la postura de encima para no taparle la pelota a la cámara con la que se va a afinar.
-- La A, calibrada y activa, cuenta como obstáculo (caja de 14 cm) para la tarea y para recalibrar la cabeza.
-- Con cuál se midió: en la terminal, en la tarjeta de la tarea y en `diagnosticos/intentos.jsonl` (`medida_pelota`, `afinado.fuente`).
-- Si con las dos OAK-D Pro aparecen huecos en la profundidad donde se cruzan los proyectores IR, baja `AUTONOMO_CAM_A_IR_MA` (o 0).
-
-### Herramientas con marcadores ArUco (paso 5)
-`skill_shield/autonomo/herramientas.py` — cada herramienta (y el punto de uso y el de dejada) lleva un marcador ArUco 4x4. Catálogo en `AUTONOMO_HERRAMIENTAS` (id, nombre, tipo, lado impreso, dónde queda la herramienta respecto al marcador, tamaño).
-1. `python -m skill_shield.autonomo.herramientas --generar` → PNG de cada marcador en `marcadores/`. Imprímelos a 300 ppp al 100 %, mide el cuadrado negro y pégalos planos sin recortar el margen blanco.
-2. `python -m skill_shield.autonomo.herramientas --probar` → cámara de cabeza en vivo: pose de cada herramienta, temblor y error (cierra antes el modo autónomo).
-3. En el modo autónomo: tarjeta **Herramientas** en la web (las que se ven, estables o no, y su posición en el mundo) con **Elegir** para marcar la herramienta objetivo: se pinta en naranja en el gemelo y deja de contar como obstáculo en el mapa. Las herramientas también se dibujan sobre la imagen de la cámara y en la ventana de MuJoCo.
-- La distancia de cada marcador se corrige con la profundidad estéreo (con marcadores de 3 cm a 0,8 m, solvePnP solo falla 1-3 cm; con el estéreo, unos mm) y las poses ambiguas (marcador casi de frente) se deciden con el plano que mide el estéreo.
-- Hace falta la calibración para la posición en el mundo; sin ella se ven respecto a la cámara y no se pueden elegir.
-- Marcadores de 3-4 cm hasta ~1 m de la cámara; más lejos, más grandes.
-
-### Mapa de obstáculos (paso 7)
-`skill_shield/autonomo/mapa.py` — con la calibración hecha, el proceso de la cámara convierte la profundidad en cubos de 2 cm (marco del MJCF) a 4 Hz: quita el **robot** (sus cápsulas con la pose real + 3 cm), el **suelo** y lo que se pida excluir (la herramienta que se va a coger). Cada cubo es *ocupado* (se ven puntos en él varias veces), *libre* (la cámara ve a través) o *desconocido* (tapado, o más de 30 s sin verse: el robot es móvil).
-- En la web: indicador **Obstáculos** y, en el gemelo, los cubos en naranja (botón *Obstáculos* para ocultarlos; *Borrar mapa* con contraseña, p. ej. tras mover la peana). Con *Superponer gemelo*, los cubos deben caer encima de los objetos reales.
-- Para esquivar: `ColisionMapa(modelo, mapa)` añade al modelo de colisión de la teleoperación los choques contra el mapa (lo tapado debajo/detrás de algo cuenta como obstáculo, `AUTONOMO_MAPA_DESCONOCIDO_OCUPADO`). Lo usará el planificador (paso 8).
-- Lo que tapa el propio brazo no se ve: se mira con el brazo apartado y el mapa lo recuerda.
-- Ajustes: bloque `AUTONOMO_MAPA_*` de `config.py` (tamaño, zona, frecuencia, olvido).
-- **Escena fija** (17-nov, `skill_shield/autonomo/escena_fija.py`): lo que no se mueve (mesas, cajonera, muebles) se escanea **una vez** y se guarda como cajas limpias en `escena_fija.json`. Con la mesa despejada y el brazo apartado, botón *Escanear escena fija* (vista del gemelo, con contraseña): se borra el mapa, la TSDF promedia 10 s y se ajusta una caja a cada mesa (plano → rectángulo hasta el suelo) y a cada mueble (grupo de cubos → caja girada en z). Desde entonces la cámara **no pone obstáculos dentro de esas cajas** (+3 cm): solo añade lo que cambia (pelotas, herramientas, manos). El planificador usa sus caras como obstáculo y sus tapas como suelo, y cuRobo las recibe en su ESDF. Además, la altura de una pelota apoyada en una tapa fija sale de la tapa, no del estéreo. Se ven en el gemelo como cajas azules. Revisar lo guardado: `python -m skill_shield.autonomo.escena_fija`. Si se mueve una mesa: volver a escanear (o *Olvidar fija*). También se pueden poner cajas medidas a mano en `AUTONOMO_ESCENA_FIJA_CAJAS`.
-
-### Calibración cámara de cabeza → robot (paso 4)
-`calibrar_camara_robot.py` — tablero ChArUco en la mano y la cámara fija en el soporte. Resultado: `camara_robot.json` (`T_mundo_cam` en el marco del MJCF). Como la cámara va en la misma peana que el robot, **mover la peana no estropea la calibración**.
-1. Tablero: pequeño, del tamaño de la palma (5x4 cuadros de 25 mm, marcador 18 mm: dibujo de 12,5 × 10 cm, en `CALIB_ROBOT_TABLERO`). `--generar-tablero` crea `tablero_calib_robot.png`: imprímelo a 300 ppp **al 100 %** (sin «ajustar a página»), recórtalo dejando ~1 cm de blanco alrededor, pégalo plano en una placa rígida y fíjalo a la mano. Mide un cuadro con calibre y, si no da 25,0 mm, pon lo medido en `lado`. Para verlo bien, la calibración usa la cámara a 2028×1520 (`CALIB_CAM_ESCALA`, necesita USB3), con el enfoque fijo en el de fábrica (`CALIB_CAM_ENFOQUE`), 10 fotos por postura y el tablero a menos de 1 m (`CALIB_AUTO_DIST_M`). Con otro tablero, pon sus medidas reales ahí (`--generar-tablero` crea uno nuevo). **El tamaño se comprueba solo:** al acabar de explorar, el programa compara lo que el robot ha movido la brida con lo que la cámara ha visto moverse al tablero; si el cuadrado no mide lo que dice config (±3 %), se para antes de planificar nada y dice cuánto mide.
-2. `python calibrar_camara_robot.py --auto` → **automática**: pon el robot (arrastre) donde la cámara vea el tablero, **con la muñeca cómoda y nada apretado** (esa postura es la referencia de todo lo demás), y **mantén la P** con la ventana delante. Explora con giros pequeños, planifica ~20 posturas seguras (tablero visible, sin choques y dentro de lo que `fr5_servo` deja pasar), las recorre y calibra (~5 min). Criterio: error medio ≤ 5 mm y giro ≥ 30°.
-   - **Protección de la mano, del tablero y de lo que sobresale (10-nov):** con las piezas reales del gemelo (`skill_shield/autonomo/choque_mano.py`) se miden los huecos de la mano y de la placa del tablero con el hombro, el brazo, el antebrazo y el giro del J4 del robot, con el soporte (columna, placas, pie), con la cabeza y la cámara, con las cajas de `TELEOP_FR5_*` y con el suelo. **Ningún hueco puede cerrarse más de 1 cm respecto al de la postura de inicio** (`CALIB_MANO_ACERCAR_MAX`), salvo que siga por encima de su objetivo (mano-robot: `CALIB_MANO_HOLGURA` + `CALIB_MANO_SALIENTES`; tablero-robot: `CALIB_TABLERO_HOLGURA`; con el entorno: `CALIB_ENTORNO_HOLGURA`), y nunca baja de su mínimo. Así no se estruja lo que sale de la mano y no está en el gemelo (conector, cables). Los tres ejes de la muñeca van, además, con la amplitud recortada (`CALIB_AUTO_AMPLITUD_DEG`).
-   - **Tres barreras:** (1) el planificador solo elige posturas y trayectos que cumplen lo anterior; (2) antes de cada movimiento se comprueba el trayecto entero desde donde está el robot DE VERDAD (si no vale, **no se mueve** y salta esa postura); (3) mientras el pedal está pisado se vigila su postura real en cada vuelta: si se acerca a algo más de lo comprobado, o deja de seguir el trayecto que se le pide, se para y la calibración termina («Calibración detenida: …» dice qué pasa). Si lo mueves a mano con el pedal suelto, al volver a pisar comprueba el trayecto desde donde lo hayas dejado. Si deja de llegar la postura del robot, no lo mueve hasta que vuelve.
-   - Si el robot, con el pedal pisado, se queda parado sin llegar (límites blandos de la controladora más estrechos que `FR5_LIMITES_BLANDOS_DEG`), a los `CALIB_SIN_AVANCE_S` segundos deja esa postura y sigue con la siguiente.
-   - Lo que el programa NO ve: los cables (cuánto dan de sí al girar la muñeca) y, durante la exploración (~1 min, giros de ≤ 15°), dónde está montado el tablero: hasta que acaba de explorar solo cuenta con una envolvente de `CALIB_AUTO_RADIO_MANO` (13 cm) alrededor de la mano. Empieza con el tablero a más de un palmo de todo y mira los cables en las primeras posturas.
-   - Para revisar posturas guardadas sin mover nada: `python -m skill_shield.autonomo.choque_mano` (tabla J4×J5: `--mapa`).
-3. `python calibrar_camara_robot.py --verificar` → comprueba en 4 posturas guardadas (`--aqui`: en la postura actual, sin moverlo). Si falla, algo se ha movido → `--repetir` (repite las posturas guardadas) o `--auto`. Los dos se mueven con las mismas tres barreras, con la primera postura guardada como referencia y el tablero donde lo dejó la última calibración: **si has cambiado el tablero de sitio, usa `--auto`**.
-4. `--manual` (mueves tú el robot y pulsas ESPACIO; avisa en pantalla si la mano se acerca al robot o al soporte) y `--recalcular` (con las muestras guardadas) siguen disponibles.
-El robot solo se mueve con el pedal y a ≤ `CALIB_ROBOT_VEL_MAX_DEG_S` (10 °/s). **Revisa que el soporte y la mesa (`TELEOP_FR5_OBSTACULOS`) del modelo coinciden con la realidad**: lo que no esté en el modelo, no se evita. Cierra antes el modo autónomo: la cámara y el robot tienen que estar libres. Pruebas sin robot: `python -m pytest tests/test_calibracion_robot.py -q`.
-
-### Mano Física + Gemelo Digital (teleoperación con el FR5 físico)
-- Arranca el FR5 real (bloque `TELEOP_REAL_*` de `config.py`; `TELEOP_REAL_FR5_SIMULACRO = True` para probar sin que se mueva).
-- **[A]** + T-pose: calibra. El robot **no** se mueve.
-- **Pedal** (o tecla **P** con `TELEOP_FR5_PEDAL = "tecla"`): ARMA → el FR5 entra despacio hacia tu postura y te sigue. Otra pisada, **[S]**, **[A]**, **[I]** o **[Q]** → desarmado y quieto.
-- Sin pedal configurado (`TELEOP_FR5_PEDAL = None`) el FR5 real no se arma nunca.
-
-### Gemelo Digital (sliders)
-- Se abre una ventana con un slider por articulación, en **grados de la controladora** (los mismos que la WebApp del FR5).
-- **[A]** en la ventana de la cámara activa la mano (como siempre). El brazo NO sigue a las cámaras.
-- **ARMAR** en la ventana de sliders: el brazo (simulado y FR5 real) sigue a los sliders, con velocidad limitada.
-  Solo se arma si el robot está dentro del rango de los sliders (si no, llévalo con la WebApp).
-- **STOP / Esc / Espacio / cerrar la ventana** → desarmado: el FR5 deja de recibir ServoJ. La seta física sigue siendo la parada de verdad.
-- Ajustes en `config.py`, bloque `SLIDERS_*` (simulacro, velocidades, rangos).
-- Necesita Tkinter en el entorno: `sudo apt install python3.12-tk`.
-- Probar la ventana sola, sin robot: `python -m skill_shield.interfaz.sliders_brazo`
-
----
-## IA: grabar, entrenar y reproducir (G / E / I)
-`skill_shield/ia/` — la red (ACT) aprende de demostraciones. Desde el 16-nov **ve el mundo**: el objeto visto desde la mano, los táctiles y la postura real de la mano y del brazo (antes era «ciega»: solo repetía el gesto).
-
-**Datos fuera del repo:** `~/skill_shield_datos/episodios/<tarea>/` y `~/skill_shield_datos/modelos/` (`IA_DATOS_DIR` o la variable `SKILL_SHIELD_DATOS` para cambiarlo). Mientras ahí no haya nada se siguen usando los `episodios/` del repo. Para moverlos: `mkdir -p ~/skill_shield_datos && mv episodios modelos ~/skill_shield_datos/ && git rm -r --cached episodios modelos`.
-
-### Grabar (`[G]`, `[M]`)
-- `[G]` empieza y termina un episodio (30 Hz). Al empezar dice qué del mundo se graba: `brazo real ✓ · mano real ✓ · táctiles ✓ · objeto ✓ (Pelota de tenis)`.
-- **Objeto:** el que se puede coger más cercano a la palma (a menos de `IA_OBJETO_RADIO_M`) la primera vez que se ve. En «Mano Física + Gemelo Digital» lo ve la **cámara de cabeza** (la del modo autónomo, calibrada con `calibrar_camara_robot.py`), que se lanza sola si la teleoperación no la usa: pon `MULTICAMARA_ACTIVA = False` (teleoperación solo con la cámara A + guante). En el gemelo con sliders no se abre ninguna cámara. En simulación, los objetos de la mesa del taller `[3]`.
-- **Cómo grabar un agarre:** empieza con la mano ya encima del objeto (unos 10–15 cm), con el objeto bien visible; acércate, cógelo y súbelo; termina con `[G]`. Variad la posición del objeto y la dirección de llegada (orientativo: ~50 demos por tarea). Alguna demo con un fallo **corregido** ayuda.
-- `[M]`: el último episodio no salió bien → se marca como **fallido** y no se entrena con él (otra vez `[M]` lo desmarca).
-
-### Entrenar (`[E]`, o en la terminal)
-```bash
-python -m skill_shield.ia.act coger_pelota                    # → modelos/coger_pelota.pth
-python -m skill_shield.ia.act coger_pelota coger_destornillador --modelo agarre   # multitarea
-python -m skill_shield.ia.act --todas                         # cada tarea, su modelo ([Shift+E])
 ```
-- Decide solo qué usar según lo que haya en los episodios (lo imprime): con objeto, la acción es **«dónde poner la mano respecto al objeto»** (la IK analítica la pasa a joints), así el gesto se traslada si el objeto está en otro sitio. Sin objeto, joints como antes. Opciones: `--accion`, `--ventana`, `--pasos`, `--sin-tactil`, `--sin-objeto`, `--incluir-fallidos`, `--cpu`.
-- Separa episodios enteros para validación, guarda checkpoints en `modelos/<nombre>/` y elige el mejor con un **ensayo en lazo cerrado** (la red reproduce cada episodio de validación viendo sus propias posturas). Informe en `modelos/<nombre>/informe.json`.
-- Comparar después: `python -m skill_shield.ia.evaluar <modelo> --checkpoints`.
-- GPU: con la RTX 50xx hace falta torch con CUDA 12.8 (`pip install torch --index-url https://download.pytorch.org/whl/cu128`). En la CPU también entrena (más lento).
-
-### Reproducir (`[I]`)
-- Elige el modelo (y la tarea, si es multitarea). Con el FR5 conectado arranca y para con el **pedal**; al arrancar **fija el objeto** que hay junto a la palma (luego la mano lo tapa). Se para sola cuando la red dice que ha terminado (`IA_PROGRESO_FIN`).
-- Cada acción pasa por el **filtro de seguridad** (`politica.FiltroSeguridad`): límites, velocidad máxima (`IA_V_MAX_BRAZO`), choques, saltos de la IK (`IA_SALTO_MAX_RAD`) y la mano lejos del objeto (`IA_MAX_DIST_OBJETO_M`). Si algo no cuadra, para y lo dice en el panel.
-- Los modelos antiguos (ciegos) se siguen reproduciendo como antes.
-- Pruebas sin hardware: `python -m pytest tests/test_ia.py -q` (las del modelo necesitan torch).
-
-SDK de FAIRINO en `fairino/Robot.py`: versión V4.0.0 (SDK V2.2.8), la del controlador V4.0.0.x.
+Skill_Shield_Nivel_6.py      programa principal: menú y bucle de teleoperación / grabación / IA
+config.py                    TODOS los ajustes
+arrancar_nivel6.sh           instala lo que falte y arranca
+orca_hardware.py             OrcaHand por USB (envío continuo, arranque suave)
+puente_tactil.py             táctiles de la OrcaHand (lo lanza el guante / el modo autónomo)
+calibrar_*.py                calibraciones (ver tabla)
+skill_shield/
+  autonomo/                  modo autónomo: modo.py (bucle), tarea.py, ejecucion.py, planificador,
+                             choque_mano.py, mapa.py, camara.py, camara_a.py, web.py + estatico/
+  autonomo/curobo_fr5/       integración con cuRobo
+  teleop_fr5/                teleoperación del FR5: cinemática, IK, colisiones, pedal
+  hardware/                  fr5_servo (proceso ServoJ), táctiles
+  interfaz/                  ventana de sliders, límite del J4, HUD
+  ia/                        grabación, ACT, política, agarre asistido, cámara de cabeza
+  vision/ brazo/ mano/       cámaras OAK-D, MediaPipe, retargeting del brazo y de la mano
+  simulacion/                entornos de MuJoCo (taller, taladro)
+fairino_description/         modelo MJCF del FR5 + soporte + OrcaHand (lo usa todo)
+curobo_fr5/                  URDF y configuración del robot para cuRobo
+orca_core-main/, orca_core_touch/, orca_mano/   SDK y configuración de la OrcaHand
+MANUS_Core_3.2.1_SDK_Linux/  SDK del guante
+fairino/                     SDK del FR5
+diagnosticos/                herramientas de diagnóstico
+tests/                       pruebas sin hardware
+fuente/, modelo/, web/, SkillShield_Web.exe, mujoco.dll   ejecutable de Windows de la web (gemelo sin robot)
+```

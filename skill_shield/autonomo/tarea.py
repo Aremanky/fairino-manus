@@ -43,7 +43,12 @@ trapezoidal a AUTONOMO_TAREA_VEL_DEG_S (el joint más rápido). Solo avanza con 
 y el FR5 enviando; al soltarlo, fr5_servo hace ServoMoveEnd y la tarea espera donde está. Se
 aborta si la controladora da error o si el robot real se separa más de
 AUTONOMO_TAREA_DESVIO_MAX_DEG de lo mandado. La mano (ManoActiva) se conecta con par la primera
-vez que se pisa el pedal tras «Ejecutar» (orca_core la lleva entonces a su postura neutra).
+vez que se pisa el pedal tras «Ejecutar» y, desde entonces, se reconecta sola si se cae; si se cae
+con una tarea en marcha, la tarea se aborta (el brazo se para).
+
+SOLO EN EL GEMELO (23-nov): en simulacro, o si el FR5 no da su pose (apagado, sin conexión o
+AUTONOMO_CON_FR5 = False), se planifica desde la pose del gemelo y la tarea se hace solo en el
+gemelo: el FR5 real nunca se arma. Si el FR5 aparece después, ese plan sigue siendo del gemelo.
 """
 import math
 import threading
@@ -2593,6 +2598,9 @@ class Tarea:
         self._t_desvio = 0.0
         self.mano_activa = None
         self._hilo_mano = None
+        self._mano_usada = False                        # la mano estuvo lista en esta ejecución
+        self._gemelo = False                            # (23-nov) el plan actual es solo del gemelo
+        self._q_inicio_gemelo = False
         self._pelota_id = None
         self.afinado_cm = None
         self.afinar_min = float(_g(self.cfg, "AUTONOMO_TAREA_AFINAR_MIN_M", 0.005))
@@ -2642,7 +2650,7 @@ class Tarea:
         if a == "planificar":
             self._pedir_plan(contexto, volver=False)              # (un «Planificar» nuevo: sin reintentos)
         elif a == "ejecutar":
-            self._ejecutar(contexto.get("q_real"))
+            self._ejecutar(contexto.get("q_real"))      # (con un plan del gemelo no hace falta)
         elif a == "cancelar":
             self._cancelar("Cancelada: el robot se queda donde está.")
         elif a == "volver":
@@ -2668,7 +2676,7 @@ class Tarea:
             import os
             os.makedirs(os.path.dirname(ruta), exist_ok=True)
             fila = dict(t=time.strftime("%Y-%m-%dT%H:%M:%S"), intento=self._intento, evento=evento,
-                        simulacro=bool(self.simulacro), **campos)
+                        simulacro=bool(self._sim()), **campos)
             if evento == "fin":
                 fila.update(self._intento_info)
                 fila["reintentos"] = int(self._reintentos)
@@ -2708,22 +2716,37 @@ class Tarea:
     def _puede_planificar(self):
         return self.estado in ("libre", "lista", "terminada", "error", "pausada")
 
-    def _pedir_plan(self, ctx, volver, mirar=True, reintento=False, nuevo_intento=True):
+    def _pedir_plan(self, ctx, volver, mirar=True, reintento=False, nuevo_intento=True, q_desde=None):
         """reintento (18-nov): lo pide la propia tarea tras subir para reintentar el agarre (o tras apartarse
         a mirar durante un reintento): se ejecuta solo (con el pedal) y conserva la postura de inicio.
-        nuevo_intento=False: es la continuación del mismo intento (tras apartarse a mirar) para el registro."""
+        nuevo_intento=False: es la continuación del mismo intento (tras apartarse a mirar) para el registro.
+        q_desde (23-nov): postura de partida en la continuación de una tarea hecha en el gemelo (donde
+        acabó el gemelo, no la pose del robot real, que no se ha movido)."""
         if not self._puede_planificar():
             return
         if self.estado == "pausada":
             self._cancelar("")
         if not reintento:
             self._reintentos, self._conservar_inicio = 0, False
-        q = ctx.get("q_real")
+        # (23-nov) ¿FR5 real o solo el gemelo? La continuación de una tarea sigue donde empezó.
+        continuacion = reintento or not nuevo_intento
+        if continuacion:
+            q = q_desde if q_desde is not None else ctx.get("q_gemelo" if self._gemelo else "q_real")
+        elif ctx.get("q_real") is not None:
+            q, self._gemelo = ctx.get("q_real"), False
+        else:
+            q, self._gemelo = ctx.get("q_gemelo"), True
         if q is None:
-            return self._error("No hay pose real del FR5: hace falta para planificar.")
+            return self._error("No hay pose real del FR5: hace falta para planificar." if not self._gemelo
+                               else "No hay pose del FR5 ni del gemelo: hace falta para planificar.")
         if volver:
             if self._q_inicio is None:
                 return self._error("No hay postura de inicio: primero planifica la tarea.")
+            if self._q_inicio_gemelo != self._gemelo:
+                self._q_inicio = None
+                return self._error("La postura de inicio es de una tarea hecha "
+                                   + ("en el gemelo: no se vuelve a ella con el FR5 real." if self._q_inicio_gemelo
+                                      else "con el FR5 real y ahora no hay FR5: planifica de nuevo."))
             datos = dict(volver=True, q=np.asarray(q, float), q_inicio=self._q_inicio.copy())
         else:
             lista = [h for h in (ctx.get("herramientas") or []) if h.get("T_mundo") is not None]
@@ -2789,13 +2812,13 @@ class Tarea:
                          T_cam_afinar=self._T_cam_pelota if self._fuente_plan == "a" and self.cam_a_afinar else None,
                          # (17-nov) si el brazo tapa el objetivo, primero apartarse y mirar (no en simulacro:
                          # ahí el robot real no se mueve y la cámara seguiría viendo lo mismo)
-                         mirar=bool(mirar and not self.simulacro and self.mirar))
+                         mirar=bool(mirar and not self._sim() and self.mirar))
         datos["mapa"] = ctx.get("mapa") if self.usar_mapa else None
         datos["visto"] = ctx.get("visto") if self.usar_mapa else None
         if not volver:
             # (19-nov) la cámara con la que se midió la pelota (para deslizarla por SU rayo): cabeza o A
             datos["T_mundo_cam"] = self._T_cam_pelota if datos.get("pelota") else self._T_cam_plan
-        self.estado, self.texto = "planificando", "Planificando…"
+        self.estado, self.texto = "planificando", "Planificando…" + (" (solo en el gemelo)" if self._gemelo else "")
         self.plan, self.ejec, self._resultado = None, None, None
         self._auto = volver or reintento
         self._gen += 1
@@ -2906,7 +2929,7 @@ class Tarea:
 
     def _fuerzas_dedos(self):
         """(18-nov) {dedo: fuerza normal (N) o None} de los táctiles, o None si no hay (o en simulacro)."""
-        if self.tactil is None or self.simulacro:
+        if self.tactil is None or self._sim():
             return None
         try:
             e = self.tactil() or {}
@@ -2929,6 +2952,8 @@ class Tarea:
             return                                      # ya está en marcha: solo falta el pedal
         if self.estado != "lista" or self.plan is None:
             return self._error("No hay plan listo: pulsa «Planificar».") if self.estado != "planificando" else None
+        if self._gemelo:
+            q_real = self.plan.q0                       # (23-nov) solo el gemelo: parte de donde se planificó
         if q_real is None:
             return self._error("No hay pose real del FR5.")
         desv = float(np.max(np.abs(np.asarray(q_real) - self.plan.q0)))
@@ -2947,7 +2972,9 @@ class Tarea:
         self._fase_vigilada = None
         self._hist_cmd.clear()
         self.ejec = self._nuevo_ejecutor(self.plan, mano0)
-        self.estado, self.texto = "pausada", "Pisa el pedal para empezar."
+        self._mano_usada = False
+        self.estado, self.texto = "pausada", "Pisa el pedal para empezar." + (
+            " (solo en el gemelo: el FR5 real no se mueve)" if self._gemelo and not self.simulacro else "")
         self._t_desvio = 0.0
 
     def _cancelar(self, texto):
@@ -2977,6 +3004,23 @@ class Tarea:
             self.fr5.habilitar(False)
         self._enviando = False
 
+    def _sim(self):
+        """(23-nov) ¿Lo que se ejecuta ahora va solo al gemelo? (simulacro, o plan hecho sin FR5)"""
+        return self.simulacro or self._gemelo
+
+    def solo_gemelo(self):
+        """(23-nov) Para modo.py y la web: ¿la tarea (la de ahora o, si no hay, la próxima) se hace solo
+        en el gemelo? Sin plan, depende de si el FR5 da su pose ahora mismo."""
+        if self.simulacro:
+            return True
+        if self.plan is not None or self.ejec is not None or self.estado == "planificando":
+            return self._gemelo
+        fr5 = self.fr5
+        if fr5 is None or not fr5.conectado:
+            return True
+        leer = getattr(fr5, "q_real_rad", None)
+        return leer is not None and leer() is None
+
     @property
     def afinando(self):
         """(18-nov) True mientras se rehace la bajada en su hilo (el robot espera quieto)."""
@@ -3001,6 +3045,7 @@ class Tarea:
                 apartarse = bool(getattr(x, "replanificar", False))
                 if x.nombre != "volver al inicio" and not apartarse and not self._conservar_inicio:
                     self._q_inicio = x.q0.copy()
+                    self._q_inicio_gemelo = self._gemelo
                 dur = Ejecutor(x, self.posturas, self.vel, self.acel, fk_palma=self._fk_palma(),
                                toppra=self.toppra, toppra_tol_rad=self.toppra_tol).duracion
                 self.estado = "lista"
@@ -3043,13 +3088,20 @@ class Tarea:
                 self._error(x)
         if self.estado not in ("ejecutando", "pausada") or self.ejec is None:
             return None
-        fr5 = self.fr5
-        if fr5 is None or (not self.simulacro and not fr5.conectado):
-            self._error("El FR5 no está conectado o tiene un error: tarea abortada.")
-            return None
-        if fr5.en_error:
-            self._error("La controladora del FR5 dio error (¿colisión?): tarea abortada. "
-                        "Reinicia desde la web y vuelve a planificar.")
+        sim = self._sim()                               # (23-nov) solo el gemelo: el FR5 ni se toca
+        fr5 = None if sim else self.fr5
+        if not sim:
+            if fr5 is None or not fr5.conectado:
+                self._error("El FR5 no está conectado o tiene un error: tarea abortada.")
+                return None
+            if fr5.en_error:
+                self._error("La controladora del FR5 dio error (¿colisión?): tarea abortada. "
+                            "Reinicia desde la web y vuelve a planificar.")
+                return None
+        # (23-nov) la mano con par se ha caído a mitad de tarea: se aborta (no se sabe qué tiene cogido)
+        if self._mano_usada and self.mano_activa is not None and not self.mano_activa.lista:
+            self._error("Se ha perdido la OrcaHand (¿cable USB o alimentación?): tarea abortada. "
+                        "Se reconecta sola; cuando vuelva, planifica de nuevo.")
             return None
         # (18-nov) ¿ha terminado el afinado que iba en su hilo? Se aplica aquí, en el bucle principal
         if self._hilo_afinar is not None and not self._hilo_afinar.is_alive():
@@ -3062,16 +3114,19 @@ class Tarea:
                     return None
         if pedal:
             if self.mover_mano and not self._mano_lista():
-                self.estado, self.texto = "ejecutando", "Conectando la mano con par…"
+                m = self.mano_activa
+                self.estado, self.texto = "ejecutando", ("Conectando la mano con par…" if m is None or not m.error
+                                                         else f"La mano con par no responde ({m.error}): reintentando…")
                 return self._q_gemelo()
-            if not self._enviando:
+            self._mano_usada = self.mover_mano
+            if not sim and not self._enviando:
                 fr5.publicar(self.ejec.q())
                 fr5.habilitar(True)                     # ServoMoveStart desde la pose real
                 self._enviando = True
                 self._hist_cmd.clear()
                 self._t_desvio = 0.0
             from skill_shield.hardware.fr5_servo import ENVIANDO
-            listo = self.simulacro or fr5.estado()["estado"] == ENVIANDO
+            listo = sim or fr5.estado()["estado"] == ENVIANDO
             f_act = self.ejec.fase
             if listo and f_act is not None and f_act.comprobar and self._comprobada != self.ejec.i:
                 self._comprobada = self.ejec.i
@@ -3093,12 +3148,13 @@ class Tarea:
                     if fallo:
                         self._error(fallo)
                         return None
-                if not self.simulacro and q_real is not None:
+                if not sim and q_real is not None:
                     fallo = self._desvio(q_real, dt)
                     if fallo:
                         self._error(fallo)
                         return None
-            fr5.publicar(self.ejec.q())
+            if not sim:
+                fr5.publicar(self.ejec.q())
             self.estado = "ejecutando"
             f = self.ejec.fase
             if self._hilo_afinar is not None:
@@ -3106,9 +3162,7 @@ class Tarea:
             else:
                 self.texto = (f.nombre if f is not None else "Terminando…") if listo else "Arrancando el FR5…"
         else:
-            if self._enviando:
-                fr5.habilitar(False)                    # ServoMoveEnd: se para donde está
-                self._enviando = False
+            self._parar_fr5()                           # ServoMoveEnd: se para donde está
             self.estado = "pausada"
             f = self.ejec.fase
             self.texto = "Pedal suelto: en pausa" + (f" · {f.nombre}" if f is not None else "")
@@ -3128,10 +3182,10 @@ class Tarea:
                 ctx = None
             if ctx:
                 self._pedir_plan(ctx, volver=False, mirar=reintento, reintento=self._conservar_inicio,
-                                 nuevo_intento=False)
+                                 nuevo_intento=False, q_desde=q if sim else None)
             else:
                 self.texto = "Ya veo la mesa: pulsa «Planificar»."
-            return q if self.simulacro else None
+            return q if sim else None
         if self.ejec.terminado:
             self._parar_fr5()
             nombre = self.plan.nombre
@@ -3144,7 +3198,7 @@ class Tarea:
             print(f"✅ Tarea: {self.texto}")
             q = self.ejec.q()
             self.ejec = None
-            return q if self.simulacro else None
+            return q if sim else None
         return self._q_gemelo()
 
     def _desvio(self, q_real, dt):
@@ -3222,7 +3276,7 @@ class Tarea:
 
     def _comprobar(self, que):
         """None si todo bien; texto del fallo si no. Sin táctiles (o en simulacro) no se para."""
-        if que != "agarre" or self.simulacro or self.tactil is None:
+        if que != "agarre" or self._sim() or self.tactil is None:
             return None
         try:
             e = self.tactil() or {}
@@ -3455,22 +3509,28 @@ class Tarea:
         return ("bajada", qs, c2, n, True)
 
     def _q_gemelo(self):
-        return self.ejec.q() if (self.simulacro and self.ejec is not None) else None
+        return self.ejec.q() if (self._sim() and self.ejec is not None) else None
 
     def _mano_lista(self):
-        if self.mano_activa is not None and self.mano_activa.lista:
+        m = self.mano_activa
+        if m is not None and m.lista:
             return True
-        if self.mano_activa is not None and self.mano_activa.error:
-            self._error(self.mano_activa.error)
+        if m is not None:
+            # (23-nov) ManoActiva se reconecta sola (iniciar): se espera, el brazo sigue quieto. Las manos sin
+            # reconexión (p. ej. las de las pruebas) abortan la tarea con su error, como antes.
+            if m.error and not getattr(m, "reconecta", False):
+                self._error(m.error)
             return False
-        if self._hilo_mano is None:
-            if self.monitor is not None:
-                self.monitor.cerrar()                   # suelta el puerto de la mano
-            puerto = getattr(self.monitor, "puerto", None) or self.cfg.get("PUERTO_HARDWARE", "/dev/ttyUSB0")
-            self.mano_activa = (self._fabrica_mano() if self._fabrica_mano is not None
-                                else ManoActiva(puerto))
-            print("🖐️  Tarea: conectando la OrcaHand con par (irá a su postura neutra)…")
-            self._hilo_mano = threading.Thread(target=self.mano_activa.conectar, daemon=True, name="Tarea-mano")
+        if self.monitor is not None:
+            self.monitor.cerrar()                       # suelta el puerto de la mano
+        puerto = getattr(self.monitor, "puerto", None) or self.cfg.get("PUERTO_HARDWARE", "/dev/ttyUSB0")
+        m = self.mano_activa = (self._fabrica_mano() if self._fabrica_mano is not None
+                                else ManoActiva(puerto, reintento_s=float(_g(self.cfg, "AUTONOMO_MANO_REINTENTO_S", 2.0))))
+        print("🖐️  Tarea: conectando la OrcaHand con par (se queda donde está y arranca despacio)…")
+        if hasattr(m, "iniciar"):
+            m.iniciar()                                 # conecta y, si se cae, se reconecta sola
+        else:
+            self._hilo_mano = threading.Thread(target=m.conectar, daemon=True, name="Tarea-mano")
             self._hilo_mano.start()
         return False
 
@@ -3479,7 +3539,8 @@ class Tarea:
         e = self.ejec
         f = e.fase if e is not None else None
         avisos = list(getattr(self._planificador, "avisos", None) or []) if self.estado != "libre" else []
-        return dict(estado=self.estado, texto=self.texto, simulacro=self.simulacro, avisos=avisos,
+        return dict(estado=self.estado, texto=self.texto, simulacro=self.solo_gemelo(), avisos=avisos,
+                    simulacro_config=self.simulacro, solo_gemelo=self.solo_gemelo() and not self.simulacro,
                     fuente_pelota=self._fuente_plan, afinado_fuente=self.afinado_fuente,      # (19-nov) cabeza / a
                     reintentos=self._reintentos if self._conservar_inicio else 0,
                     fase=f.nombre if f is not None else None,
