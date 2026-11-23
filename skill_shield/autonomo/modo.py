@@ -21,6 +21,7 @@ Qué hace ahora (criterio de «hecho» del paso 2):
      lista y deja elegir la objetivo; aquí se dibujan en la ventana.
   9. (19-nov) Cámara A (camara_a.py): OAK-D fija mirando la mesa de cerca, en su propio proceso
      (camara.py --rol a, sin mapa). La tarea la usa para medir la pelota al planificar y al afinar.
+     (20-nov) Con AUTONOMO_CAM_A_AL_MAPA su profundidad también va al mapa de la cabeza (canal CANAL_PROF_A).
 
 Mandos de la web (los decide ESTE proceso, la web solo los pide):
   · Pedal de la web: «movimiento permitido» solo mientras llega su latido. Con el pedal
@@ -55,7 +56,7 @@ CANAL_MAPA = "skill_autonomo_mapa"
 CANAL_VISTO = "skill_autonomo_visto"     # (17-nov) qué ha visto la cámara (bits por cubo)
 CANAL_HERRAMIENTAS = "skill_autonomo_herramientas"
 CANAL_CONGELAR = "skill_autonomo_congelar"   # (18-nov) hay tarea → la cámara no aplica la autocorrección
-from skill_shield.autonomo.camara_a import CANAL_HERR_A, CANAL_IMG_A, CANAL_INFO_A   # noqa: E402 (19-nov)
+from skill_shield.autonomo.camara_a import CANAL_HERR_A, CANAL_IMG_A, CANAL_INFO_A, CANAL_PROF_A   # noqa: E402
 
 
 def estado_calibracion(raiz, cfg, ruta=None):
@@ -229,6 +230,9 @@ def ejecutar(cfg):
     canal_info_a = Canal(CANAL_INFO_A, capacidad=64 << 10, crear=True) if con_cam_a else None
     canal_herr_a = Canal(CANAL_HERR_A, capacidad=64 << 10, crear=True) if con_cam_a else None
     ruta_calib_a = cfg.get("AUTONOMO_CAM_A_CALIB_ARCHIVO", "camara_a_robot.json")
+    # (20-nov) la profundidad de la A también va al mapa de la cabeza (la misma TSDF)
+    con_prof_a = con_cam_a and con_mapa and bool(cfg.get("AUTONOMO_CAM_A_AL_MAPA", True))
+    canal_prof_a = Canal(CANAL_PROF_A, capacidad=1 << 20, crear=True) if con_prof_a else None
 
     # ── 3. Procesos de cámara y web ──
     py_vision = cfg.get("AUTONOMO_PYTHON_PERCEPCION") or sys.executable
@@ -242,6 +246,8 @@ def ejecutar(cfg):
     if con_mapa:
         cmd_cam += ["--canal-qbrazo", CANAL_QBRAZO, "--canal-mapa", CANAL_MAPA, "--canal-visto", CANAL_VISTO,
                     "--canal-congelar", CANAL_CONGELAR]
+        if con_prof_a:
+            cmd_cam += ["--canal-prof-a", CANAL_PROF_A]
     if con_herr:
         cmd_cam += ["--canal-herramientas", CANAL_HERRAMIENTAS]
     if con_mapa or con_herr:
@@ -280,6 +286,8 @@ def ejecutar(cfg):
                      "--canal-herramientas", CANAL_HERR_A, "--padre", pid]
         if con_mapa or con_herr:
             cmd_cam_a += ["--canal-mando", CANAL_MANDO]
+        if con_prof_a:
+            cmd_cam_a += ["--canal-prof-a", CANAL_PROF_A]
         if cfg.get("AUTONOMO_CAM_VENTANA", False):
             cmd_cam_a.append("--ventana")
         vigilados.append(Vigilado("cámara A (mesa)", cmd_cam_a, raiz, senal=canal_img_a.tiempo, **vig_kw))
@@ -535,7 +543,7 @@ def ejecutar(cfg):
                 pass
         for c in (canal_img, canal_info, canal_estado, canal_mando, canal_sim, canal_simcam, canal_qpos,
                   canal_qbrazo, canal_mapa, canal_herr, canal_visto, canal_congelar,
-                  canal_img_a, canal_info_a, canal_herr_a):
+                  canal_img_a, canal_info_a, canal_herr_a, canal_prof_a):
             if c is not None:
                 c.cerrar()
     return 0

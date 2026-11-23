@@ -12,8 +12,12 @@ sobre la imagen; cada cosa a su canal. (YOLO irá aquí mismo en el paso 12.) Va
 pueda lanzar con OTRO entorno virtual (AUTONOMO_PYTHON_PERCEPCION en config.py).
 
 (19-nov) El mismo proceso sirve para la CÁMARA A (OAK-D fija mirando la mesa de cerca, camara_a.py): con
---rol a, su MxId y su calibración (--calibracion camara_a_robot.json), sin mapa de obstáculos (el mapa lo hace solo
-la cabeza): solo imagen, pelotas y herramientas.
+--rol a, su MxId y su calibración (--calibracion camara_a_robot.json), sin mapa de obstáculos propio (el mapa lo hace
+la cabeza): imagen, pelotas y herramientas. (20-nov) Con --canal-prof-a, además manda su profundidad preparada a la
+cabeza, que la funde en su mapa (AUTONOMO_CAM_A_AL_MAPA).
+
+(20-nov) Profundidad más fina: mono a 800P, disparidad extendida y más bits de subpíxel (AUTONOMO_CAM_MONO_800P…,
+AUTONOMO_CAM_A_MONO_800P…). Si la OAK no acepta la combinación, se reintenta sin la extendida y luego como antes.
 
 Prueba aislada, sin robot ni MuJoCo (se ve en una ventana; Q o Esc para salir):
     python -m skill_shield.autonomo.camara --ventana
@@ -55,6 +59,8 @@ def _parsear():
     ap.add_argument("--canal-mando", default=None, help="mandos de la web (borrar mapa…)")
     ap.add_argument("--canal-visto", default=None, help="qué ha visto la cámara (para el planificador)")
     ap.add_argument("--canal-herramientas", default=None, help="herramientas detectadas (None = no detectar)")
+    ap.add_argument("--canal-prof-a", default=None,
+                    help="(20-nov) profundidad de la cámara A para el mapa: la A la escribe, la cabeza la funde")
     ap.add_argument("--canal-congelar", default=None,
                     help="(18-nov) aviso del modo autónomo: hay una tarea → no aplicar la autocorrección")
     ap.add_argument("--grabar", type=int, default=0, metavar="N",
@@ -74,6 +80,80 @@ def _parsear():
         args.ir_ma = int(getattr(cfg, "AUTONOMO_CAM_A_IR_MA" if a else "AUTONOMO_CAM_IR_MA", 800))
     args.nombre = "cámara A (mesa)" if a else "cámara de cabeza"
     return args
+
+
+def _modos_estereo(cfg, rol):
+    """(20-nov) Modos del estéreo a probar al abrir la OAK, de mejor a «como siempre»: [(mono_800p, extendida, bits)].
+    (None, None, None) = el pipeline de siempre (400P, lo de config.py)."""
+    pre = "AUTONOMO_CAM_A_" if rol == "a" else "AUTONOMO_CAM_"
+    m800 = bool(getattr(cfg, pre + "MONO_800P", False))
+    ext = bool(getattr(cfg, pre + "EXTENDIDA", False))
+    bits = getattr(cfg, pre + "SUBPIXEL_BITS", None)
+    bits = int(bits) if bits else None
+    modos = []
+    for m in ((m800, ext, bits), (m800, False, bits), (None, None, None)):
+        if m not in modos and (m[0] or m[1] or m[2] or m == (None, None, None)):
+            modos.append(m)
+    return modos
+
+
+def _texto_modo(m):
+    if m == (None, None, None):
+        return "400P (como siempre)"
+    return (("800P" if m[0] else "400P") + (" + extendida" if m[1] else "")
+            + (f" + subpíxel {m[2]} bits" if m[2] else ""))
+
+
+def rol_de_mxid(cfg, mxid):
+    """(20-nov) "a" si ese MxId es el de la cámara A del modo autónomo; si no, "cabeza"."""
+    mx_a = getattr(cfg, "AUTONOMO_CAM_A_MXID", None)
+    return "a" if mxid and mx_a and str(mxid) == str(mx_a) else "cabeza"
+
+
+def abrir_como_autonomo(cfg, rol, mxid, nombre="cámara", **kw):
+    """(20-nov) La OAK abierta con el MISMO estéreo que usa el modo autónomo para ese rol (del mejor modo a «como
+    siempre», _modos_estereo) y con la entrada de control para fijar el enfoque (camara_oak.fijar_enfoque). La usan
+    este proceso y lo que tiene que medir lo mismo que ve el robot (calibrar_escala_profundidad.py,
+    diagnosticos/medir_pelota.py): la escala o el error medidos con otro modo del estéreo no valen para este.
+    kw: el resto de crear_pipeline_oak (con_hd, rellenar_huecos…). Devuelve (dev o None, modo, último error)."""
+    from skill_shield.vision.camara_oak import crear_pipeline_oak
+    from skill_shield.vision.multicamara import abrir_dispositivo
+    dev, modo, error = None, (None, None, None), None
+    for modo in _modos_estereo(cfg, rol):
+        try:
+            dev = abrir_dispositivo(crear_pipeline_oak(mono_800p=modo[0], extendida=modo[1], subpixel_bits=modo[2],
+                                                       control=True, **kw), mxid)
+            break
+        except Exception as e:
+            error = e
+            print(f"⚠️  [autónomo] {nombre.capitalize()}: no se abre con estéreo {_texto_modo(modo)} ({e})")
+    return dev, modo, error
+
+
+class _CalibArchivo:
+    """(20-nov) T_mundo_cam de un archivo de calibración, recargada si cambia (para la profundidad de la A)."""
+
+    def __init__(self, ruta):
+        self.ruta, self.T, self._mtime, self._t = ruta, None, None, 0.0
+
+    def actual(self):
+        ahora = time.monotonic()
+        if ahora - self._t >= 1.0:
+            self._t = ahora
+            try:
+                m = os.path.getmtime(self.ruta)
+            except OSError:
+                m = None
+            if m != self._mtime:
+                self._mtime = m
+                self.T = None
+                if m is not None:
+                    try:
+                        from skill_shield.autonomo.calibracion import cargar
+                        self.T = cargar(self.ruta)["T_mundo_cam"]
+                    except Exception as e:
+                        print(f"⚠️  [autónomo] No se pudo leer {self.ruta}: {e}")
+        return self.T
 
 
 def _ultimo(cola):
@@ -175,9 +255,9 @@ def main():
     args = _parsear()
     import depthai as dai
     from config import ANCHO_CAM, ALTO_CAM
-    from skill_shield.vision.camara_oak import crear_pipeline_oak
-    from skill_shield.vision.multicamara import (abrir_dispositivo, activar_ir, comprobar_usb,
-                                                 intrinsecos_color, listar_camaras, mxid_de)
+    from skill_shield.vision.camara_oak import fijar_enfoque
+    from skill_shield.vision.multicamara import (activar_ir, comprobar_usb, intrinsecos_color, listar_camaras,
+                                                 mxid_de)
     from skill_shield.autonomo.canal import Canal
 
     canal_img = Canal.esperar(args.canal_img) if args.canal_img else None
@@ -199,7 +279,10 @@ def main():
                                       Canal.esperar(args.canal_mando) if args.canal_mando else None,
                                       Canal.esperar(args.canal_visto) if args.canal_visto else None,
                                       canal_congelar=Canal.esperar(args.canal_congelar) if args.canal_congelar
-                                      else None)
+                                      else None,
+                                      canal_prof_a=Canal.esperar(args.canal_prof_a) if args.canal_prof_a else None)
+        if constructor.canal_prof_a is not None:
+            print("🧱 [autónomo] Mapa de obstáculos: también con la profundidad de la cámara A")
         print(f"🧱 [autónomo] Mapa de obstáculos: rejilla {tuple(int(v) for v in constructor.mapa.n)} de "
               f"{constructor.mapa.res * 100:.0f} cm")
     detector, canal_herr, canal_mando_h = None, None, None
@@ -225,22 +308,44 @@ def main():
             canal_info.escribir(json.dumps(kw).encode())
 
     print(f"📷 [autónomo] OAK-D disponibles: {listar_camaras()}")
-    try:
-        import config as cfg_
-        dev = abrir_dispositivo(crear_pipeline_oak(
-            con_hd=False,                                 # profundidad «honrada» para el mapa (11-nov)
-            rellenar_huecos=getattr(cfg_, "AUTONOMO_CAM_RELLENAR_HUECOS", 0),
-            temporal=getattr(cfg_, "AUTONOMO_CAM_FILTRO_TEMPORAL", False),
-            confianza=getattr(cfg_, "AUTONOMO_CAM_CONFIANZA", 200)), args.mxid)
-    except Exception as e:
-        print(f"✗ [autónomo] No se pudo abrir la {args.nombre} (MxId {args.mxid}): {e}")
+    import config as cfg_
+    from skill_shield.autonomo.camara_a import distancia_minima
+    # (20-nov) del mejor modo del estéreo a «como siempre», con la entrada de control (enfoque fijo)
+    dev, modo, error = abrir_como_autonomo(
+        cfg_, args.rol, args.mxid, args.nombre,
+        con_hd=False,                                     # profundidad «honrada» para el mapa (11-nov)
+        rellenar_huecos=getattr(cfg_, "AUTONOMO_CAM_RELLENAR_HUECOS", 0),
+        temporal=getattr(cfg_, "AUTONOMO_CAM_FILTRO_TEMPORAL", False),
+        confianza=getattr(cfg_, "AUTONOMO_CAM_CONFIANZA", 200))
+    if dev is None:
+        print(f"✗ [autónomo] No se pudo abrir la {args.nombre} (MxId {args.mxid}): {error}")
         print("   ¿Está conectada? ¿La tiene abierta otro programa (teleoperación, calibración)?")
-        _info(ok=False, error=str(e), mxid=args.mxid, t=time.time())
+        _info(ok=False, error=str(error), mxid=args.mxid, t=time.time())
         return 1
+    # (20-nov) más cerca de esto el estéreo no mide con el modo abierto (y AUTONOMO_MAPA_Z_MIN como mínimo)
+    ext = bool(getattr(cfg_, "STEREO_EXTENDED", False)) if modo[1] is None else bool(modo[1])
+    z_min_cam = max(float(getattr(cfg_, "AUTONOMO_MAPA_Z_MIN", 0.35)), distancia_minima(bool(modo[0]), ext))
+    print(f"📏 [autónomo] {args.nombre.capitalize()}: estéreo {_texto_modo(modo)} · el mapa no usa lo que esté a "
+          f"menos de {100 * z_min_cam:.0f} cm")
+    if constructor is not None:
+        constructor.mapa.z_min = z_min_cam
+    # (20-nov) cámara A → mapa de la cabeza: su profundidad preparada (sin sus pelotas ni lo poco fiable)
+    canal_prof_a, calib_a, t_prof_a = None, None, 0.0
+    if args.rol == "a" and args.canal_prof_a:
+        canal_prof_a = Canal.esperar(args.canal_prof_a)
+        calib_a = _CalibArchivo(args.calibracion if os.path.isabs(args.calibracion) else os.path.join(
+            os.path.dirname(os.path.abspath(cfg_.__file__)), args.calibracion))
+        periodo_a = 1.0 / max(float(getattr(cfg_, "AUTONOMO_CAM_A_MAPA_HZ", 4.0)), 0.5)
+        dist_max_a = getattr(cfg_, "AUTONOMO_CAM_A_MAPA_DIST_MAX", 1.2)
+        libre_a = bool(getattr(cfg_, "AUTONOMO_MAPA_PELOTAS_LIBRE_DELANTE", True))
+        print(f"🧱 [autónomo] Cámara A: manda su profundidad al mapa de la cabeza ({1 / periodo_a:.0f}/s)")
 
     with dev:
         usb = comprobar_usb(dev, args.rol)
         activar_ir(dev, args.rol, args.ir_ma)
+        # (20-nov) lente fija donde se calibró (la calibración cámara→robot también la fija): con el autoenfoque,
+        # K y la profundidad alineada dejan de valer
+        fijar_enfoque(dev, getattr(cfg_, "AUTONOMO_CAM_ENFOQUE", "calibrado"), args.nombre)
         K, dist = intrinsecos_color(dev, ANCHO_CAM, ALTO_CAM)
         mxid = mxid_de(dev)
         print(f"📷 [autónomo] {args.nombre.capitalize()} {mxid}: {ANCHO_CAM}x{ALTO_CAM}, "
@@ -250,6 +355,7 @@ def main():
         if args.grabar:
             return _grabar(dev, K, args.grabar, args.calibracion)
         prof, n, t_fps, fps, t_info = None, 0, time.monotonic(), 0.0, 0.0
+        t_prof, t_arranque, avisado_prof = time.monotonic(), time.monotonic(), False   # (20-nov) ¿llega profundidad?
         # (18-nov) corrección de escala de la profundidad del estéreo (1.0 = tal cual). Con una cinta: un cartón
         # plano en el centro de la imagen a D mm medidos; si «centro:» marca M, ESCALA = D / M
         escala_prof = float(args.escala_prof or 1.0)
@@ -265,8 +371,24 @@ def main():
             pd = _ultimo(qd)
             if pd is not None:
                 prof = pd.getFrame()
+                t_prof = time.monotonic()
                 if abs(escala_prof - 1.0) > 1e-6:
                     prof = np.clip(prof.astype(np.float32) * escala_prof, 0, 65535).astype(np.uint16)
+                if canal_prof_a is not None and time.monotonic() - t_prof_a >= periodo_a:
+                    t_prof_a = time.monotonic()
+                    try:
+                        T_a = calib_a.actual()
+                        if T_a is not None:
+                            from skill_shield.autonomo.camara_a import empaquetar_prof, preparar_prof
+                            halos_a = (pelotas.pixeles_halo() if pelotas is not None and getattr(
+                                cfg_, "AUTONOMO_MAPA_SIN_HALO_PELOTAS", True) else None)
+                            sub, Ks, msub = preparar_prof(prof, K, img_ult, halos_a, T_a, paso=2, z_min=z_min_cam,
+                                                          libre_halos=libre_a)
+                            b_a = empaquetar_prof(sub, Ks, T_a, msub, dist_max=dist_max_a)
+                            if len(b_a) <= canal_prof_a.capacidad:
+                                canal_prof_a.escribir(b_a)
+                    except Exception as e:                # el mapa nunca debe tirar la cámara
+                        print(f"⚠️  [autónomo] Profundidad de la cámara A para el mapa: {e}")
                 if hilo_mapa is not None:
                     try:
                         # los halos se calculan aquí (las pelotas cambian en este hilo) y el mapa, en el suyo
@@ -346,6 +468,12 @@ def main():
                     ms_jpg = _media(ms_jpg, 1000.0 * (time.perf_counter() - t_j))
                 if ahora - t_info >= 0.5:
                     t_info = ahora
+                    # (20-nov) con un modo del estéreo nuevo, la OAK podría abrir y no dar profundidad: avisarlo
+                    if not avisado_prof and ahora - t_prof > 5.0 and ahora - t_arranque > 8.0:
+                        avisado_prof = True
+                        print(f"⚠️  [autónomo] {args.nombre.capitalize()}: llega imagen pero NO profundidad desde hace "
+                              f"{ahora - t_prof:.0f} s (estéreo {_texto_modo(modo)}). Si sigue así, poned "
+                              f"AUTONOMO_CAM_{'A_' if args.rol == 'a' else ''}EXTENDIDA = False (o MONO_800P = False).")
                     try:
                         est_mapa = constructor.estado() if constructor is not None else None
                     except Exception:                     # (lo está cambiando el hilo del mapa: a la próxima)

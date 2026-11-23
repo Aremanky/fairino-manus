@@ -107,17 +107,27 @@ def main():
         tb["diccionario"] = a.diccionario
     from calibrar_extrinseca import crear_tablero, pose_tablero
     from config import ANCHO_CAM, ALTO_CAM
-    from skill_shield.vision.camara_oak import crear_pipeline_oak
-    from skill_shield.vision.multicamara import abrir_dispositivo, activar_ir, intrinsecos_color
+    from skill_shield.autonomo.camara import _texto_modo, abrir_como_autonomo, rol_de_mxid
+    from skill_shield.vision.camara_oak import fijar_enfoque
+    from skill_shield.vision.multicamara import activar_ir, intrinsecos_color
     board, det = crear_tablero(tuple(tb["cuadros"]), float(tb["lado"]), float(tb["marcador"]), tb["diccionario"])
-    # la MISMA profundidad que el modo autónomo (sin rellenar huecos ni filtro temporal), sin escalar
-    dev = abrir_dispositivo(crear_pipeline_oak(
+    # la MISMA profundidad que el modo autónomo (sin rellenar huecos ni filtro temporal), sin escalar.
+    # (20-nov) Y con el MISMO estéreo que usa el modo autónomo para ESTA cámara (cabeza o A: 800P, extendida…) y la
+    # lente fija: la escala que se mide con otro modo del estéreo no vale para el que usa el robot
+    rol = rol_de_mxid(cfg, a.mxid)
+    clave = "AUTONOMO_CAM_A_ESCALA_PROF" if rol == "a" else "AUTONOMO_CAM_ESCALA_PROF"
+    dev, modo, error = abrir_como_autonomo(
+        cfg, rol, a.mxid, "cámara A" if rol == "a" else "cámara de cabeza",
         con_hd=False, rellenar_huecos=getattr(cfg, "AUTONOMO_CAM_RELLENAR_HUECOS", 0),
         temporal=getattr(cfg, "AUTONOMO_CAM_FILTRO_TEMPORAL", False),
-        confianza=getattr(cfg, "AUTONOMO_CAM_CONFIANZA", 200)), a.mxid)
+        confianza=getattr(cfg, "AUTONOMO_CAM_CONFIANZA", 200))
+    if dev is None:
+        sys.exit(f"✗ No se pudo abrir la cámara (MxId {a.mxid}): {error}")
+    print(f"📏 {'Cámara A' if rol == 'a' else 'Cámara de cabeza'}: estéreo {_texto_modo(modo)} (el del modo autónomo)")
     medidas, ultima = [], 0.0
     with dev:
-        activar_ir(dev, "cabeza", int(getattr(cfg, "AUTONOMO_CAM_IR_MA", 800)))
+        activar_ir(dev, rol, int(getattr(cfg, "AUTONOMO_CAM_A_IR_MA" if rol == "a" else "AUTONOMO_CAM_IR_MA", 800)))
+        fijar_enfoque(dev, getattr(cfg, "AUTONOMO_CAM_ENFOQUE", "calibrado"), "cámara")
         K, dist = intrinsecos_color(dev, ANCHO_CAM, ALTO_CAM)
         qc = dev.getOutputQueue("color", maxSize=1, blocking=False)
         qd = dev.getOutputQueue("depth", maxSize=1, blocking=False)
@@ -153,7 +163,7 @@ def main():
         sys.exit("Muy pocas medidas (hace falta ver el tablero entero, plano, con profundidad).")
     esc, lineas = resumen(medidas)
     print("\n" + "\n".join(lineas))
-    print(f"\n→ config.py:  AUTONOMO_CAM_ESCALA_PROF = {esc:.4f}"
+    print(f"\n→ config.py:  {clave} = {esc:.4f}"
           + ("   (≈ 1: no hace falta corregir)" if abs(esc - 1.0) < 0.003 else ""))
 
 

@@ -1260,6 +1260,10 @@ AUTONOMO_FR5_RECONECTAR = True           # 13-nov: si el FR5 se apaga y se vuelv
 AUTONOMO_CAM_MXID     = CAM_B_MXID       # cámara de CABEZA = la antigua cámara B
 AUTONOMO_CAM_VENTANA  = False            # True = además de la web, ventana de OpenCV con la imagen
 AUTONOMO_CAM_IR_MA    = 800              # proyector IR de puntos (mejor profundidad en la mesa lisa)
+# (20-nov) Enfoque de la cámara de color en el modo autónomo (cabeza y A), como CALIB_CAM_ENFOQUE: "calibrado" =
+# lente fija donde se midieron en fábrica los intrínsecos y la alineación profundidad→color (la calibración
+# cámara→robot se hace así) · 0-255 = esa posición · None = autoenfoque (lo de antes del 20-nov)
+AUTONOMO_CAM_ENFOQUE  = "calibrado"
 AUTONOMO_JPEG_CALIDAD = 80               # calidad del vídeo de la web (más alto = más ancho de banda)
 AUTONOMO_WEB_HOST     = "0.0.0.0"        # "0.0.0.0" = abierta a la red local · "127.0.0.1" = solo este PC
 AUTONOMO_WEB_PUERTO   = 8080
@@ -1717,6 +1721,51 @@ AUTONOMO_CAM_A_MAX_DIF_M = 0.06               # m: más lejos de lo que ve la ca
                                               # alguna calibración está mal): no se usa la A
 AUTONOMO_CAM_A_EDAD_MAX_S = 0.5               # s: medida de la A más vieja = no vale
 AUTONOMO_CAM_A_PELOTA_CORRECCION_M = (0.0, 0.0, 0.0)   # como AUTONOMO_TAREA_PELOTA_CORRECCION_M, vista en la imagen de la A
+
+# ═══════════════════════════════════════════════════════════════════════════
+# (20-nov) MAPA DE OBSTÁCULOS: mejor profundidad, cámara A fusionada, ESDF en la GPU y la pelota
+# ═══════════════════════════════════════════════════════════════════════════
+# A) PROFUNDIDAD MÁS FINA en las dos OAK-D Pro del modo autónomo (la teleoperación no cambia):
+#    · MONO_800P: las mono a 1280x800 (sensor entero) en vez de 640x400 agrupado: el doble de focal en píxeles →
+#      más o menos la MITAD de error en la profundidad (a 0,9 m, ~2 mm de escalón en vez de ~4 mm).
+#    · EXTENDIDA: disparidad extendida. A 800P la distancia mínima sube a ~0,70 m; con ella vuelve a ~0,35 m (lo de
+#      siempre). La cámara A está a 0,4-0,5 m de la zona de agarre: sin ella NO vería la pelota.
+#    · SUBPIXEL_BITS: fracción de la subpíxel (DepthAI: 3 por defecto; 5 = escalones 4 veces más finos).
+#    Si la OAK no acepta la combinación al abrirse, se reintenta sin extendida y, si tampoco, como antes (400P),
+#    avisando en la terminal. La distancia mínima del mapa se pone sola según lo que se haya abierto.
+#    Tras cambiarlo, revisad la escala: python calibrar_escala_profundidad.py (AUTONOMO_CAM_ESCALA_PROF y la de la A).
+AUTONOMO_CAM_MONO_800P      = True
+AUTONOMO_CAM_EXTENDIDA      = True
+AUTONOMO_CAM_SUBPIXEL_BITS  = 5
+AUTONOMO_CAM_A_MONO_800P    = True
+AUTONOMO_CAM_A_EXTENDIDA    = True
+AUTONOMO_CAM_A_SUBPIXEL_BITS = 5
+# B) La CÁMARA A también ALIMENTA EL MAPA: su proceso manda su profundidad (sin sus pelotas, sin lo poco fiable y a
+#    la mitad de resolución) al proceso de la cabeza, que la funde en la MISMA TSDF con su calibración
+#    (AUTONOMO_CAM_A_CALIB_ARCHIVO). Lo que la cabeza no ve (detrás de objetos, bajo el antebrazo) lo ve la A.
+#    El robot se quita igual (sus cápsulas y mallas están en el mundo). Las dos calibraciones tienen que cuadrar:
+#    si una está 1-2 cm desviada, las superficies salen dobles o gruesas (calibrar_camara_robot.py --verificar).
+AUTONOMO_CAM_A_AL_MAPA      = True
+AUTONOMO_CAM_A_MAPA_HZ      = 4.0            # imágenes de la A que se mandan al mapa por segundo
+AUTONOMO_CAM_A_MAPA_DIST_MAX = 1.2           # m: lo que la A ve más lejos no pone obstáculos (sí espacio libre)
+AUTONOMO_CAM_A_MAPA_EDAD_MAX_S = 0.5         # s: una imagen de la A más vieja no se funde
+# C) ESDF en la GPU: la distancia a los obstáculos (la rejilla que se le da a cuRobo y la de las comprobaciones del
+#    mapa) con una transformada de distancia EXACTA en PyTorch + CUDA (mismo resultado que scipy, por ejes).
+#    "auto" = GPU si hay CUDA, si no scipy (CPU) · "gpu" · "numpy"
+AUTONOMO_MAPA_ESDF_MOTOR    = "auto"
+# 2) LA PELOTA DETECTADA NO ES OBSTÁCULO… pero el brazo no se la lleva por delante:
+#    · Mapa: sus píxeles ya no se tiran: dicen «libre hasta su cara» (como los del robot), sin poner superficie.
+#      Así el espacio por donde baja la mano queda CONOCIDO y libre (antes quedaba «desconocido» y cuRobo lo
+#      penalizaba). En las dos cámaras.
+AUTONOMO_MAPA_PELOTAS_LIBRE_DELANTE = True
+AUTONOMO_MAPA_PELOTAS_MARGEN_LIBRE = 0.01    # m antes de su cara en los que no se dice nada
+#    · cuRobo: mientras va hacia la pelota (tramo «ir a la pelota», mano abierta y sin carga), la pelota objetivo
+#      es un OBSTÁCULO más (esfera de su diámetro + margen) para TODO el robot: el brazo la rodea. La bajada final
+#      (la recta de la mano hasta ella) no es de cuRobo y la ignora, como hasta ahora. Ya cogida, va en las esferas
+#      de la mano (AUTONOMO_CUROBO_PELOTA_DIAMETRO): «enganchada» al robot.
+AUTONOMO_CUROBO_PELOTA_OBSTACULO = True
+AUTONOMO_CUROBO_PELOTA_OBSTACULO_MARGEN = 0.0
+AUTONOMO_CUROBO_PELOTA_OBSTACULO_TRAMOS = ("ir a la pelota",)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CALIBRACIÓN CÁMARA DE CABEZA → ROBOT (10-nov, paso 4) — calibrar_camara_robot.py

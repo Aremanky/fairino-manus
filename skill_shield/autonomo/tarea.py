@@ -277,6 +277,11 @@ class Planificador:
         # pelotas
         self.pel_holgura = float(_g(g, "AUTONOMO_TAREA_PELOTA_HOLGURA_PALMA", 0.03))
         self.pel_subida = float(_g(g, "AUTONOMO_TAREA_PELOTA_SUBIDA", 0.12))
+        # (20-nov) la pelota objetivo es un obstáculo para cuRobo mientras se va hacia ella (el brazo la rodea); la
+        # bajada final (recta propia) la sigue ignorando y, ya cogida, va en las esferas de la mano
+        self.obj_curobo = bool(_g(g, "AUTONOMO_CUROBO_PELOTA_OBSTACULO", True))
+        self.obj_curobo_tramos = tuple(_g(g, "AUTONOMO_CUROBO_PELOTA_OBSTACULO_TRAMOS", ("ir a la pelota",)) or ())
+        self._objetivo_curobo = None                       # dict(c, r) de la pelota del plan en curso
         self.zona_apoyo = float(_g(g, "AUTONOMO_TAREA_PELOTA_ZONA_APOYO", 0.20))   # + radio, en horizontal
         self.apoyo_grueso = float(_g(g, "AUTONOMO_TAREA_PELOTA_APOYO_GRUESO", 0.06))  # capa de mesa con ruido
         self.grosor_suelo = float(_g(g, "AUTONOMO_TAREA_PELOTA_GROSOR_SUELO", 0.08))  # grosor de ese «suelo»
@@ -1104,6 +1109,8 @@ class Planificador:
                                       margen_mano_extra=max(0.0, self.margen_mapa - self.margen_mapa_malla),
                                       esferas_mano=self._esferas_carga(g),
                                       max_goalset=int(g.get("AUTONOMO_CUROBO_MAX_GOALSET", 16)),
+                                      motor_esdf=str(g.get("AUTONOMO_MAPA_ESDF_MOTOR", "auto")),
+                                      margen_objetivo=float(g.get("AUTONOMO_CUROBO_PELOTA_OBSTACULO_MARGEN", 0.0)),
                                       intentos=int(g.get("AUTONOMO_CUROBO_INTENTOS", 4)),
                                       semillas=int(g.get("AUTONOMO_CUROBO_SEMILLAS", 8)),
                                       desconocido_extra=g.get("AUTONOMO_CUROBO_DESCONOCIDO_EXTRA", 0.02),
@@ -1146,8 +1153,7 @@ class Planificador:
         Ts = [self.c.fk_marcos(np.asarray(op[0], float))[6] for op in opciones]
         try:
             with self.con_mano(*(mano or (None, None))):
-                cu.actualizar_mundo(self, clave=(id(self), getattr(self, "_version_mundo", 0),
-                                                 id(self._arbol), id(self._visto)))
+                self._mundo_curobo(cu, nombre)
                 r = cu.plan_goalset(q0, Ts)
                 if r is None:
                     return None
@@ -1182,12 +1188,27 @@ class Planificador:
             out += [a + (b - a) * (k / n) for k in range(1, n + 1)]
         return np.array(out)
 
+    def objetivo_curobo(self, nombre):
+        """(20-nov) La pelota objetivo (dict(c, r)) si en este tramo es obstáculo para cuRobo: solo en los tramos de
+        AUTONOMO_CUROBO_PELOTA_OBSTACULO_TRAMOS («ir a la pelota») y con la mano SIN carga. Si no, None."""
+        if not self.obj_curobo or self._objetivo_curobo is None or self._carga is not None:
+            return None
+        return self._objetivo_curobo if str(nombre) in self.obj_curobo_tramos else None
+
+    def _mundo_curobo(self, cu, nombre):
+        """Carga en cuRobo el mundo actual (y, en los tramos que toca, la pelota objetivo como obstáculo)."""
+        clave = (id(self), getattr(self, "_version_mundo", 0), id(self._arbol), id(self._visto))
+        obj = self.objetivo_curobo(nombre)
+        if obj is None:
+            cu.actualizar_mundo(self, clave=clave)
+        else:
+            cu.actualizar_mundo(self, clave=clave, objetivo=obj)
+
     def tramo_curobo(self, q0, q1, nombre="tramo"):
         """(17-nov) El tramo que propone cuRobo, VERIFICADO aquí postura a postura (mano con su postura
         y su carga, suelo de las mesas, J4…) y entre medias. ErrorPlan si no hay o no vale."""
         try:
-            self.curobo.actualizar_mundo(self, clave=(id(self), getattr(self, "_version_mundo", 0),
-                                                      id(self._arbol), id(self._visto)))
+            self._mundo_curobo(self.curobo, nombre)
             qs = self.curobo.plan(q0, q1)
         except Exception as e:                           # la GPU nunca debe tumbar el plan
             self._pausar_curobo(e)
@@ -1765,6 +1786,7 @@ class Planificador:
         return plan
 
     def planificar(self, q0, T_herr, T_uso, T_dejada):
+        self._objetivo_curobo = None                       # (20-nov) herramientas: de momento, sin objetivo en cuRobo
         q0 = self._empezar(q0)
         ops_h = [(q, q, qs, inc) for q, qs, inc in self.opciones_palma(T_herr, q0, "la herramienta")]
         ops_u = [(q, ciclo[-1].qs[-1], ciclo, inc) for q, ciclo, inc in self.opciones_uso(T_uso, q0)]
@@ -2108,6 +2130,7 @@ class Planificador:
         k_ab, k_ce, k_ap = (("pinza_abierta", "pinza_cerrada", "pinza_apretar") if pinza is not None
                             else ("pelota_abierta", "pelota_cerrada", "pelota_apretar"))
         c = np.asarray(T_pelota, float)[:3, 3]
+        self._objetivo_curobo = dict(c=c.copy(), r=r)    # (20-nov) obstáculo para cuRobo al ir hacia ella
         # dejar: si el marcador está tumbado, la pelota encima; si está de pie (en una hoja), se
         # suelta delante de él y cae. Siempre llegando desde arriba.
         Tm_d = np.asarray(T_dejada, float)

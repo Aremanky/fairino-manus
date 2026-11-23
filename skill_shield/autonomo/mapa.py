@@ -139,6 +139,8 @@ class MapaOcupacion:
         self._dist = None                                         # transformada de distancia (caché)
         self.excluir = []                                         # cajas (centro, semi) o cápsulas (dict) a ignorar
         self.ultima = dict(puntos=0, robot=0, suelo=0, ms=0.0)
+        self.ultima_sec = {}                                      # (20-nov) la última de la cámara A
+        self.motor_esdf = "auto"                                  # (20-nov) distancias(): "auto" · "gpu" · "numpy"
         self.ultimos_puntos = None
         # (17-nov) TSDF, distancia máxima y mesas como planos
         self.metodo = str(metodo)
@@ -254,21 +256,35 @@ class MapaOcupacion:
         return fuera
 
     def actualizar(self, prof_mm, K, T_mundo_cam, capsulas_robot=(), ahora=None, paso=2, capsulas_mano=(),
-                   img_bgr=None, nube_robot=None):
+                   img_bgr=None, nube_robot=None, excluir_px=None, margen_libre=0.01, z_min=None, dist_max=-1.0,
+                   filtrar=True, principal=True):
         """capsulas_robot: lista de (a, b, radio) en el mundo (la pose REAL del robot).
-        capsulas_mano: lo mismo para las piezas de la OrcaHand con su postura real (PiezasMano)."""
+        capsulas_mano: lo mismo para las piezas de la OrcaHand con su postura real (PiezasMano).
+        (20-nov) Para fundir varias cámaras en el mismo mapa y para la pelota:
+          · excluir_px: máscara (como prof_mm) de píxeles que NO ponen superficie pero SÍ dicen «libre hasta
+            margen_libre antes de aquí» (las pelotas: lo de delante queda conocido y libre). Con «impactos», se tiran;
+          · z_min / dist_max: los de ESTA cámara (None en dist_max = sin límite; -1 = los del mapa);
+          · filtrar=False: la profundidad ya viene limpia (pixeles_fiables hecho en el otro proceso);
+          · principal=False: una cámara secundaria (la A): no toca ultimos_puntos (la autocorrección es de la
+            cabeza) ni las estadísticas de la principal (van a self.ultima_sec)."""
         t0 = time.perf_counter()
         ahora = time.time() if ahora is None else ahora
         if self.metodo == "tsdf":
             return self._actualizar_tsdf(prof_mm, K, T_mundo_cam, capsulas_robot, ahora, paso, capsulas_mano,
-                                         img_bgr, nube_robot, t0)
+                                         img_bgr, nube_robot, t0, excluir_px=excluir_px, margen_libre=margen_libre,
+                                         z_min=z_min, dist_max=dist_max, filtrar=filtrar, principal=principal)
+        if excluir_px is not None:                       # (20-nov) contando impactos: se tiran, como antes
+            prof_mm = np.where(np.asarray(excluir_px, bool), 0, prof_mm).astype(prof_mm.dtype)
+        z_min_cam = self.z_min if z_min is None else float(z_min)
+        dist_max_cam = self.dist_max if dist_max is not None and dist_max < 0 else dist_max
         R, t = T_mundo_cam[:3, :3], T_mundo_cam[:3, 3]
-        fiables = pixeles_fiables(prof_mm, img_bgr)
-        P = nube_desde_profundidad(prof_mm, K, paso, self.z_min, fiables=fiables)
-        if self.dist_max:                                # (17-nov) distancia real a la cámara
-            P = P[np.linalg.norm(P, axis=1) <= self.dist_max]
+        fiables = pixeles_fiables(prof_mm, img_bgr) if filtrar else None
+        P = nube_desde_profundidad(prof_mm, K, paso, z_min_cam, fiables=fiables)
+        if dist_max_cam:                                 # (17-nov) distancia real a la cámara
+            P = P[np.linalg.norm(P, axis=1) <= dist_max_cam]
         P = P @ R.T + t
-        self.ultimos_puntos = P                          # (para la autocorrección de la calibración)
+        if principal:
+            self.ultimos_puntos = P                      # (para la autocorrección de la calibración)
         n_total = len(P)
         idx, dentro = self.indices(P)
         P, idx = P[dentro], idx[dentro]
@@ -317,31 +333,44 @@ class MapaOcupacion:
         self.t_visto[tapado & (self.L >= self.UMBRAL_OCUPADO)] = ahora
         self._superficies(P[~quitar] if len(P) else P, T_mundo_cam, ahora)
         self._dist = None
-        self.ultima = dict(puntos=n_total, robot=n_robot, suelo=n_suelo,
-                           ms=round((time.perf_counter() - t0) * 1000, 1))
+        est = dict(puntos=n_total, robot=n_robot, suelo=n_suelo, ms=round((time.perf_counter() - t0) * 1000, 1))
+        if principal:
+            self.ultima = est
+        else:
+            self.ultima_sec = est
 
     # ── (17-nov) fusión TSDF ──
     def _actualizar_tsdf(self, prof_mm, K, T_mundo_cam, capsulas_robot, ahora, paso, capsulas_mano, img_bgr,
-                         nube_robot, t0):
+                         nube_robot, t0, excluir_px=None, margen_libre=0.01, z_min=None, dist_max=-1.0, filtrar=True,
+                         principal=True):
         from skill_shield.autonomo.tsdf import crear_observador, fundir, observar_numpy
         if self._observar is None:
             self._observar, self.motor = crear_observador(self._centros, self._motor)
             print(f"🧱 [mapa] Fusión TSDF con {self.motor}")
+        z_min = self.z_min if z_min is None else float(z_min)
+        dist_max = self.dist_max if dist_max is not None and dist_max < 0 else dist_max
         R, t = T_mundo_cam[:3, :3], T_mundo_cam[:3, 3]
-        fiables = pixeles_fiables(prof_mm, img_bgr)
         p = prof_mm[::paso, ::paso].astype(np.float32) * 0.001
-        ok = (p > self.z_min) & fiables[::paso, ::paso]
+        ok = p > z_min
+        if filtrar:
+            ok &= pixeles_fiables(prof_mm, img_bgr)[::paso, ::paso]
         h, w = p.shape
         Ks = np.array(K, float).copy()
         Ks[0, 0] /= paso; Ks[0, 2] /= paso; Ks[1, 1] /= paso; Ks[1, 2] /= paso
         v, u = np.mgrid[0:h, 0:w]
         Pc = np.stack([(u - Ks[0, 2]) / Ks[0, 0] * p, (v - Ks[1, 2]) / Ks[1, 1] * p, p], -1)
         rango = np.linalg.norm(Pc, axis=-1)              # distancia REAL a la cámara (no solo el eje z)
-        lejos = ok & (rango > self.dist_max) if self.dist_max else np.zeros_like(ok)
+        lejos = ok & (rango > dist_max) if dist_max else np.zeros_like(ok)
         cerca = ok & ~lejos
         ic = np.nonzero(cerca.ravel())[0]
         P = Pc.reshape(-1, 3)[ic] @ R.T + t
-        self.ultimos_puntos = P
+        if principal:
+            self.ultimos_puntos = P
+        # (20-nov) píxeles de las pelotas: sin superficie, pero «libre hasta su cara − margen_libre»
+        if excluir_px is not None:
+            ex = np.asarray(excluir_px, bool)[::paso, ::paso].ravel()[ic]
+        else:
+            ex = np.zeros(len(P), bool)
         robot = np.zeros(len(P), bool)
         for grupo in (capsulas_robot, capsulas_mano):
             robot |= self._cerca(P, grupo)
@@ -352,15 +381,18 @@ class MapaOcupacion:
         for caja in self.excluir:
             excl |= _en_caja(P, caja)
         # (17-nov) la escena fija: lo que cae en sus cajas solo dice «libre hasta aquí» (como el robot)
-        sup = ~(robot | suelo | excl | self._puntos_fijos(P))
+        sup = ~(robot | suelo | excl | ex | self._puntos_fijos(P))
         d_sup = np.zeros(h * w, np.float32)
         d_lib = np.zeros(h * w, np.float32)
         pz = p.ravel()
         d_sup[ic[sup]] = pz[ic[sup]]
         d_lib[ic] = np.where(robot, np.maximum(pz[ic] - self.margen_robot - self.res, 0.0), pz[ic])
-        if self.dist_max:                                # lejos: libre hasta dist_max, sin superficies
+        if ex.any():
+            # (20-nov) la pelota: libre hasta un poco antes de su cara (lo de detrás no se sabe y no se toca)
+            d_lib[ic[ex & ~robot]] = np.maximum(pz[ic[ex & ~robot]] - float(margen_libre), 0.0)
+        if dist_max:                                     # lejos: libre hasta dist_max, sin superficies
             il = np.nonzero(lejos.ravel())[0]
-            d_lib[il] = self.dist_max * pz[il] / np.maximum(rango.ravel()[il], 1e-6)   # en z de la cámara
+            d_lib[il] = dist_max * pz[il] / np.maximum(rango.ravel()[il], 1e-6)   # en z de la cámara
         T_cm = np.linalg.inv(T_mundo_cam)
         args = (self._centros, T_cm, d_sup.reshape(h, w), d_lib.reshape(h, w), Ks, self.trunc_0, self.k_trunc)
         try:
@@ -380,8 +412,12 @@ class MapaOcupacion:
             self.W[dentro] = 0.0
         self._superficies(P[sup], T_mundo_cam, ahora)
         self._dist = None
-        self.ultima = dict(puntos=int(len(P)), robot=int(robot.sum()), suelo=int(suelo.sum()),
-                           ms=round((time.perf_counter() - t0) * 1000, 1))
+        est = dict(puntos=int(len(P)), robot=int(robot.sum()), suelo=int(suelo.sum()), pelotas=int(ex.sum()),
+                   ms=round((time.perf_counter() - t0) * 1000, 1))
+        if principal:
+            self.ultima = est
+        else:
+            self.ultima_sec = est
 
     # ── (17-nov) mesas como planos ──
     def _superficies(self, P, T_mundo_cam, ahora):
@@ -462,9 +498,11 @@ class MapaOcupacion:
         """Distancia (m) de cada vóxel al obstáculo más cercano (0 dentro de uno). Solo lo OCUPADO (lo que
         mide la cámara): (18-nov, tarde) ya no hay opción de rellenar lo desconocido de debajo/detrás."""
         if self._dist is None:
-            from scipy.ndimage import distance_transform_edt
+            from skill_shield.autonomo.curobo_fr5.mundo import distancia_a_ocupado
             obst = self.estado(ahora) == OCUPADO
-            d = distance_transform_edt(~obst) * self.res if obst.any() else np.full(self.L.shape, np.inf, np.float32)
+            # (20-nov) en la GPU si hay CUDA (mismo resultado que scipy)
+            d = (distancia_a_ocupado(obst, self.res, self.motor_esdf) if obst.any()
+                 else np.full(self.L.shape, np.inf, np.float32))
             self._dist = d.astype(np.float32)
         return self._dist
 
@@ -720,7 +758,7 @@ class ConstructorMapa:
     publica. paso(prof_mm, K) se llama con cada imagen de profundidad nueva."""
 
     def __init__(self, cfg, raiz, canal_q=None, canal_mapa=None, canal_mando=None, canal_visto=None,
-                 canal_congelar=None):
+                 canal_congelar=None, canal_prof_a=None):
         import os
         g = cfg if isinstance(cfg, dict) else {k: getattr(cfg, k) for k in dir(cfg) if k.isupper()}
         self.g = g
@@ -794,6 +832,16 @@ class ConstructorMapa:
         self._fijo_vistos = {}                           # último id visto de cada mando de la escena fija
         self.aviso_fijo = ""
         self._aplicar_fijo()
+        # (20-nov) la pelota: sus píxeles dicen «libre hasta su cara» (sin superficie) en vez de tirarse
+        self.pelotas_libre = bool(g.get("AUTONOMO_MAPA_PELOTAS_LIBRE_DELANTE", True))
+        self.margen_libre_pelota = float(g.get("AUTONOMO_MAPA_PELOTAS_MARGEN_LIBRE", 0.01))
+        # (20-nov) la distancia mínima de la cámara de cabeza la pone camara.py según el modo del estéreo que abrió
+        self.mapa.motor_esdf = str(g.get("AUTONOMO_MAPA_ESDF_MOTOR", "auto"))
+        # (20-nov) profundidad de la cámara A (camara_a.CANAL_PROF_A) fundida en la misma TSDF
+        self.canal_prof_a = canal_prof_a
+        self.edad_max_a = float(g.get("AUTONOMO_CAM_A_MAPA_EDAD_MAX_S", 0.5))
+        self.n_a, self.hz_a, self._n_a, self._t_hz_a, self.t_a = 0, 0.0, 0, time.monotonic(), None
+        self.aviso_a = ""
 
     # ── (17-nov) escena fija ──
     def _aplicar_fijo(self):
@@ -958,7 +1006,18 @@ class ConstructorMapa:
         if not halos:
             return prof_mm
         prof = prof_mm.copy()
-        h, w = prof.shape[:2]
+        prof[ConstructorMapa.mascara_halos(prof_mm, halos, K, T_mundo_cam)] = 0
+        return prof
+
+    @staticmethod
+    def mascara_halos(prof_mm, halos, K=None, T_mundo_cam=None):
+        """(20-nov) Máscara (como prof_mm) de los píxeles de los halos: los mismos que quita quitar_pixeles(). Sirve
+        para que en la TSDF digan «libre hasta aquí» sin poner superficie (MapaOcupacion.actualizar(excluir_px=…))."""
+        h, w = prof_mm.shape[:2]
+        mascara = np.zeros((h, w), bool)
+        if not halos:
+            return mascara
+        prof = prof_mm
         for halo in halos:
             u, v, r, z0, z1 = halo[:5]
             v_max = halo[5] if len(halo) > 5 else v + r           # filas de más abajo: la mesa, se queda
@@ -974,8 +1033,8 @@ class ConstructorMapa:
                 P = np.stack([(xx - K[0, 2]) / K[0, 0] * z, (yy - K[1, 2]) / K[1, 1] * z, z], -1)
                 zw = P @ np.asarray(T_mundo_cam, float)[2, :3] + float(T_mundo_cam[2, 3])
                 quita &= zw > float(halo[6])                 # la mesa (por debajo de la pelota) se queda
-            trozo[quita] = 0
-        return prof
+            mascara[y0:y1, x0:x1] |= quita
+        return mascara
 
     def paso(self, prof_mm, K, img_bgr=None, halos=None):
         ahora = time.monotonic()
@@ -1007,9 +1066,17 @@ class ConstructorMapa:
         else:
             caps_r, caps_m = (), ()
         nube = self._nube_barrido if q is not None else None
-        prof_mm = self.quitar_pixeles(prof_mm, halos, K, self.T_efectiva())   # sin el halo de las pelotas (12-nov)
+        excl_px = None
+        if self.pelotas_libre and self.mapa.metodo == "tsdf":
+            # (20-nov) los píxeles de las pelotas: «libre hasta su cara», sin superficie (antes se tiraban y lo de
+            # delante de la pelota quedaba sin saber: cuRobo lo penalizaba como desconocido)
+            if halos:
+                excl_px = self.mascara_halos(prof_mm, halos, K, self.T_efectiva())
+        else:
+            prof_mm = self.quitar_pixeles(prof_mm, halos, K, self.T_efectiva())   # sin el halo de las pelotas (12-nov)
         self.mapa.actualizar(prof_mm, K, self.T_efectiva(), caps_r, capsulas_mano=caps_m, img_bgr=img_bgr,
-                             nube_robot=nube)
+                             nube_robot=nube, excluir_px=excl_px, margen_libre=self.margen_libre_pelota)
+        self._fundir_a(caps_r, caps_m, nube if q is not None else None)   # (20-nov) y lo de la cámara A
         if q is not None:
             self.mapa.vaciar(caps_r, caps_m, nube)
             # autocorrección: con el brazo quieto y a la vista, como mucho 2 veces por segundo
@@ -1059,6 +1126,38 @@ class ConstructorMapa:
             self.hz, self._n, self._t_hz = self._n / (ahora - self._t_hz), 0, ahora
         return True
 
+    def _fundir_a(self, caps_r, caps_m, nube):
+        """(20-nov) Si hay una imagen NUEVA y reciente de la cámara A (camara_a.preparar_prof en su proceso), se funde
+        en la misma TSDF con SU calibración: el robot se quita igual (sus cápsulas y mallas están en el mundo) y sus
+        pelotas dicen «libre hasta su cara». Devuelve True si se ha fundido."""
+        if self.canal_prof_a is None:
+            return False
+        b, t = self.canal_prof_a.leer(solo_nuevo=True)
+        if not b or t is None:
+            if self.t_a is not None and time.time() - self.t_a > 2.0:
+                self.aviso_a = "la cámara A no manda profundidad"
+            return False
+        from skill_shield.autonomo.camara_a import desempaquetar_prof
+        d = desempaquetar_prof(b)
+        if d is None:
+            self.aviso_a = "mensaje de la cámara A ilegible"
+            return False
+        if time.time() - d["t"] > self.edad_max_a:
+            self.aviso_a = "profundidad de la cámara A con retraso: no se funde"
+            return False
+        mascara = d["mascara"] if self.mapa.metodo == "tsdf" else None
+        prof = d["prof"] if mascara is not None or d["mascara"] is None else np.where(d["mascara"], 0, d["prof"])
+        self.mapa.actualizar(prof, d["K"], d["T_mundo_cam"], caps_r, paso=1, capsulas_mano=caps_m, nube_robot=nube,
+                             excluir_px=mascara, margen_libre=self.margen_libre_pelota, z_min=0.0,
+                             dist_max=d.get("dist_max"), filtrar=False, principal=False)
+        self.t_a, self.aviso_a = time.time(), ""
+        self.n_a += 1
+        self._n_a += 1
+        ahora = time.monotonic()
+        if ahora - self._t_hz_a >= 2.0:
+            self.hz_a, self._n_a, self._t_hz_a = self._n_a / (ahora - self._t_hz_a), 0, ahora
+        return True
+
     def _congelada(self):
         """(18-nov) ¿Hay una tarea en marcha (aviso fresco del modo autónomo)?"""
         if self.canal_congelar is None:
@@ -1097,7 +1196,12 @@ class ConstructorMapa:
                     + (" (mano aproximada)" if self.robot_quitado and not self.mano_real else "")
                     + (f" · calibración: {self.correccion.texto()}" if np.linalg.norm(self.correccion.t) > 0.003
                        else "")
-                    + (" · autocorrección congelada (tarea)" if self.congelada else ""),
+                    + (" · autocorrección congelada (tarea)" if self.congelada else "")
+                    + ("" if self.canal_prof_a is None else
+                       (f" · cámara A: {self.hz_a:.1f}/s" if not self.aviso_a else f" · {self.aviso_a}")),
+                    cam_a=None if self.canal_prof_a is None else dict(hz=round(self.hz_a, 1), n=self.n_a,
+                                                                      aviso=self.aviso_a,
+                                                                      ms=self.mapa.ultima_sec.get("ms")),
                     mano_real=self.mano_real,
                     ocupados=n_ocu, libres=int((e == LIBRE).sum()), res=self.mapa.res,
                     hz=round(self.hz, 1), ms=self.mapa.ultima.get("ms"), aviso=self.aviso,

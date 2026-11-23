@@ -54,7 +54,7 @@ class PlanificadorCuRobo:
     def __init__(self, ruta_robot, entorno, limites, res=0.02, intentos=4, cuda_graph=False, margen_entorno=0.0,
                  dispositivo="cuda:0", calentar=True, semillas=8, desconocido_extra=0.02, activacion=None,
                  margen_mundo=0.0, margen_mano_extra=0.0, esferas_mano=(), enlace_mano="mano_mount",
-                 max_goalset=1):
+                 max_goalset=1, motor_esdf="numpy", margen_objetivo=0.0):
         """semillas: trayectorias que cuRobo optimiza A LA VEZ en la GPU para cada tramo (se queda con la mejor).
         desconocido_extra (17-nov): lo no visto se le da a cuRobo como «a (esfera más gruesa + esto) de un
         obstáculo»: no es choque, pero con la distancia de activación (por defecto, esto + la esfera más
@@ -68,7 +68,10 @@ class PlanificadorCuRobo:
           · esferas_mano: [(centro en el marco de enlace_mano, radio)] que se añaden a la mano (la pelota cogida).
         Se cambia el diccionario del robot ANTES de crear el planificador: no depende de la API de cuRobo.
         max_goalset (18-nov): cuántas poses alternativas de la mano admite plan_goalset() de una vez (cuRobo
-        reserva la memoria al crear el planificador; los goalsets más pequeños se rellenan solos)."""
+        reserva la memoria al crear el planificador; los goalsets más pequeños se rellenan solos).
+        motor_esdf (20-nov): "auto"/"gpu" = la ESDF del mapa en la GPU (mundo.edt); "numpy" = scipy.
+        margen_objetivo (20-nov): lo que se suma al radio de la pelota objetivo cuando va como obstáculo
+        (actualizar_mundo(..., objetivo=...))."""
         import torch
         import yaml
         from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
@@ -87,6 +90,7 @@ class PlanificadorCuRobo:
         self._Scene, self._Cuboid, self._Capsule, self._VoxelGrid = Scene, Cuboid, Capsule, VoxelGrid
         self.dev = DeviceCfg(device=torch.device(dispositivo), dtype=torch.float32)
         self.limites, self.res, self.intentos = limites, float(res), int(intentos)
+        self.motor_esdf, self.margen_objetivo = str(motor_esdf), float(margen_objetivo)
         self._caps, self._cajas = M.obstaculos_entorno(entorno, margen_entorno)
         _, n = M.rejilla(limites, self.res)
         origen = np.asarray(limites, float).reshape(3, 2)[:, 0]
@@ -104,7 +108,7 @@ class PlanificadorCuRobo:
             self.desconocido_dist + 0.02 if self.desconocido_dist is not None else 0.0025)
         cfg = MotionPlannerCfg.create(
             robot=robot, scene_model=self._escena(vacia, origen + 0.5 * n * self.res, n * self.res),
-            collision_cache={"cuboid": len(self._cajas) + 4, "capsule": len(self._caps) + 4, "voxel": 1},
+            collision_cache={"cuboid": len(self._cajas) + 4, "capsule": len(self._caps) + 5, "voxel": 1},
             device_cfg=self.dev, use_cuda_graph=bool(cuda_graph), graph_planner_algorithm="rrt",
             num_trajopt_seeds=int(semillas), num_ik_seeds=max(32, 4 * int(semillas)),
             max_goalset=self.max_goalset,
@@ -117,6 +121,7 @@ class PlanificadorCuRobo:
         self._a_curobo = [orden.index(nm) for nm in self.nombres]          # q (joint1..6) → orden de cuRobo
         self._de_curobo = [self.nombres.index(nm) for nm in orden]
         self._clave_mundo = None
+        self._sdf_cache = None                            # (20-nov) (clave, ESDF) del último mapa cargado
         self.t_ultimo = 0.0
         if calentar:
             t0 = time.perf_counter()
@@ -124,7 +129,8 @@ class PlanificadorCuRobo:
             print(f"🚀 cuRobo listo en la GPU ({torch.cuda.get_device_name(self.dev.device)}; "
                   f"calentado en {time.perf_counter() - t0:.1f} s)")
 
-    def _escena(self, sdf, centro, dims):
+    def _escena(self, sdf, centro, dims, objetivo=None):
+        """objetivo (20-nov): dict(c, r) de la pelota a la que se va: una esfera más (M.capsula_objetivo)."""
         t = self.torch
         vox = self._VoxelGrid(name="mapa", pose=[float(v) for v in centro] + [1.0, 0.0, 0.0, 0.0],
                               dims=[float(v) for v in dims], voxel_size=self.res,
@@ -132,17 +138,27 @@ class PlanificadorCuRobo:
                               feature_dtype=t.float16)
         caps = [self._Capsule(name=c["name"], radius=c["radius"], base=c["base"], tip=c["tip"],
                               pose=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]) for c in self._caps]
+        obj = M.capsula_objetivo(objetivo, self.margen_objetivo)
+        if obj is not None:
+            caps.append(self._Capsule(name=obj["name"], radius=obj["radius"], base=obj["base"], tip=obj["tip"],
+                                      pose=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]))
         cajas = [self._Cuboid(name=c["name"], dims=c["dims"], pose=c["pose"]) for c in self._cajas]
         return self._Scene(voxel=[vox], cuboid=cajas, capsule=caps)
 
-    def actualizar_mundo(self, pl, clave=None):
-        """Carga en cuRobo el mundo actual del planificador `pl` (si ha cambiado desde la última vez)."""
-        if clave is not None and clave == self._clave_mundo:
+    def actualizar_mundo(self, pl, clave=None, objetivo=None):
+        """Carga en cuRobo el mundo actual del planificador `pl` (si ha cambiado desde la última vez).
+        objetivo (20-nov): la pelota a la que se va (dict(c, r)) como obstáculo para todo el robot, o None.
+        La ESDF solo se recalcula si cambia el mapa; si solo cambia el objetivo, se reutiliza."""
+        c_obj = None if not objetivo else (tuple(np.round(np.asarray(objetivo["c"], float), 4)),
+                                           round(float(objetivo["r"]), 4))
+        if clave is not None and (clave, c_obj) == self._clave_mundo:
             return
-        sdf, centro, dims = M.mundo_del_planificador(pl, self.limites, self.res, self.desconocido_dist,
-                                                     margen=self.margen_mundo)
-        self.mp.update_world(self._escena(sdf, centro, dims))
-        self._clave_mundo = clave
+        if clave is None or self._sdf_cache is None or self._sdf_cache[0] != clave:
+            self._sdf_cache = (clave, M.mundo_del_planificador(pl, self.limites, self.res, self.desconocido_dist,
+                                                               margen=self.margen_mundo, motor_esdf=self.motor_esdf))
+        sdf, centro, dims = self._sdf_cache[1]
+        self.mp.update_world(self._escena(sdf, centro, dims, objetivo))
+        self._clave_mundo = None if clave is None else (clave, c_obj)
 
     def plan(self, q0, q1):
         """Tramo articular de q0 a q1 (radianes, joint1..6): posturas (N x 6) o None."""

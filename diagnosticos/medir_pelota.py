@@ -592,24 +592,32 @@ def capturar(a, h):
     import config as cfg
     from config import ALTO_CAM, ANCHO_CAM
     from skill_shield.autonomo.pelotas import catalogo
-    from skill_shield.vision.camara_oak import crear_pipeline_oak
-    from skill_shield.vision.multicamara import abrir_dispositivo, activar_ir, intrinsecos_color
+    from skill_shield.autonomo.camara import _texto_modo, abrir_como_autonomo, rol_de_mxid
+    from skill_shield.vision.camara_oak import fijar_enfoque
+    from skill_shield.vision.multicamara import activar_ir, intrinsecos_color
     board, det = crear_tablero(h)
     g = {k: getattr(cfg, k) for k in dir(cfg) if k.isupper()}
     cat = catalogo(g)
     quitar_dist = bool(g.get("AUTONOMO_PELOTAS_QUITAR_DISTORSION", True))
-    escala = float(g.get("AUTONOMO_CAM_ESCALA_PROF", 1.0) or 1.0)
+    mxid = a.mxid or g.get("AUTONOMO_CAM_MXID")
+    rol = rol_de_mxid(cfg, mxid)                          # (20-nov) cabeza o A: su estéreo, su IR y su escala
+    escala = float(g.get("AUTONOMO_CAM_A_ESCALA_PROF" if rol == "a" else "AUTONOMO_CAM_ESCALA_PROF", 1.0) or 1.0)
     esquinas = board.getChessboardCorners()
     # la MISMA profundidad que el modo autónomo (sin rellenar huecos ni filtro temporal), con su escala
     # (19-nov) + la imagen grande del ISP para buscar la hoja (salida_hd); --sin-hd = como antes (640x480)
-    dev = abrir_dispositivo(crear_pipeline_oak(
+    # (20-nov) + el MISMO modo del estéreo que usa el modo autónomo para esta cámara y la lente fija
+    dev, modo, error = abrir_como_autonomo(
+        cfg, rol, mxid, "cámara A" if rol == "a" else "cámara de cabeza",
         con_hd=False, rellenar_huecos=g.get("AUTONOMO_CAM_RELLENAR_HUECOS", 0),
         temporal=g.get("AUTONOMO_CAM_FILTRO_TEMPORAL", False), confianza=g.get("AUTONOMO_CAM_CONFIANZA", 200),
-        salida_hd=not a.sin_hd, isp_escala=(1, a.isp)),
-        a.mxid or g.get("AUTONOMO_CAM_MXID"))
+        salida_hd=not a.sin_hd, isp_escala=(1, a.isp))
+    if dev is None:
+        sys.exit(f"✗ No se pudo abrir la cámara (MxId {mxid}): {error}")
+    print(f"📏 {'Cámara A' if rol == 'a' else 'Cámara de cabeza'}: estéreo {_texto_modo(modo)} (el del modo autónomo)")
     medidas, crudo, k_obj, txt = [], [], 0, ""
     with dev:
-        activar_ir(dev, "cabeza", int(g.get("AUTONOMO_CAM_IR_MA", 800)))
+        activar_ir(dev, rol, int(g.get("AUTONOMO_CAM_A_IR_MA" if rol == "a" else "AUTONOMO_CAM_IR_MA", 800)))
+        fijar_enfoque(dev, g.get("AUTONOMO_CAM_ENFOQUE", "calibrado"), "cámara")
         K, dist = intrinsecos_color(dev, ANCHO_CAM, ALTO_CAM)
         qc = dev.getOutputQueue("color", maxSize=1, blocking=False)
         qd = dev.getOutputQueue("depth", maxSize=1, blocking=False)
