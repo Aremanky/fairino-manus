@@ -848,8 +848,11 @@ class ConstructorMapa:
         """Mientras se escanea, nada fijo (hay que ver TODO); si no, las cajas de la escena fija."""
         self.mapa.poner_fijo([] if self._escaneo_hasta is not None else self.escena.cajas, self.margen_fijo)
 
-    def escanear_fijo(self, s=None):
-        """Empieza a escanear la escena fija: mapa en blanco y, a los s segundos, se ajustan las cajas."""
+    def escanear_fijo(self, s=None, excluir=None):
+        """Empieza a escanear la escena fija: mapa en blanco y, a los s segundos, se ajustan las cajas.
+        excluir (23-nov): [[x, y, z, r], …] esferas cuyos cubos NO son escena fija (la pelota y los marcadores, cuando
+        el escaneo lo pide la tarea sola: no se pueden quitar de la mesa)."""
+        self._excluir_escaneo = [(np.asarray(e[:3], float), float(e[3])) for e in (excluir or []) if len(e) >= 4]
         self._escaneo_hasta = time.monotonic() + float(s if s is not None else self.escaneo_s)
         self.aviso_fijo = ""
         self._aplicar_fijo()
@@ -862,6 +865,13 @@ class ConstructorMapa:
         C = self.mapa.centros_ocupados()
         caps = [(c.a, c.b, c.r) for c in getattr(self.modelo.entorno, "capsulas", []) or []]
         quitar = self.mapa._cerca(C, caps, margen=0.05) if caps else None      # el soporte ya está en el modelo
+        excl = getattr(self, "_excluir_escaneo", None) or []
+        if excl and len(C):                              # (23-nov) la pelota y los marcadores no son escena fija
+            fuera = np.zeros(len(C), bool)
+            for c, rr in excl:
+                fuera |= np.linalg.norm(C - c, axis=1) <= rr
+            quitar = fuera if quitar is None else (np.asarray(quitar, bool) | fuera)
+            self._excluir_escaneo = []
         esc = EF.ajustar(C, self.mapa.res, self.mapa.superficies(), self.mapa.z_suelo, quitar=quitar,
                          grupo_min=self.fijo_grupo_min, llenado_min=self.fijo_llenado_min)
         if not esc["cajas"] and not esc["voxeles"]:
@@ -1104,6 +1114,7 @@ class ConstructorMapa:
                             self.mapa.vaciar(gr, gm)
                 except Exception as e:
                     print(f"⚠️  [autónomo] Autocorrección de la calibración: {e}")
+        self._peticion_tarea()                           # (23-nov) ¿la tarea pide escanear la escena fija?
         if self._escaneo_hasta is not None and ahora >= self._escaneo_hasta:
             try:
                 self.terminar_escaneo()
@@ -1157,6 +1168,30 @@ class ConstructorMapa:
         if ahora - self._t_hz_a >= 2.0:
             self.hz_a, self._n_a, self._t_hz_a = self._n_a / (ahora - self._t_hz_a), 0, ahora
         return True
+
+    def _peticion_tarea(self):
+        """(23-nov) La tarea pide escanear la escena fija (un plan no salió sin ella): llega por el canal de «congelar»
+        con un id nuevo y reciente (si la cámara se reinicia, no se repite una petición vieja)."""
+        if self.canal_congelar is None:
+            return
+        import json
+        b, t = self.canal_congelar.leer()
+        if not b:
+            return
+        try:
+            d = json.loads(b)
+        except ValueError:
+            return
+        pid = d.get("fijo_escanear_id")
+        visto = getattr(self, "_peticion_vista", None)
+        if pid is None or pid == visto:
+            return
+        self._peticion_vista = pid
+        if time.time() - float(d.get("fijo_t") or 0.0) > 30.0:
+            return                                       # vieja (p. ej. la cámara se ha reiniciado)
+        if self._escaneo_hasta is None:
+            print("🧱 Escena fija: la pide la tarea (el plan no sale sin ella).")
+            self.escanear_fijo(excluir=d.get("fijo_excluir"))
 
     def _congelada(self):
         """(18-nov) ¿Hay una tarea en marcha (aviso fresco del modo autónomo)?"""

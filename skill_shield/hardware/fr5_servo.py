@@ -97,7 +97,10 @@ _E_QREAL = 14         # 14..19: pose REAL leída del robot (grados)
 _E_TREAL = 20         # time.monotonic() de esa lectura
 _E_MAIN, _E_SUB, _E_COLIS, _E_RSTATE = 21, 22, 23, 24   # 9-nov: códigos de fallo de la controladora
 _E_TOR = 25          # (18-nov) 25..30: par REAL de cada joint (N·m, del paquete de estado), para identificar la carga
-_N_ESTADO = 31
+_E_HAB = 31          # (23-nov) rbtEnableState de la controladora (1 = habilitado, 0 = no; −1 = no se sabe)
+_E_CARGA_CTRL = 32   # (23-nov) carga que tiene puesta la controladora (kg, GetTargetPayload; −1 = no se sabe)
+_E_TOR_TGT = 33      # (23-nov) 33..38: par de CONSIGNA de cada joint (jt_tgt_tor, N·m), para el diagnóstico
+_N_ESTADO = 39
 PERIODO_LECTURA_S = 0.02    # pose real: 50 Hz (del paquete de estado en tiempo real, sin RPC)
 
 
@@ -116,6 +119,8 @@ class FR5Servo:
         self._ctx = mp.get_context("fork")
         self._obj = self._ctx.Array("d", 8)      # q0..q5 (rad), t_publicación, nº de secuencia
         self._est = self._ctx.Array("d", _N_ESTADO)
+        self._est[_E_HAB] = -1                   # (23-nov) aún no se sabe si está habilitado
+        self._est[_E_CARGA_CTRL] = -1
         self._habilitado = self._ctx.Value("i", 0)
         self._reset = self._ctx.Value("i", 0)    # 9-nov: petición de ResetAllError
         self._salir = self._ctx.Event()
@@ -209,6 +214,23 @@ class FR5Servo:
         if not e[_E_TREAL] or time.monotonic() - e[_E_TREAL] > max_edad_s:
             return None
         return np.asarray(e[_E_TOR:_E_TOR + 6], float) * np.asarray(self.p["FR5_SIGNO"], float)
+
+    def habilitado_ctrl(self):
+        """(23-nov) ¿Está el FR5 habilitado en la controladora? True / False, o None si no se sabe."""
+        if not self.en_linea:
+            return None
+        h = int(self._est[_E_HAB])
+        return None if h < 0 else h != 0
+
+    def diag_par(self):
+        """(23-nov) Para el diagnóstico de la carga: (par de consigna J1-J6 en N·m o None, carga de la
+        controladora en kg o None). Ambos tal como los da la controladora (sin FR5_SIGNO)."""
+        if not self.en_linea:
+            return None, None
+        e = self._est[:]
+        tgt = list(e[_E_TOR_TGT:_E_TOR_TGT + 6])
+        c = e[_E_CARGA_CTRL]
+        return (tgt if any(abs(v) > 1e-9 for v in tgt) else None), (None if c < 0 else float(c))
 
     @property
     def enviando(self):
@@ -310,6 +332,8 @@ class _LectorPoseReal:
         self.rapido = True
         self.t_rpc = 0.0
         self.par = None                  # (18-nov) par real de cada joint (N·m) de la última lectura rápida
+        self.hab = -1                    # (23-nov) rbtEnableState (1 = habilitado, 0 = no, −1 = no se sabe)
+        self.par_tgt = None              # (23-nov) par de consigna (jt_tgt_tor), solo para el diagnóstico
 
     def __call__(self, ahora):
         if self.rapido:
@@ -320,6 +344,14 @@ class _LectorPoseReal:
                     self.par = [float(v) for v in list(pkg.jt_cur_tor)[:6]]
                 except Exception:
                     self.par = None
+                try:
+                    self.hab = int(pkg.rbtEnableState)
+                except Exception:
+                    self.hab = -1
+                try:
+                    self.par_tgt = [float(v) for v in list(pkg.jt_tgt_tor)[:6]]
+                except Exception:
+                    self.par_tgt = None
                 q = [float(v) for v in list(pkg.jt_cur_pos)[:6]]
                 if len(q) == 6 and any(abs(v) > 1e-9 for v in q):
                     return q
@@ -725,6 +757,11 @@ def _sesion_fr5(Robot, p, obj, est, habilitado, salir, listo, reset, ppid):
               f"[{', '.join(f'{v:.1f}' for v in q_real[:6])}]")
         lim_blandos = _limites_blandos(robot, p, q_real)
         _configurar_colisiones(robot, p)
+        try:                                        # (23-nov) carga que usa el modelo de la controladora
+            r_ = robot.GetTargetPayload(0)
+            est[_E_CARGA_CTRL] = float(r_[1]) if _ret(r_) == 0 and r_[1] is not None else -1
+        except Exception:
+            est[_E_CARGA_CTRL] = -1
         listo.set()
         if not p.get("_prioridad_hecha"):           # (una vez por proceso, no por reconexión)
             _prioridad_tiempo_real(p)
@@ -757,6 +794,9 @@ def _sesion_fr5(Robot, p, obj, est, habilitado, salir, listo, reset, ppid):
                 est[_E_QREAL:_E_QREAL + 6] = q_
                 if leer_real.par is not None and len(leer_real.par) == 6:
                     est[_E_TOR:_E_TOR + 6] = leer_real.par
+                est[_E_HAB] = leer_real.hab
+                if leer_real.par_tgt is not None and len(leer_real.par_tgt) == 6:
+                    est[_E_TOR_TGT:_E_TOR_TGT + 6] = leer_real.par_tgt
                 est[_E_TREAL] = time.monotonic()
 
         # ── Bucle a 8 ms ──────────────────────────────────────────────────────

@@ -177,7 +177,7 @@ def candidatas(img_bgr, prof_mm, K, cat, min_area=60, min_redondez=0.6, min_rell
 
 
 def apoyo_bajo(prof_mm, K, T_mundo_cam, u, v, r_px, centro_cam, diam, rng=None,
-               anillo=(1.6, 4.5), banda=0.06, tol=0.008, n_min=40, inclinacion_max_deg=15.0,
+               anillo=(1.6, 4.5), banda=(0.03, 0.02), tol=0.008, n_min=40, inclinacion_max_deg=6.0,
                mesa_m=None, mesa_tol=0.012):
     """(17-nov) Altura (z del mundo) de la superficie en la que está APOYADA la pelota: plano casi
     horizontal ajustado (RANSAC) a la profundidad de un anillo alrededor de la pelota en la imagen,
@@ -185,7 +185,11 @@ def apoyo_bajo(prof_mm, K, T_mundo_cam, u, v, r_px, centro_cam, diam, rng=None,
     mano, la pelota está en el aire…). Sirve igual para cualquier objeto apoyado (herramientas).
     mesa_m (17-nov): además, HASTA DÓNDE llega la mesa: los píxeles de una ventana de ese radio (m)
     alrededor de la pelota que caen en el plano → su envolvente en planta. Devuelve entonces
-    (z, [[x, y], …] vértices de la envolvente o None)."""
+    (z, [[x, y], …] vértices de la envolvente o None).
+    (23-nov) banda = (por debajo, por encima) de la parte de abajo de la pelota (antes ±6 cm) e inclinación máx. 6°
+    (antes 15°): con la pelota sobre una caja encima de una cajonera (6 cm más abajo), el RANSAC cogía un plano
+    INCLINADO entre la tapa de la caja y la cajonera y la «mesa» salía 3 cm por debajo de la tapa. Era lo que obligaba
+    a tener la escena fija para coger bien la pelota."""
     if prof_mm is None or T_mundo_cam is None:
         return None
     h, w = prof_mm.shape[:2]
@@ -205,7 +209,8 @@ def apoyo_bajo(prof_mm, K, T_mundo_cam, u, v, r_px, centro_cam, diam, rng=None,
     P = P @ T_mundo_cam[:3, :3].T + T_mundo_cam[:3, 3]
     c = T_mundo_cam[:3, :3] @ np.asarray(centro_cam, float) + T_mundo_cam[:3, 3]
     zb = c[2] - diam / 2.0
-    P = P[np.abs(P[:, 2] - zb) < banda]
+    b_abajo, b_arriba = (float(banda), float(banda)) if np.isscalar(banda) else (float(banda[0]), float(banda[1]))
+    P = P[(P[:, 2] - zb > -b_abajo) & (P[:, 2] - zb < b_arriba)]
     if len(P) < n_min:
         return None
     rng = np.random.default_rng(0) if rng is None else rng
@@ -342,6 +347,9 @@ class DetectorPelotas(ConCorreccion):
         self.salto_m = float(salto_m)
         self.medir_apoyo = bool(g.get("AUTONOMO_PELOTAS_MEDIR_APOYO", True))
         self.mesa_m = float(g.get("AUTONOMO_PELOTAS_MESA_RADIO", 0.35))   # m alrededor donde se mide la mesa
+        # (23-nov) dónde se busca la mesa bajo la pelota: (por debajo, por encima) de su parte de abajo, e inclinación
+        self.apoyo_banda = tuple(float(v) for v in (g.get("AUTONOMO_PELOTAS_APOYO_BANDA_M") or (0.03, 0.02)))
+        self.apoyo_inc = float(g.get("AUTONOMO_PELOTAS_APOYO_INCLINACION_MAX_DEG", 6.0))
         self.min_relleno = float(g.get("AUTONOMO_PELOTAS_RELLENO_MIN", 0.7))   # (18-nov) aros fuera
         self.ajuste = bool(g.get("AUTONOMO_PELOTAS_AJUSTE_SILUETA", True))      # (18-nov) centro por la silueta
         # (18-nov) lo que se quita del mapa alrededor de cada pelota: solo ella (zona_propia, + este margen EXTRA);
@@ -390,7 +398,8 @@ class DetectorPelotas(ConCorreccion):
             usadas.add(s.id)
             if self.medir_apoyo:
                 try:
-                    r_ = apoyo_bajo(prof_mm, K, self.T_mundo_cam, *uvr, p, diam, mesa_m=self.mesa_m)
+                    r_ = apoyo_bajo(prof_mm, K, self.T_mundo_cam, *uvr, p, diam, mesa_m=self.mesa_m,
+                                    banda=self.apoyo_banda, inclinacion_max_deg=self.apoyo_inc)
                 except Exception:
                     r_ = None
                 if r_ is not None:

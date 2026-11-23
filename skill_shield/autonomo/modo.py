@@ -114,14 +114,23 @@ def _cerrar(proc, nombre, timeout=3.0):
         proc.wait(1.0)
 
 
-def _estado_fr5(fr5, simulacro):
+def _estado_fr5(fr5, simulacro, est_carga=None):
     if fr5 is None:
         return dict(texto="desactivado (AUTONOMO_CON_FR5 = False)", en_linea=False)
     e = fr5.estado()
     q = fr5.q_real_rad()
+    carga = None
+    if est_carga is not None:                   # (23-nov) carga MEDIDA en la brida (mano incluida), para la web
+        try:
+            tgt, carga_ctrl = fr5.diag_par()
+            carga = est_carga.actualizar(q, fr5.par_real(), habilitado=fr5.habilitado_ctrl(),
+                                         carga_ctrl=carga_ctrl, par_tgt=tgt)
+        except Exception as ex:
+            carga = dict(texto=f"error: {ex}", kg=None)
     return dict(texto=e["texto"], en_linea=fr5.en_linea, en_error=fr5.en_error,
                 colision=e["colision"], codigo=list(e["codigo"]), simulacro=simulacro,
-                q_real_deg=[round(v, 2) for v in e["q_real_deg"]] if q is not None else None)
+                q_real_deg=[round(v, 2) for v in e["q_real_deg"]] if q is not None else None,
+                carga=carga)
 
 
 class Control:
@@ -193,9 +202,22 @@ def ejecutar(cfg):
     # escribe carga, TCP y límites en la controladora (como en la teleoperación).
     # En simulacro no se manda ningún ServoJ: la tarea se ve solo en el gemelo.
     simulacro = bool(cfg.get("AUTONOMO_FR5_SIMULACRO", True)) or not cfg.get("AUTONOMO_TAREA", True)
+    # (23-nov) escena fija AUTOMÁTICA: no se arrastra la de otra sesión (la mesa o el robot pueden haberse movido).
+    # Se planifica sin ella y, si un plan no sale, la tarea la escanea sola (Tarea._lanzar_escaneo)
+    if cfg.get("AUTONOMO_ESCENA_FIJA_AUTO", True) and cfg.get("AUTONOMO_ESCENA_FIJA", True):
+        try:
+            from skill_shield.autonomo import escena_fija as EF
+            ruta_ef = EF.ruta(cfg)
+            if os.path.exists(ruta_ef):
+                EF.olvidar(ruta_ef)
+                print(f"🧱 Escena fija de la sesión anterior apartada ({os.path.basename(ruta_ef)}.bak): se planifica "
+                      "sin ella y, si hace falta, se escanea sola.")
+        except Exception as e:
+            print(f"⚠️  No pude apartar la escena fija anterior: {e}")
     print("🧠 Funcionamiento autónomo: cámara + gemelo + web" +
           (" · tarea con el FR5 REAL (solo con el pedal)" if not simulacro else " · FR5 en simulacro (no se mueve)"))
     fr5 = None
+    est_carga = None
     if cfg.get("AUTONOMO_CON_FR5", True):
         c = dict(cfg)
         c["FR5_SIMULACRO"] = simulacro
@@ -212,6 +234,12 @@ def ejecutar(cfg):
             print("ℹ️  FR5_CARGA_CDM_MM sin poner: se queda el centro de masas que tenga la controladora (fr5_servo lo "
                   "enseña al conectar). Para medirlo con el robot: python diagnosticos/identificar_carga.py")
         fr5 = FR5Servo.desde_config(c)
+        # (23-nov) carga de la brida medida con el par de los joints (la web la enseña en «Robot FR5», siempre)
+        try:
+            from skill_shield.hardware.carga_fr5 import EstimadorCarga
+            est_carga = EstimadorCarga(cfg["RUTA_XML"], signo=cfg.get("FR5_PAR_SIGNO_GRAVEDAD"))
+        except Exception as ex:
+            print(f"⚠️  No se puede calcular la carga del FR5: {ex}")
         if not fr5.iniciar():
             print("   Sin conexión con el FR5: el gemelo enseñará el brazo en reposo"
                   + (" y se conectará solo cuando el FR5 esté encendido." if c["FR5_RECONECTAR"] else "."))
@@ -232,7 +260,7 @@ def ejecutar(cfg):
     canal_visto = Canal(CANAL_VISTO, capacidad=2 << 20, crear=True) if con_mapa else None
     con_herr = bool(cfg.get("AUTONOMO_HERRAMIENTAS"))
     canal_herr = Canal(CANAL_HERRAMIENTAS, capacidad=64 << 10, crear=True) if con_herr else None
-    canal_congelar = Canal(CANAL_CONGELAR, capacidad=256, crear=True) if con_mapa else None
+    canal_congelar = Canal(CANAL_CONGELAR, capacidad=16 << 10, crear=True) if con_mapa else None   # (23-nov) + escaneo
     # (19-nov) cámara A: OAK-D fija mirando la mesa de cerca (pelotas y herramientas; sin mapa)
     con_cam_a = bool(cfg.get("AUTONOMO_CAM_A", False)) and bool(cfg.get("AUTONOMO_CAM_A_MXID"))
     if cfg.get("AUTONOMO_CAM_A", False) and not con_cam_a:
@@ -507,8 +535,12 @@ def ejecutar(cfg):
                 q_tarea_sim = tarea.paso(dt_vuelta, q, control.permiso_tarea(), _contexto)
             if canal_congelar is not None and t0 - t_congelar >= 0.2:
                 t_congelar = t0                         # (18-nov) con tarea en marcha: autocorrección congelada
+                pe = getattr(tarea, "peticion_escaneo", None) if tarea is not None else None
                 canal_congelar.escribir(json.dumps(dict(
-                    congelar=bool(tarea is not None and getattr(tarea, "congelar_autocalib", False)))).encode())
+                    congelar=bool(tarea is not None and getattr(tarea, "congelar_autocalib", False)),
+                    # (23-nov) la tarea pide escanear la escena fija (sin escena el plan no salió)
+                    **({"fijo_escanear_id": pe["id"], "fijo_t": pe["t"], "fijo_excluir": pe["excluir"]}
+                       if pe else {}))).encode())
             # (23-nov) sin FR5 la tarea va al gemelo: también puede «moverse» (solo en el gemelo)
             en_gemelo = tarea is not None and tarea.solo_gemelo()
             robot_listo = (fr5 is not None and fr5.conectado) or en_gemelo
@@ -526,7 +558,7 @@ def ejecutar(cfg):
                     modo=("AUTÓNOMO · FR5 en simulacro" if simulacro or tarea is None
                           else "AUTÓNOMO · sin FR5: solo el gemelo" if en_gemelo
                           else "AUTÓNOMO · tarea · FR5 REAL"),
-                    fr5=_estado_fr5(fr5, simulacro),
+                    fr5=_estado_fr5(fr5, simulacro, est_carga),
                     mano=mano_ver.estado() if mano_ver is not None else dict(estado="desactivado",
                                                                              texto="desactivada en config"),
                     tactil=estado_tactil(tactil),

@@ -136,3 +136,41 @@ def test_el_aro_rojo_de_una_articulacion_no_es_una_pelota():
     img2, prof2 = _escena([("Pelota roja", (0.0, 0.0, 0.9), 0.08)])
     cv2.circle(img2, (325, 235), 4, (255, 255, 255), -1)
     assert [1 for e, *_ in candidatas(img2, prof2, K, catalogo(config)) if e["nombre"] == "Pelota roja"]
+
+
+def test_apoyo_sobre_una_caja_encima_de_otra_mesa():
+    """(23-nov) Pelota sobre una caja (tapa a -0,25) cerca de su borde, con una cajonera 6 cm más abajo alrededor:
+    la mesa medida tiene que ser la TAPA de la caja. Con la banda de ±6 cm y 15° de inclinación salía un plano
+    inclinado entre las dos, ~3 cm por debajo de la tapa (por eso hacía falta la escena fija)."""
+    from skill_shield.autonomo.pelotas import apoyo_bajo
+    K = np.array([[450.0, 0, 320], [0, 450.0, 240], [0, 0, 1]])
+    cam = np.array([0.0, 0.0, 0.5])
+    z = np.array([0.0, -0.8, -0.75]); z /= np.linalg.norm(z)
+    x = np.cross(z, [0, 0, 1.0]); x /= np.linalg.norm(x)
+    T = np.eye(4); T[:3, :3] = np.column_stack([x, np.cross(z, x), z]); T[:3, 3] = cam
+    z_caja, z_cajonera, r = -0.25, -0.31, 0.033
+    c = np.array([0.0, -0.75, z_caja + r])
+    caja = (-0.15, 0.15, -0.79, -0.60)                                # x0, x1, y0, y1: la pelota a 4 cm del borde
+    v, u = np.mgrid[0:480, 0:640]
+    rays = np.stack([(u - 320) / 450.0, (v - 240) / 450.0, np.ones_like(u, float)], -1) @ T[:3, :3].T
+
+    def plano(zp, dentro=None):
+        t = (zp - cam[2]) / rays[..., 2]
+        P = cam + rays * t[..., None]
+        ok = t > 0
+        if dentro is not None:
+            ok &= (P[..., 0] > dentro[0]) & (P[..., 0] < dentro[1]) & (P[..., 1] > dentro[2]) & (P[..., 1] < dentro[3])
+        return np.where(ok, t, np.inf)
+    oc = cam - c
+    b = rays @ oc; a = np.sum(rays ** 2, -1); disc = b ** 2 - a * (oc @ oc - r * r)
+    t_bola = np.where(disc > 0, (-b - np.sqrt(np.maximum(disc, 0))) / a, np.inf)
+    t = np.minimum(np.minimum(plano(z_caja, caja), plano(z_cajonera)), t_bola)
+    prof = (t * (rays @ T[:3, 2])) + np.random.default_rng(1).normal(0, 0.003, t.shape)
+    prof_mm = np.where(np.isfinite(prof), prof * 1000, 0).astype(np.uint16)
+    cc = np.linalg.inv(T) @ np.r_[c, 1.0]
+    uu, vv = cc[0] / cc[2] * 450 + 320, cc[1] / cc[2] * 450 + 240
+    r_px = r * 450 / cc[2]
+    for error_z in (0.0, -0.015, 0.015):                             # el centro estimado, algo bajo o alto
+        est = cc[:3] + np.linalg.inv(T)[:3, :3] @ [0, 0, error_z]
+        zm = apoyo_bajo(prof_mm, K, T, uu, vv, r_px, est, 2 * r, anillo=(1.6, 6.0))
+        assert zm is not None and abs(zm - z_caja) < 0.005, (error_z, zm)

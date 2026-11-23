@@ -576,7 +576,8 @@ def test_mensaje_dice_el_motivo_mas_util(pl):
     assert "cámara" in str(e) and "muñeca" not in str(e)
 
 
-def test_plan_fallido_se_guarda(tmp_path):
+def test_plan_fallido_se_guarda(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKILL_SHIELD_GUARDAR_PLANES", "1")
     t = TA.Tarea(dict(G), str(tmp_path), FR5Falso(), simulacro=False)
     txt = t._guardar_fallo(dict(q=np.zeros(6), T=[np.eye(4)], mapa=(0.02, np.ones((5, 3))),
                                 excluir=[(np.zeros(3), 0.1)], nombres=["Pelota roja"], pelota=True,

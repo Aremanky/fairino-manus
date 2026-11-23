@@ -174,7 +174,7 @@ def _hasta_afinar(cadena, mover):
     ctx = lambda: dict(q_real=fr5.q, herramientas=_lista(BOLA + mover), mapa=None)    # noqa: E731
     for _ in range(20000):
         t.paso(1 / 60, fr5.q, True, ctx)
-        if t.estado == "error" or t.ejec.i > i_b:
+        if t.estado == "error" or t.ejec is None or t.ejec.i > i_b:
             break
         if t.afinando:                                  # (18-nov) el afinado va en su hilo: el robot espera
             time.sleep(0.002)
@@ -202,9 +202,10 @@ def test_afinar_rehace_la_bajada_hacia_donde_esta(cadena):
     assert np.allclose(fs.qs, fb.qs[::-1])
 
 
-def test_afinar_para_si_la_pelota_se_ha_ido(cadena):
+def test_afinar_replanifica_si_la_pelota_se_ha_ido(cadena):
+    """(23-nov) Antes paraba la tarea («Vuelve a planificar»); ahora vuelve a planificar sola (cuenta como reintento)."""
     t, _ = _hasta_afinar(cadena, np.array([0.15, 0.0, 0.0]))
-    assert t.estado == "error" and "Vuelve a planificar" in t.texto
+    assert t.estado == "planificando" and t._reintentos == 1 and "se ha movido" in t.texto, t.texto
 
 
 def test_fraccion_tapada_por_el_antebrazo(cadena):
@@ -251,7 +252,7 @@ def test_afinar_sin_verla_recoloca_con_la_correccion_de_ahora(cadena, monkeypatc
     ctx = lambda: dict(q_real=fr5.q, herramientas=_lista(BOLA + [0.3, 0, 0]), mapa=None, T_mundo_cam=T1)  # noqa: E731
     for _ in range(20000):
         t.paso(1 / 60, fr5.q, True, ctx)
-        if t.estado == "error" or t.ejec.i > i_b:
+        if t.estado == "error" or t.ejec is None or t.ejec.i > i_b:
             break
         if t.afinando:                                  # (18-nov) el afinado va en su hilo: el robot espera
             time.sleep(0.002)

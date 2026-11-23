@@ -1123,6 +1123,9 @@ FR5_CPU          = None          # núcleo fijo para el proceso (None = cualquie
 FR5_CARGA_KG            = 1.3     # mano + adaptador (23-nov: 1,3 kg)
 FR5_CARGA_CDM_MM        = None    # centro de masas en la brida, mm (x, y, z). Sin medir: sacadlo con
                                   # la identificación de carga de la WebApp y ponedlo aquí
+# (23-nov) carga MEDIDA en la brida (mano incluida) en la tarjeta «Robot FR5» de la web del modo
+# autónomo (siempre): sale del par real de los joints (skill_shield/hardware/carga_fr5.py), NO de FR5_CARGA_KG.
+FR5_PAR_SIGNO_GRAVEDAD  = None    # None = detectarlo solo · +1 / −1 si la detección se equivoca (sale masa negativa)
 # 10-nov: herramienta (TCP) = centro de la palma de la ORCA, sacado del modelo de MuJoCo
 # (mano_mount + OFFSET_LOCAL_PALMA_CENTRO pasado al marco de la brida): ~195 mm a lo largo del eje
 # de la brida. Comprobadlo con un metro (cara de la brida → centro de la palma) y corregid z.
@@ -1380,6 +1383,10 @@ AUTONOMO_MAPA_MAX_DIBUJO = 6000          # máx. de vóxeles que se dibujan (el 
 #     python -m skill_shield.autonomo.escena_fija
 # Si se mueve una mesa, volver a escanear (o «Olvidar fija»). Se ven en el gemelo como cajas azules.
 AUTONOMO_ESCENA_FIJA          = True
+# (23-nov) AUTOMÁTICA: al arrancar el modo autónomo se aparta la escena fija que hubiera (queda como .bak), se
+# planifica sin ella y, si un plan no sale, la tarea la escanea sola (~ESCANEO_S s, sin quitar la pelota: ella y los
+# marcadores se excluyen) y vuelve a planificar. False = como antes (se escanea a mano desde la web y se conserva)
+AUTONOMO_ESCENA_FIJA_AUTO     = True
 AUTONOMO_ESCENA_FIJA_ARCHIVO  = "escena_fija.json"
 AUTONOMO_ESCENA_FIJA_ESCANEO_S = 10.0    # s de escaneo (más: la TSDF promedia más y la tapa sale más fina)
 AUTONOMO_ESCENA_FIJA_MARGEN   = 0.03     # m alrededor de las cajas en los que la cámara NO pone obstáculos (ruido
@@ -1387,6 +1394,11 @@ AUTONOMO_ESCENA_FIJA_MARGEN   = 0.03     # m alrededor de las cajas en los que l
 AUTONOMO_ESCENA_FIJA_GRUPO_MIN = 20      # cubos mínimos de un grupo para ser un mueble (menos: ruido)
 AUTONOMO_ESCENA_FIJA_LLENADO_MIN = 0.45  # si un grupo llena menos de esto de su caja, se guardan sus cubos tal cual
 AUTONOMO_ESCENA_FIJA_APOYO_TOL = 0.05    # m: una pelota sobre una tapa fija se apoya a su altura (si cuadra)
+AUTONOMO_ESCENA_FIJA_APOYO_MARGEN_XY = 0.05   # (23-nov) m: también si la pelota cae hasta esto FUERA de la tapa escaneada
+                                         # (el escaneo saca las tapas más pequeñas que de verdad)
+# (23-nov) Pelota medida con la cámara A más BAJA que la tapa fija (escaneada con la de cabeza): manda la cámara A
+# (más cerca y mejor calibrada) y la tapa se baja a su altura en ese plan. False = como antes (se sube a la tapa)
+AUTONOMO_TAREA_PELOTA_ALTURA_CAMARA_A = True
 AUTONOMO_ESCENA_FIJA_VER      = True     # dibujar las cajas en el gemelo (con «Obstáculos» activado)
 # Cajas medidas a mano (se suman a las del escaneo), en el marco del MJCF:
 #   dict(nombre="cajonera", centro=(x, y, z), semi=(sx, sy, sz), yaw_deg=0)
@@ -1563,6 +1575,9 @@ AUTONOMO_TAREA_PELOTA_ZONA_MESA_EXTRA = 0.15  # m más allá de la zona donde se
 # TODA la mano (el pulgar también) al menos esto por encima de la mesa (antes 5 mm: el pulgar de la pinza
 # quedaba a ~1 cm de la mesa estimada y, con 1-2 cm de error de altura, la tocaba). Si aún roza: 0.03
 AUTONOMO_TAREA_HOLGURA_MESA_MANO = 0.02
+# (23-nov) en la dejada DE PIE (se suelta en el aire delante de la hoja) la «mesa» es la propia hoja: la mano solo
+# tiene que no bajar de la pelota (+ esto). Con HOLGURA_MESA_MANO ahí, una pelota de 6,6 cm no se dejaba y una de 6,7 sí
+AUTONOMO_TAREA_HOLGURA_DEJADA_DE_PIE = 0.0
 # Comprobación continua entre dos posturas seguidas de cada tramo (mano, lo que lleva y brazo)
 AUTONOMO_TAREA_CONTINUO = True
 AUTONOMO_TAREA_SUBDIV_MAX = 4          # veces que se puede partir en dos un paso (2° → 0,125°)
@@ -1589,6 +1604,10 @@ AUTONOMO_TAREA_POSTURA_MIRAR_DEG = None   # postura fija para mirar (J1..J6 en g
 # Altura de la mesa medida con un plano alrededor de la pelota: el centro de la pelota = mesa + radio
 AUTONOMO_PELOTAS_MEDIR_APOYO = True
 AUTONOMO_PELOTAS_MESA_RADIO = 0.35       # m alrededor de la pelota donde se mide hasta dónde llega la mesa
+# (23-nov) la mesa bajo la pelota se busca entre (por debajo, por encima) de su parte de abajo y casi horizontal: con
+# ±6 cm y 15° salía un plano inclinado entre una caja y la cajonera de debajo (3 cm por debajo de la tapa)
+AUTONOMO_PELOTAS_APOYO_BANDA_M = (0.03, 0.02)
+AUTONOMO_PELOTAS_APOYO_INCLINACION_MAX_DEG = 6.0
 AUTONOMO_TAREA_PELOTA_APOYO_TOL = 0.04   # m que puede corregir (si la mesa medida no cuadra más, no se usa)
 # Cada plan que sale bien se guarda en diagnosticos/plan_ok_*.npz (los N últimos) para poder revisarlo
 # ── (17-nov) cuRobo (NVIDIA, GPU) para ir de un sitio a otro ──
@@ -1596,6 +1615,10 @@ AUTONOMO_TAREA_PELOTA_APOYO_TOL = 0.04   # m que puede corregir (si la mesa medi
 # comprobaciones (mano con su postura, lo que lleva, J4, mesas…); si no lo acepta, o si cuRobo no está
 # instalado o falla, se usa el camino propio. "propio": solo el de siempre. Lo instala ./arrancar_nivel6.sh si falta
 AUTONOMO_TAREA_PLANIFICADOR = "curobo"
+# (23-nov) cuRobo que no sirve (no falla, pero ningún tramo suyo vale): tras estos intentos sin ningún tramo bueno
+# el resto del plan va sin él, y tras estos planes seguidos así se apaga hasta reiniciar (la web lo dice)
+AUTONOMO_CUROBO_FALLOS_MAX_PLAN = 3
+AUTONOMO_CUROBO_PLANES_INUTILES_MAX = 2
 AUTONOMO_CUROBO_ROBOT = "curobo_fr5/fr5_orca.yml"   # la genera python -m skill_shield.autonomo.curobo_fr5.robot
 AUTONOMO_CUROBO_INTENTOS = 6               # intentos de cuRobo por tramo (con RRT a partir del 2º)
 AUTONOMO_CUROBO_SEMILLAS = 32               # trayectorias que optimiza A LA VEZ en la GPU por tramo (se queda la mejor)
@@ -1681,6 +1704,11 @@ AUTONOMO_TAREA_CIERRE_TACTIL_N = 0.2
 AUTONOMO_TAREA_CIERRE_TACTIL_S = 2.5          # s para cerrar del todo (despacio: para notar el contacto a tiempo)
 AUTONOMO_TAREA_BAJADA_TACTIL_N = 0.5          # bajando a coger, si un dedo nota más que esto: ha tocado algo
 AUTONOMO_TAREA_REINTENTOS = 2                 # agarre fallido → abre, sube y vuelve a planificar (0 = parar)
+# (23-nov) también se vuelve a planificar sola (cuenta como reintento) si la pelota se ha movido desde el plan (al
+# pulsar «Ejecutar» o al afinar encima de ella) o si se cae al llevarla (ningún dedo la nota durante CAIDA_S s)
+AUTONOMO_TAREA_MOVIDA_REPLANIFICAR_M = 0.02
+AUTONOMO_TAREA_CAIDA_N = 0.1
+AUTONOMO_TAREA_CAIDA_S = 0.4
 # Afinado (rehacer la bajada) en un hilo: el bucle de 60 Hz (web, pedal, gemelo) no se para mientras
 AUTONOMO_TAREA_AFINAR_EN_HILO = True
 # GPU: un fallo de cuRobo o de la comprobación en lote ya no la apaga para toda la sesión: se avisa en la web

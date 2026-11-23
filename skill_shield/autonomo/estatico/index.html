@@ -64,6 +64,17 @@ main{max-width:var(--ancho);margin:0 auto;padding:var(--hueco) var(--margen) 8px
 .seg button{border:0;background:transparent;color:var(--suave);font-size:12.5px;font-weight:600;padding:5px 12px;border-radius:999px}
 .seg button.act{background:#fff;color:var(--azul);box-shadow:0 1px 3px rgba(0,33,72,.15)}
 .paneles[data-modo=cam] .panel-sim,.paneles[data-modo=a] .panel-sim,.paneles[data-modo=sim] .panel-cam{display:none}
+.panel-cam-a{display:none}
+/* (23-nov) «Todo»: cámara de cabeza, cámara A y gemelo en una fila, los tres del mismo tamaño (4:3) */
+.paneles[data-modo=todo]{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2px;background:#0b1626}
+.paneles[data-modo=todo] .panel-cam-a{display:block}
+.paneles[data-modo=todo] .marco.gemelo{aspect-ratio:4/3}
+.paneles[data-modo=todo] .etq-marco{left:6px;top:6px;font-size:10.5px;padding:3px 7px}
+.paneles[data-modo=todo] .etq-marco i{display:none}
+.paneles[data-modo=todo] .vistas{right:6px;bottom:6px;gap:3px}
+.paneles[data-modo=todo] .vistas button{font-size:10.5px;padding:3px 6px;border-radius:5px}
+.paneles[data-modo=todo] .vistas .sep-v{width:2px}
+.paneles[data-modo=todo] .vacio{font-size:12px}
 .paneles[data-modo=dos]{display:grid;grid-template-columns:1fr 1fr;gap:2px;background:#0b1626}
 .paneles[data-modo=dos] .marco.gemelo{aspect-ratio:4/3}
 .marco.gemelo{aspect-ratio:16/9;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;background:#1d2a3a}
@@ -152,6 +163,21 @@ main{max-width:var(--ancho);margin:0 auto;padding:var(--hueco) var(--margen) 8px
 .junta{background:var(--fondo);border-radius:8px;padding:8px 10px}
 .junta span{display:block;font-size:11px;font-weight:700;color:var(--suave);letter-spacing:.06em}
 .junta b{font-size:16px;font-variant-numeric:tabular-nums;color:var(--azul)}
+/* (23-nov) carga medida en la brida */
+.carga{margin-top:12px;background:var(--fondo);border-radius:8px;padding:10px 12px}
+.carga .cab-carga{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
+.carga .cab-carga span{font-size:11px;font-weight:700;color:var(--suave);letter-spacing:.06em;text-transform:uppercase}
+.carga .cab-carga b{font-size:20px;font-variant-numeric:tabular-nums;color:var(--azul)}
+.carga .cab-carga b small{font-size:12px;font-weight:600;color:var(--suave)}
+.carga .barra-carga{height:8px;background:#dfe5ee;border-radius:99px;overflow:hidden;margin:8px 0 6px}
+.carga .barra-carga i{display:block;height:100%;width:0;background:var(--ok);border-radius:99px;transition:width .25s,background .25s}
+.carga .barra-carga i.aviso{background:var(--aviso)} .carga .barra-carga i.mal{background:var(--mal)}
+.carga .nota-carga{font-size:12px;color:var(--suave)}
+.carga.viejo .cab-carga b{color:var(--suave)}
+.carga details{margin-top:8px;font-size:11.5px;color:var(--suave)}
+.carga summary{cursor:pointer;font-weight:600}
+.carga .diag{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin-top:6px;font-variant-numeric:tabular-nums}
+.carga .diag b{font-weight:600;color:var(--texto);word-break:break-word}
 /* mano */
 .mano-rejilla{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:24px}
 .yemas{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;align-items:end;height:150px;margin-top:6px}
@@ -191,7 +217,7 @@ footer b{color:var(--azul)}
 /* tableta / móvil: una sola columna, en este orden (el mismo que en el ordenador, columna a columna) */
 @media (max-width:1000px){main{grid-template-columns:minmax(0,1fr)}.col{display:contents}.o1{order:1}.o2{order:2}.o3{order:3}.o4{order:4}.o5{order:5}.o6{order:6}
   .mano-rejilla{grid-template-columns:minmax(0,1fr) minmax(0,1.3fr)}.franja::after{width:220px;right:-80px}}
-@media (max-width:760px){.paneles[data-modo=dos]{grid-template-columns:1fr}.mano-rejilla{grid-template-columns:1fr}}
+@media (max-width:760px){.paneles[data-modo=dos],.paneles[data-modo=todo]{grid-template-columns:1fr}.mano-rejilla{grid-template-columns:1fr}}
 @media (max-width:600px){body{font-size:14px}.franja::after{display:none}.tarjeta>header{flex-wrap:wrap;row-gap:8px;padding:10px 14px}.cuerpo{padding:14px}.seg{margin-left:0;order:3;width:100%;justify-content:space-between}.seg button{flex:1}
   .vistas{left:8px;right:8px;bottom:8px}.vistas button{padding:5px 8px}.cab .sep,.cab .nombre span{display:none}.cab img{height:32px}.cab .nombre b{font-size:15px}
   .chip{font-size:12px;white-space:normal}.paso{margin-left:0}.btn-sesion .t{display:none}.juntas{grid-template-columns:repeat(2,1fr)}
@@ -231,7 +257,7 @@ footer b{color:var(--azul)}
     <section class="tarjeta o1">
       <header><h2>Visión</h2>
         <div class="seg" role="tablist" aria-label="Qué ver">
-          <button type="button" data-modo="cam" class="act">Cámara</button><button type="button" data-modo="sim">Gemelo</button><button type="button" data-modo="dos">Las dos</button><button type="button" data-modo="a" id="btnCamA" hidden title="OAK-D fija que mira la mesa de cerca: con ella se mide la pelota al cogerla">Cámara A</button>
+          <button type="button" data-modo="cam" class="act">Cámara</button><button type="button" data-modo="sim">Gemelo</button><button type="button" data-modo="dos">Las dos</button><button type="button" data-modo="todo" id="btnTodo" hidden title="Cámara de cabeza, cámara A (mesa) y gemelo a la vez">Todo</button><button type="button" data-modo="a" id="btnCamA" hidden title="OAK-D fija que mira la mesa de cerca: con ella se mide la pelota al cogerla">Cámara A</button>
         </div>
         <span class="meta" id="camMeta">—</span></header>
       <div class="paneles" id="paneles" data-modo="cam">
@@ -241,6 +267,13 @@ footer b{color:var(--azul)}
             <img id="simcam" class="superpuesta" alt="">
             <div class="vacio"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h3l2-3h8l2 3h3v13H3z"/><circle cx="12" cy="13" r="4"/></svg><span id="camVacio">Esperando a la cámara…</span></div>
             <span class="etq-marco" id="etqCam">Cámara de cabeza</span>
+          </div>
+        </div>
+        <div class="panel-cam-a">
+          <div class="marco sin" id="marcoA">
+            <img id="videoA" alt="Imagen en directo de la cámara A (mesa)">
+            <div class="vacio"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h3l2-3h8l2 3h3v13H3z"/><circle cx="12" cy="13" r="4"/></svg><span id="camAVacio">Esperando a la cámara A…</span></div>
+            <span class="etq-marco">Cámara A (mesa)</span>
           </div>
         </div>
         <div class="panel-sim">
@@ -338,6 +371,12 @@ footer b{color:var(--azul)}
         <div class="fila"><span>Código controladora</span><span id="fr5Codigo">—</span></div>
         <div class="fila"><span>Envío de movimiento</span><span id="fr5Simulacro">—</span></div>
         <div class="juntas" id="juntas"></div>
+        <div class="carga" id="carga" title="Medida con el par real de los joints (no es la de config): mano + adaptador + lo que tenga cogido. Es una estimación: de fiar con el brazo quieto">
+          <div class="cab-carga"><span>Carga en la brida</span><b id="cargaKg">—</b></div>
+          <div class="barra-carga"><i id="cargaBarra"></i></div>
+          <div class="nota-carga" id="cargaNota">—</div>
+          <details id="cargaDet"><summary>Diagnóstico</summary><div class="diag" id="cargaDiag"></div></details>
+        </div>
       </div>
     </section>
   </div>
@@ -398,8 +437,13 @@ function pintar(e){
   const f = e.fr5 || {}, m = e.mano || {}, t = e.tactil || {}, c = e.camara || {}, k = e.control || {}, s = e.sesion || {};
   autorizado = !!s.autorizado; requiereClave = !!s.requiere_clave;
   const hayA = !!(e.camara_a && e.camara_a.activa);            // (19-nov) cámara A (mesa)
-  $("btnCamA").hidden = !hayA;
+  $("btnCamA").hidden = !hayA; $("btnTodo").hidden = !hayA;
   if (!hayA && modoVision === "a"){ modoVision = "cam"; actualizarFuentes(); }
+  if (!hayA && modoVision === "todo"){ modoVision = "dos"; actualizarFuentes(); }
+  const ca = e.camara_a || {};
+  const cav = hayA && ca.ok && ca.edad_s != null && ca.edad_s < 2;
+  $("marcoA").classList.toggle("sin", !cav);
+  $("camAVacio").textContent = ca.error ? ca.error : "Esperando a la cámara A…";
 
   // sesión
   $("btnSesion").classList.toggle("abierta", autorizado && requiereClave);
@@ -417,6 +461,30 @@ function pintar(e){
   $("fr5Meta").textContent = f.en_linea ? "pose real" : "";
   const q = f.q_real_deg;
   for (let i=1;i<=6;i++) $("j"+i).textContent = q ? q[i-1].toFixed(1)+"°" : "—";
+  // (23-nov) carga medida (mano incluida)
+  const cg = f.carga;
+  $("carga").hidden = !cg;
+  if (cg){
+    const kg = cg.kg, max = cg.max_kg || 5;
+    $("cargaKg").innerHTML = kg != null ? `${kg.toFixed(2)} kg <small>/ ${max} kg</small>` : "—";
+    const pct = kg != null ? Math.max(0, Math.min(100, kg / max * 100)) : 0;
+    const barra = $("cargaBarra");
+    barra.style.width = pct + "%";
+    barra.className = pct >= 90 ? "mal" : pct >= 70 ? "aviso" : "";
+    $("carga").classList.toggle("viejo", !cg.estable);
+    const dg = cg.diag || {}, lst = v => v ? v.map(x => (+x).toFixed(1)).join(" · ") : "—";
+    const fila = (k, v) => `<span>${k}</span><b>${v}</b>`;
+    $("cargaDiag").innerHTML = fila("Habilitado (controladora)", dg.habilitado == null ? "no se sabe" : dg.habilitado ? "sí" : "no")
+      + fila("Par medido J1-J6", lst(dg.par) + " N·m")
+      + fila("Par de consigna J1-J6", lst(dg.par_tgt) + " N·m")
+      + fila("Gravedad del brazo (modelo)", lst(dg.par_brazo_modelo) + " N·m")
+      + fila("Medido / modelo", dg.ratio != null ? dg.ratio : "—")
+      + fila("Modo", dg.modo || "—") + fila("Signo", dg.signo != null ? dg.signo : "—")
+      + fila("Carga en la controladora", dg.carga_ctrl != null ? dg.carga_ctrl.toFixed(2) + " kg" : "—")
+      + fila("Residuo", dg.residuo_nm != null ? dg.residuo_nm + " N·m" : "—");
+    $("cargaNota").textContent = cg.estable ? `medida${(cg.diag||{}).modo === "neto" ? " (par neto de la controladora)" : ""} · ${Math.round(pct)} % de la carga máx.`
+      : (cg.moviendo && kg != null ? "en movimiento · último valor con el brazo quieto" : (cg.texto || "—"));
+  }
 
   // OrcaHand
   const mc = !vivo ? "mal" : m.estado === "ok" ? "ok" : (m.estado === "aviso" || m.estado === "arrancando") ? "aviso" : "mal";
@@ -567,9 +635,10 @@ function actualizarFuentes(){
   $("paneles").dataset.modo = modoVision;
   document.querySelectorAll(".seg button").forEach(b => b.classList.toggle("act", b.dataset.modo === modoVision));
   // (19-nov) «Cámara A»: el mismo marco con la imagen de la cámara de la mesa (sin superponer el gemelo)
-  const camA = modoVision === "a";
-  const verCam = modoVision !== "sim", verSim = modoVision === "sim" || modoVision === "dos";
+  const camA = modoVision === "a", todo = modoVision === "todo";
+  const verCam = modoVision !== "sim", verSim = modoVision === "sim" || modoVision === "dos" || todo;
   fuente($("video"), verCam ? (camA ? "/video_a.mjpg" : "/video.mjpg") : null);
+  fuente($("videoA"), todo ? "/video_a.mjpg" : null);            // (23-nov) «Todo»: la A en su propio marco
   fuente($("sim"), verSim ? "/sim.mjpg" : null);
   $("etqCam").textContent = camA ? "Cámara A (mesa)" : "Cámara de cabeza";
   const sup = verCam && !camA && $("chkSup").checked;
@@ -582,7 +651,7 @@ document.querySelectorAll(".seg button").forEach(b => b.addEventListener("click"
 }));
 $("chkSup").addEventListener("change", actualizarFuentes);
 $("opac").addEventListener("input", ev => { $("simcam").style.opacity = ev.target.value / 100; });
-["video","sim","simcam"].forEach(id => $(id).addEventListener("error", () => setTimeout(() => {
+["video","videoA","sim","simcam"].forEach(id => $(id).addEventListener("error", () => setTimeout(() => {
   const img = $(id); if (img.dataset.url) img.src = img.dataset.url + "?t=" + Date.now();
 }, 1500)));
 actualizarFuentes();
@@ -668,7 +737,8 @@ $("swPedal").addEventListener("change", async ev => {
 
 // ── tarea (paso 10) ──
 const ETQ_TAREA = {libre:["Sin tarea","neutro"], planificando:["Planificando…","neutro"], lista:["Plan listo","ok"],
-  ejecutando:["En marcha","ok"], pausada:["En pausa","aviso"], terminada:["Hecha","ok"], error:["No se puede","mal"]};
+  ejecutando:["En marcha","ok"], pausada:["En pausa","aviso"], terminada:["Hecha","ok"], error:["No se puede","mal"],
+  escaneando:["Escaneando la escena…","aviso"]};
 function pintarTarea(t, vivo){
   const on = vivo && t;
   const [txt, col] = on ? (ETQ_TAREA[t.estado] || [t.estado, "neutro"]) : ["—", "neutro"];

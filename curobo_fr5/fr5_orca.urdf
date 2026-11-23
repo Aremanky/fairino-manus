@@ -1229,7 +1229,7 @@
     </collision>
   </link>
   <joint name="brida_a_mano" type="fixed">
-    <origin xyz="0 0.0099 0.16" rpy="1.5708 -0 0" />
+    <origin xyz="0.00769 0.00623 0.16" rpy="1.57079949 -5.87780131e-08 -0.890118602" />
     <parent link="wrist3_Link" />
     <child link="mano_mount" />
   </joint>

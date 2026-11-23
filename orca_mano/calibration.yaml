@@ -53,8 +53,8 @@ motor_limits:
   17:
   - 2.6737284660339355
   - 3.5603694915771484
-sequence: 7
-calibrated_at: '2026-11-20T08:32:19Z'
+sequence: 8
+calibrated_at: '2026-11-23T09:50:13Z'
 motor_travel_measured:
   thumb_cmc: 50.8
   thumb_abd: 50.19
@@ -118,7 +118,7 @@ drive_current_measured:
     extend: 120.8
     flex: 138.0
   thumb_mcp:
-    flex: 175.5
+    flex: 13.5
 fingerprint:
   index_abd: +4 extend,flex
   index_mcp: +3 extend,flex
