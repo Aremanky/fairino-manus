@@ -27,7 +27,8 @@ from skill_shield.teleop_fr5.cinematica import cargar_cadena         # noqa: E40
 
 G = {k: getattr(config, k) for k in dir(config) if k.isupper()}
 GA = dict(G, AUTONOMO_TAREA_MOVER_MANO=False, AUTONOMO_CAM_A=True, AUTONOMO_TAREA_PELOTA_CORRECCION_M=(0, 0, 0),
-          AUTONOMO_CAM_A_PELOTA_CORRECCION_M=(0, 0, 0))
+          AUTONOMO_CAM_A_PELOTA_CORRECCION_M=(0, 0, 0), AUTONOMO_CAM_A_OBLIGATORIA=False)
+GA_OBLIGATORIA = dict(GA, AUTONOMO_CAM_A_OBLIGATORIA=True)       # (23-nov) la pelota solo se coge con la medida de la A
 Q0 = np.radians([93.0, -17.0, 53.0, 43.0, 105.0, 25.0])
 BOLA, DEJAR = np.array([0.35, -0.45, -0.15]), np.array([0.15, -0.45, -0.15])
 T_A = np.eye(4)
@@ -99,15 +100,16 @@ class FR5Falso:
         return dict(estado=self._estado)
 
 
-def _planificar(cadena, ctx):
+def _planificar(cadena, ctx, g=GA, lista=True):
     fr5 = FR5Falso()
-    t = TA.Tarea(GA, ".", fr5, simulacro=False, fabrica_planificador=lambda: TA.Planificador(cadena, G))
+    t = TA.Tarea(g, ".", fr5, simulacro=False, fabrica_planificador=lambda: TA.Planificador(cadena, G))
     t.orden({"tarea": dict(accion="planificar", id="p1")}, lambda: dict(ctx, q_real=fr5.q))
     t0 = time.time()
     while t.estado == "planificando" and time.time() - t0 < 120:
         time.sleep(0.05)
         t.paso(0.0, fr5.q, False)
-    assert t.estado == "lista", t.texto
+    if lista:
+        assert t.estado == "lista", t.texto
     return t, fr5
 
 
@@ -147,6 +149,38 @@ def test_afina_con_la_camara_a(cadena, monkeypatch):
     assert t.afinado_fuente == "a"
     assert np.allclose(t.plan.pelota["c"], BOLA + mover)
     assert t.afinado_cm == pytest.approx(np.linalg.norm(mover) * 100, abs=0.1)
+
+
+# ── (23-nov) la cámara A obligatoria ─────────────────────────────────────────────────────────
+def test_con_la_a_obligatoria_sin_la_a_no_se_coge(cadena):
+    """Si la A no ve la pelota (o no cuadra con la cabeza), no se coge con la medida de la cabeza: error y no hay plan."""
+    for ctx in (dict(herramientas=_lista(BOLA), objetivo_id=100, mapa=None),
+                dict(herramientas=_lista(BOLA), objetivo_id=100, mapa=None,
+                     herramientas_a=[_pel(BOLA + [0.12, 0, 0], 105)], T_mundo_cam_a=T_A)):
+        t, _ = _planificar(cadena, ctx, g=GA_OBLIGATORIA, lista=False)
+        assert t.estado == "error" and "cámara A" in t.texto and t.plan is None
+
+
+def test_con_la_a_obligatoria_la_cabeza_no_recoloca_al_afinar(cadena, monkeypatch):
+    """Planificada con la A; al afinar la A no la ve y la cabeza la ve 3 cm más allá: se baja a donde la midió la A."""
+    monkeypatch.setattr(TA.Planificador, "fraccion_tapada", lambda self, q, c, r, n=9, T_cam=None: 0.0)
+    da = np.array([0.01, -0.01, 0.0])
+    t, fr5 = _planificar(cadena, dict(herramientas=_lista(BOLA), objetivo_id=100, mapa=None,
+                                      herramientas_a=[_pel(BOLA + da, 105)], T_mundo_cam_a=T_A), g=GA_OBLIGATORIA)
+    assert t._fuente_plan == "a"
+    i_b = [f.nombre for f in t.plan.fases].index("Bajar a la pelota")
+    t.orden({"tarea": dict(accion="ejecutar", id="p2")}, lambda: dict(q_real=fr5.q))
+    ctx = lambda: dict(q_real=fr5.q, herramientas=_lista(BOLA + [0.03, 0, 0]), mapa=None,  # noqa: E731
+                       herramientas_a=[], T_mundo_cam_a=T_A)
+    for _ in range(20000):
+        t.paso(1 / 60, fr5.q, True, ctx)
+        if t.estado == "error" or t.ejec.i > i_b:
+            break
+        if t.afinando:
+            time.sleep(0.002)
+    assert t.estado != "error", t.texto
+    assert t.afinado_fuente is None
+    assert np.allclose(t.plan.pelota["c"], BOLA + da)
 
 
 # ── la cámara A en el modelo de colisión ─────────────────────────────────────────────────────

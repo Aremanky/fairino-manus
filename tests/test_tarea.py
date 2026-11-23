@@ -27,6 +27,7 @@ from skill_shield.hardware.fr5_servo import ENVIANDO, ACERCANDO      # noqa: E40
 from skill_shield.teleop_fr5.cinematica import OFFSET_PALMA_ORCA, cargar_cadena   # noqa: E402
 
 G = {k: getattr(config, k) for k in dir(config) if k.isupper()}
+G["AUTONOMO_CAM_A_OBLIGATORIA"] = False     # (23-nov) aquí, el camino de la cabeza; la A obligatoria, en test_camara_a.py
 Q0 = np.radians([93.0, -17.0, 53.0, 43.0, 105.0, 25.0])     # mano delante de la cámara (tests de calibración)
 POSTURAS = dict(abierta=TA.MANO_ABIERTA, agarre=TA.MANO_AGARRE)
 
@@ -514,7 +515,8 @@ def test_nube_de_la_mano_sigue_la_postura():
     """Con los dedos a 0 el pulgar sobresale ~10 cm por el lado de la palma: así no se puede bajar
     sobre una pelota de una mesa. Con la postura de coger pelotas sobresale bastante menos."""
     from skill_shield.autonomo.choque_mano import nube_mano
-    T_w_mm = np.array([[1, 0, 0, 0], [0, 0, -1, 0.0099], [0, 1, 0, 0.16], [0, 0, 0, 1.0]])
+    m = cargar_cadena(config.RUTA_XML, verbose=False).fk_marcos(np.zeros(6))
+    T_w_mm = np.linalg.inv(m[5]) @ m[6]          # (23-nov) mano_mount en la brida, del MJCF (antes, el montaje fijo)
     Ti = np.linalg.inv(T_w_mm)
 
     def sale(post):
@@ -522,6 +524,19 @@ def test_nube_de_la_mano_sigue_la_postura():
         return float(np.max(OFFSET_PALMA_ORCA[0] - (P @ Ti[:3, :3].T + Ti[:3, 3])[:, 0]))
     assert sale({}) > 0.09
     assert sale(TA.MANO_PELOTA_ABIERTA) < 0.06
+
+
+def test_pinza_con_el_punto_medido(cadena):
+    """(23-nov) Con AUTONOMO_TAREA_PINZA_PUNTO_BRIDA_M (medido con diagnosticos/medir_punto_pinza.py), el punto que
+    se lleva a la pelota es ese (marco de la brida), no el del modelo de la mano; el resto de la pinza, igual."""
+    p_brida = np.array([-0.070, 0.026, 0.366])
+    normal = TA.Planificador(cadena, G).pinza(0.07)
+    medida = TA.Planificador(cadena, dict(G, AUTONOMO_TAREA_PINZA_PUNTO_BRIDA_M=tuple(p_brida))).pinza(0.07)
+    m = cadena.fk_marcos(np.zeros(6))
+    T_w_mm = np.linalg.inv(m[5]) @ m[6]                              # mano_mount en la brida
+    assert np.allclose(T_w_mm[:3, :3] @ medida["punto"] + T_w_mm[:3, 3], p_brida, atol=1e-9)
+    assert not np.allclose(medida["punto"], normal["punto"])
+    assert medida["s"] == pytest.approx(normal["s"]) and np.allclose(medida["linea"], normal["linea"])
 
 
 def _mesa(zt, y0=-0.30):

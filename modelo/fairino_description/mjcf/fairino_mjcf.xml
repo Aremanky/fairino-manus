@@ -245,8 +245,9 @@
                   <geom type="mesh" mesh="fr5_vis_wrist3_2" material="fr5e_tapa" contype="0" conaffinity="0" group="2"/>
                   <geom type="mesh" mesh="fr5_col_wrist3_Link" contype="1" conaffinity="1" group="3" rgba="0.5 0.5 0.5 0.3"/>
                   <site name="flange" pos="0 0 0.102" size="0.006" rgba="1 0 0 1" group="4"/>
-                  <!-- ── OrcaHand en la brida del FR5 (mano_mount +Y = eje de la brida) ── -->
-                  <body name="mano_mount" pos="0.0000 0.0099 0.1600" euler="1.5708 0 0" childclass="mano" gravcomp="1">
+                  <!-- ── OrcaHand en la brida del FR5 (mano_mount +Y = eje de la brida) ──
+                       23-nov: girada -51° alrededor del eje de la brida, como la mano real (ver el MJCF principal) -->
+                  <body name="mano_mount" pos="0.00769 0.00623 0.16000" quat="0.638223 0.638225 -0.304418 -0.304417" childclass="mano" gravcomp="1">
                     <include file="../../orcahand_description-main/v2/models/mjcf/orcahand_right_body.xml"/>
                   </body>
                 </body>

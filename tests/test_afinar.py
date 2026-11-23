@@ -31,6 +31,7 @@ from skill_shield.hardware.fr5_servo import ACERCANDO, ENVIANDO      # noqa: E40
 from skill_shield.teleop_fr5.cinematica import OFFSET_PALMA_ORCA, cargar_cadena   # noqa: E402
 
 G = {k: getattr(config, k) for k in dir(config) if k.isupper()}
+G["AUTONOMO_CAM_A_OBLIGATORIA"] = False     # (23-nov) aquí se afina con la cabeza; la A obligatoria, en test_camara_a.py
 Q0 = np.radians([93.0, -17.0, 53.0, 43.0, 105.0, 25.0])
 CAM = np.array([0.336, -0.049, 0.549])
 

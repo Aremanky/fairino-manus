@@ -374,6 +374,9 @@ class Planificador:
         self.pinza_ce = _postura_cfg(g, "AUTONOMO_TAREA_MANO_PINZA_CERRADA", MANO_PINZA_CERRADA)
         ap = _g(g, "AUTONOMO_TAREA_PINZA_APRIETE", (0.15, 0.30))   # cuánto más se cierra tras tocarla (0..1)
         self.pinza_apriete = (float(ap[0]), float(ap[1]))
+        # (23-nov) punto de pinza MEDIDO en la mano real (marco de la brida; diagnosticos/medir_punto_pinza.py) o None
+        pm = _g(g, "AUTONOMO_TAREA_PINZA_PUNTO_BRIDA_M", None)
+        self.pinza_punto_brida = None if pm is None else np.asarray(pm, float).reshape(3)
         self.lejos_hombro = float(_g(g, "AUTONOMO_TAREA_LEJOS_HOMBRO", 1.0))
         self.alcance_palma = float(_g(g, "AUTONOMO_TAREA_ALCANCE_PALMA_M", 1.14))   # máx. hombro → centro de la palma
         self.lejos_camara = float(_g(g, "AUTONOMO_TAREA_LEJOS_CAMARA", 1.0))
@@ -2094,6 +2097,8 @@ class Planificador:
         u = (gaps[k - 1] - objetivo) / max(gaps[k - 1] - gaps[k], 1e-9)
         s_c = float(ss[k - 1] + u * (ss[k] - ss[k - 1]))
         punto = mids[k - 1] + u * (mids[k] - mids[k - 1])
+        if getattr(self, "pinza_punto_brida", None) is not None:   # (23-nov) el medido en la mano real manda
+            punto = T_mm_w[:3, :3] @ self.pinza_punto_brida + T_mm_w[:3, 3]
         linea = lineas[k - 1] + u * (lineas[k] - lineas[k - 1])    # pulgar → índice, en mano_mount
         res = dict(s=s_c, punto=punto, linea=linea, contacto=postura(s_c),
                    cerrada=postura(min(1.0, s_c + self.pinza_apriete[0])),
@@ -2575,6 +2580,9 @@ class Tarea:
         self.cam_a_afinar = bool(_g(self.cfg, "AUTONOMO_CAM_A_PARA_AFINAR", True))
         self.cam_a_max_dif = float(_g(self.cfg, "AUTONOMO_CAM_A_MAX_DIF_M", 0.06))
         self.cam_a_edad = float(_g(self.cfg, "AUTONOMO_CAM_A_EDAD_MAX_S", 0.5))
+        # (23-nov) la pelota se coge solo con la medida de la A (la cabeza, a ~0,9 m, se equivoca más de lo que aguanta
+        # la pinza): sin la A no se planifica, y si al afinar no la ve, se sigue con lo que midió al planificar
+        self.cam_a_obligatoria = bool(_g(self.cfg, "AUTONOMO_CAM_A_OBLIGATORIA", False))
         self.corr_pelota_a = np.asarray(_g(self.cfg, "AUTONOMO_CAM_A_PELOTA_CORRECCION_M", (0.0, 0.0, 0.0)), float)
         self._fuente_plan = None                        # "cabeza" o "a": con qué cámara se midió la pelota del plan
         self._pelota_id_a = None
@@ -2790,6 +2798,10 @@ class Tarea:
                     self._registrar("medida_pelota", fuente="a", dif_cabeza_cm=round(dif * 100, 1),
                                     centro_mundo=np.round(np.asarray(ha["T_mundo"], float)[:3, 3], 4).tolist())
                 else:
+                    if self.cam_a and self.cam_a_plan and self.cam_a_obligatoria:
+                        return self._error("La cámara A no ve esta pelota (o no cuadra con la cabeza): con la de cabeza "
+                                           "no la cojo, se equivoca más de lo que aguanta la pinza. Ponla donde la vea "
+                                           "la A (o AUTONOMO_CAM_A_OBLIGATORIA = False).")
                     T_sitios[0] = self._corregir_pelota(T_sitios[0], tc)
                     if self.cam_a and self.cam_a_plan:
                         print("📷 Tarea: la cámara A no ve esta pelota (o no cuadra con la cabeza): uso la de cabeza.")
@@ -3364,6 +3376,8 @@ class Tarea:
             if res_a != "sin_a":
                 self.afinado_fuente = "a"
                 return res_a
+            if self.cam_a_obligatoria and self._fuente_plan == "a":
+                return None                 # (23-nov) la cabeza no recoloca una pelota medida con la A
         f = None
         if q_aqui is not None and hasattr(self._planificador, "fraccion_tapada"):
             try:
@@ -3428,9 +3442,12 @@ class Tarea:
         como siempre); si no, lo mismo que _calcular_afinado."""
         # (si se ha movido algo, hasta afinar_max: más lejos, _bajada_afinada para la tarea)
         h, T_a = self._pelota_a(ctx, pz["c"], id_pref=self._pelota_id_a, max_dif=self.afinar_max)
+        # (23-nov) con la A obligatoria y la pelota medida con ella, sin la A no se afina con la cabeza
+        luego = ("sigo con lo que midió al planificar" if self.cam_a_obligatoria and self._fuente_plan == "a"
+                 else "afino con la de cabeza")
         if h is None:
             if ctx.get("T_mundo_cam_a") is not None:
-                print("📷 Tarea: al afinar, la cámara A no ve la pelota: afino con la de cabeza.")
+                print(f"📷 Tarea: al afinar, la cámara A no ve la pelota: {luego}.")
             return "sin_a"
         if q_aqui is not None and _acepta(getattr(self._planificador, "fraccion_tapada", None), "T_cam"):
             try:
@@ -3439,8 +3456,7 @@ class Tarea:
                 print(f"⚠️  Tarea: no puedo mirar si el brazo le tapa la pelota a la cámara A: {e}")
                 f = None
             if f is not None and f > self.afinar_tapada_max:
-                print(f"📷 Tarea: al afinar, el brazo le tapa el {100 * f:.0f} % de la pelota a la cámara A: "
-                      "afino con la de cabeza.")
+                print(f"📷 Tarea: al afinar, el brazo le tapa el {100 * f:.0f} % de la pelota a la cámara A: {luego}.")
                 return "sin_a"
         T_h = self._corregir_pelota(np.asarray(h["T_mundo"], float), T_a, self.corr_pelota_a)
         return self._bajada_afinada(pz, T_h, h.get("apoyo_z"), T_a, quien="la cámara A")

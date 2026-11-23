@@ -1632,6 +1632,10 @@ AUTONOMO_TAREA_MANO_PINZA_ABIERTA = {0: 0.0, 2: 1.4, 3: 1.3, 5: 1.4, 6: 1.3, 7: 
 AUTONOMO_TAREA_MANO_PINZA_CERRADA = {0: 0.0, 2: 1.4, 3: 1.3, 5: 1.4, 6: 1.3, 7: 0.0, 8: 0.98, 9: 0.733, 10: 0.0,
                                      11: 0.98, 12: 0.733, 13: 0.094, 14: 0.282, 15: 0.393, 16: 0.323}
 AUTONOMO_TAREA_PINZA_APRIETE = (0.30, 0.60)
+# (23-nov) Punto de pinza MEDIDO en la mano real (m, marco de la brida = wrist3), con
+# diagnosticos/medir_punto_pinza.py. None = el del modelo de la mano (punto medio de las yemas de pulgar e índice).
+# Ponedlo solo si, con el giro de mano_mount ya bien, el script dice que el modelo sigue a más de ~5 mm.
+AUTONOMO_TAREA_PINZA_PUNTO_BRIDA_M = None
 AUTONOMO_TAREA_PELOTA_TACTIL_N = 0.2        # N para que un dedo cuente como «la noto»
 AUTONOMO_TAREA_PELOTA_TACTIL_DEDOS = 1      # dedos que la tienen que notar (si no, se para)
 # Posturas (ctrl 0..16: 0 muñeca · 1-3 meñique abd/mcp/pip · 4-6 anular · 7-9 corazón · 10-12 índice
@@ -1727,8 +1731,13 @@ AUTONOMO_CAM_A_IR_MA    = 800                 # proyector IR; si las dos OAK-D P
 AUTONOMO_CAM_A_ESCALA_PROF = 1.0              # como AUTONOMO_CAM_ESCALA_PROF, para la A
 AUTONOMO_CAM_A_PARA_PLANIFICAR = True         # medir la pelota con la A al planificar (si la ve)
 AUTONOMO_CAM_A_PARA_AFINAR = True             # afinar con la A al pararse encima (si la ve y el brazo no se la tapa)
-AUTONOMO_CAM_A_MAX_DIF_M = 0.06               # m: más lejos de lo que ve la cabeza = no es la misma pelota (o
-                                              # alguna calibración está mal): no se usa la A
+AUTONOMO_CAM_A_MAX_DIF_M = 0.10               # m: más lejos de lo que ve la cabeza = no es la misma pelota (o
+                                              # alguna calibración está mal): no se usa la A. (23-nov) 0,06 → 0,10:
+                                              # a ~0,9 m la cabeza puede equivocarse unos cm y se descartaba la A
+# (23-nov) La pelota se coge SOLO con la medida de la cámara A (a ~0,5 m). La cabeza (a ~0,9 m) se equivoca 1-2 cm a
+# lo largo del rayo, más de lo que aguanta la pinza. True: si la A no la ve al planificar, no se coge (se avisa);
+# y si no la ve al afinar, se sigue con lo que midió la A al planificar (la cabeza no la recoloca).
+AUTONOMO_CAM_A_OBLIGATORIA = True
 AUTONOMO_CAM_A_EDAD_MAX_S = 0.5               # s: medida de la A más vieja = no vale
 AUTONOMO_CAM_A_PELOTA_CORRECCION_M = (0.0, 0.0, 0.0)   # como AUTONOMO_TAREA_PELOTA_CORRECCION_M, vista en la imagen de la A
 
@@ -1820,7 +1829,9 @@ CALIB_AUTO_DIST_M     = (0.30, 1.00)            # el tablero entre estas distanc
 # (alrededor del eje de la brida) gira su modelo en las comprobaciones de choque de la calibración.
 # Con la mano ya bien montada (como el gemelo), 0. Las posturas guardadas cuando la mano estaba al
 # revés se adaptan una vez con:  python calibrar_camara_robot.py --girar-posturas 180
-CALIB_MANO_GIRO_DEG = 90.0
+# (23-nov) 0: el gemelo ya tiene la mano girada como la real (mano_mount en fairino_mjcf.xml). El 90 que había no era
+# el giro real (las calibraciones dan ~-51°).
+CALIB_MANO_GIRO_DEG = 0.0
 # (13-nov) Durante la calibración la OrcaHand se conecta con par y se queda RECTA (muñeca a 0 y dedos
 # estirados), para que el tablero pegado a ella no se mueva. Usa el puerto PUERTO_HARDWARE: cierra
 # antes el modo autónomo y la teleoperación. Postura: {índice de ctrl 0..16: rad}; None = la mano
