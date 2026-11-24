@@ -65,7 +65,7 @@ from skill_shield.autonomo.camara_a import CANAL_HERR_A, CANAL_IMG_A, CANAL_INFO
 
 def estado_calibracion(raiz, cfg, ruta=None):
     """Resumen de camara_robot.json (+ su última verificación) para la web. ruta (19-nov): la de otra cámara."""
-    ruta = ruta or cfg.get("CALIB_ROBOT_ARCHIVO", "camara_robot.json")
+    ruta = ruta or cfg.get("CALIB_ROBOT_ARCHIVO", "calibraciones/datos/camara_robot.json")
     ruta = ruta if os.path.isabs(ruta) else os.path.join(raiz, ruta)
     if not os.path.exists(ruta):
         return dict(estado="sin", texto="sin calibrar")
@@ -268,7 +268,7 @@ def ejecutar(cfg):
     canal_img_a = Canal(CANAL_IMG_A, capacidad=2 << 20, crear=True) if con_cam_a else None
     canal_info_a = Canal(CANAL_INFO_A, capacidad=64 << 10, crear=True) if con_cam_a else None
     canal_herr_a = Canal(CANAL_HERR_A, capacidad=64 << 10, crear=True) if con_cam_a else None
-    ruta_calib_a = cfg.get("AUTONOMO_CAM_A_CALIB_ARCHIVO", "camara_a_robot.json")
+    ruta_calib_a = cfg.get("AUTONOMO_CAM_A_CALIB_ARCHIVO", "calibraciones/datos/camara_a_robot.json")
     # (20-nov) la profundidad de la A también va al mapa de la cabeza (la misma TSDF)
     con_prof_a = con_cam_a and con_mapa and bool(cfg.get("AUTONOMO_CAM_A_AL_MAPA", True))
     canal_prof_a = Canal(CANAL_PROF_A, capacidad=1 << 20, crear=True) if con_prof_a else None
@@ -386,7 +386,7 @@ def ejecutar(cfg):
         mujoco.mj_forward(modelo, datos)
         # Muñeca de la Orca y dedos (11-nov): joint del MJCF de cada articulación de orca_core,
         # por el mismo actuador que usa la teleoperación (OFFSET_MANO + JOINT_A_CTRL).
-        from orca_hardware import OrcaHardwareWrapper
+        from skill_shield.hardware.orca_hardware import OrcaHardwareWrapper
         from skill_shield.autonomo.mapa import PiezasMano, empaquetar_pose
         mano_qpos = {}
         for nombre_j, k in OrcaHardwareWrapper.JOINT_A_CTRL.items():

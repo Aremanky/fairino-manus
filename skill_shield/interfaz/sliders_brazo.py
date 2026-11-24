@@ -331,7 +331,7 @@ class _VentanaSliders:
             self._aviso("RESET pedido: cuando desaparezca el error, vuelve a ARMAR.")
 
     def imprimir_pose(self):
-        """9-nov: escribe en la terminal la pose REAL como una línea de episodio_poses.txt."""
+        """9-nov: escribe en la terminal la pose REAL como una línea de utilidades/episodio_poses.txt."""
         q, de_fr5, t = self._pose_real()
         if not t:
             self._aviso("Aún no hay pose real que imprimir.")
@@ -339,7 +339,7 @@ class _VentanaSliders:
         self._n_impresas = getattr(self, "_n_impresas", 0) + 1
         linea = ", ".join(f"{v:.1f}" for v in q)
         print(f"\n📋 pose{self._n_impresas}: {linea}"
-              f"    # {'FR5 real' if de_fr5 else 'simulador'} (cópiala en episodio_poses.txt)", flush=True)
+              f"    # {'FR5 real' if de_fr5 else 'simulador'} (cópiala en utilidades/episodio_poses.txt)", flush=True)
         self._aviso(f"Pose {self._n_impresas} impresa en la terminal.")
 
     def copiar_real(self):

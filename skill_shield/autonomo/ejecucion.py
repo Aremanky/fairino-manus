@@ -342,7 +342,7 @@ class ManoActiva:
             if self._fabrica is not None:
                 w = self._fabrica()
             else:
-                from orca_hardware import OrcaHardwareWrapper
+                from skill_shield.hardware.orca_hardware import OrcaHardwareWrapper
                 w = OrcaHardwareWrapper(puerto=self.puerto)
             if not w.conectar():
                 self.error = "no se pudo conectar la mano con par (mira la terminal)"

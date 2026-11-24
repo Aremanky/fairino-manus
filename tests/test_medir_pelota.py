@@ -24,7 +24,7 @@ import medir_pelota as MP                                                    # n
 from skill_shield.autonomo.pelotas import catalogo                           # noqa: E402
 
 D = 0.070
-_cal = json.load(open(os.path.join(RAIZ, "camara_robot.json")))["intrinsecos"]
+_cal = json.load(open(os.path.join(RAIZ, "calibraciones", "datos", "camara_robot.json")))["intrinsecos"]
 K = np.array(_cal["K"], float)
 K[:2] *= 640 / _cal["ancho"]
 DIST = np.array(_cal["dist"], float)

@@ -3136,7 +3136,7 @@ class Tarea:
         import os
         from skill_shield.teleop_fr5.cinematica import cargar_cadena
         T = None
-        ruta = self.cfg.get("CALIB_ROBOT_ARCHIVO", "camara_robot.json")
+        ruta = self.cfg.get("CALIB_ROBOT_ARCHIVO", "calibraciones/datos/camara_robot.json")
         ruta = ruta if os.path.isabs(ruta) else os.path.join(self.raiz, ruta)
         if os.path.exists(ruta):
             from skill_shield.autonomo.calibracion import cargar
@@ -3216,7 +3216,7 @@ class Tarea:
         if fuente is not None and hasattr(fuente, "postura"):
             p = fuente.postura()
             if p:
-                from orca_hardware import OrcaHardwareWrapper
+                from skill_shield.hardware.orca_hardware import OrcaHardwareWrapper
                 mano0 = {OrcaHardwareWrapper.JOINT_A_CTRL[j]: v for j, v in p.items()
                          if j in OrcaHardwareWrapper.JOINT_A_CTRL}
         self._comprobada = None

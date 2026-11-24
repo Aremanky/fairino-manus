@@ -121,14 +121,16 @@ import traceback
 import numpy as np
 
 # ── Ruta al SDK de OrcaHand ───────────────────────────────────────────────────
-_ORCA_CORE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "orca_core-main")
+# Raíz del repo (este archivo está en skill_shield/hardware/): ahí están orca_core-main/ y orca_mano/
+_RAIZ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ORCA_CORE_PATH = os.path.join(_RAIZ, "orca_core-main")
 if _ORCA_CORE_PATH not in sys.path:
     sys.path.insert(0, _ORCA_CORE_PATH)
 
 # config.yaml + calibration.yaml de TU mano. Desde el 20-nov viven FUERA del SDK, en orca_mano/,
 # para poder cambiar de versión de orca_core sin perderlos (actualizar_orca_core.sh los copia
 # ahí). Si orca_mano/ aún no existe, se usan los de dentro del orca_core viejo (como antes).
-_MANO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "orca_mano")
+_MANO_DIR = os.path.join(_RAIZ, "orca_mano")
 _CONFIG_SDK_VIEJO = os.path.join(
     _ORCA_CORE_PATH, "orca_core", "models", "v2", "orcahand_right", "config.yaml"
 )
@@ -563,7 +565,7 @@ class OrcaHardwareWrapper:
             if abs(lo - ref[0]) <= 1.0 and abs(hi - ref[1]) <= 1.0:
                 continue
             if abs((hi - lo) - (ref[1] - ref[0])) <= 1.0:
-                ruta = os.path.relpath(self._config_path, os.path.dirname(os.path.abspath(__file__)))
+                ruta = os.path.relpath(self._config_path, _RAIZ)
                 avisos.append(
                     f"ROM de {j} en el SDK: [{lo:g}, {hi:g}] · en el modelo: [{ref[0]:g}, {ref[1]:g}]"
                     f" (mismo recorrido, desplazado {ref[0] - lo:+g}°). Si los topes reales son los "

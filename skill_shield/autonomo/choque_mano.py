@@ -710,7 +710,7 @@ def _main():
     import config as cfg
     from skill_shield.teleop_fr5.cinematica import cargar_cadena
     ap = argparse.ArgumentParser(description="¿La mano se acerca demasiado al antebrazo / giro del J4?")
-    ap.add_argument("posturas", nargs="?", default=getattr(cfg, "CALIB_ROBOT_POSTURAS", "calib_posturas.json"))
+    ap.add_argument("posturas", nargs="?", default=getattr(cfg, "CALIB_ROBOT_POSTURAS", "calibraciones/datos/calib_posturas.json"))
     ap.add_argument("--mapa", action="store_true", help="tabla de distancias para J4 × J5 (J6 = 0)")
     a = ap.parse_args()
     cad = cargar_cadena(cfg.RUTA_XML, verbose=False)

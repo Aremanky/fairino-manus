@@ -76,7 +76,7 @@ def main():
     if not lista:
         sys.exit("No hay planes guardados (diagnosticos/plan_*.npz).")
     T_cam = None
-    ruta_cal = os.path.join(RAIZ, G.get("CALIB_ROBOT_ARCHIVO", "camara_robot.json"))
+    ruta_cal = os.path.join(RAIZ, G.get("CALIB_ROBOT_ARCHIVO", "calibraciones/datos/camara_robot.json"))
     if os.path.exists(ruta_cal):
         from skill_shield.autonomo.calibracion import cargar
         T_cam = cargar(ruta_cal)["T_mundo_cam"]

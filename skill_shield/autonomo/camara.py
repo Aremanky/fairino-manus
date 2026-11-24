@@ -71,8 +71,8 @@ def _parsear():
     if args.mxid is None:
         args.mxid = getattr(cfg, "AUTONOMO_CAM_A_MXID" if a else "AUTONOMO_CAM_MXID", None)
     if args.calibracion is None:
-        args.calibracion = (getattr(cfg, "AUTONOMO_CAM_A_CALIB_ARCHIVO", "camara_a_robot.json") if a
-                            else getattr(cfg, "CALIB_ROBOT_ARCHIVO", "camara_robot.json"))
+        args.calibracion = (getattr(cfg, "AUTONOMO_CAM_A_CALIB_ARCHIVO", "calibraciones/datos/camara_a_robot.json") if a
+                            else getattr(cfg, "CALIB_ROBOT_ARCHIVO", "calibraciones/datos/camara_robot.json"))
     if args.escala_prof is None:
         args.escala_prof = float(getattr(cfg, "AUTONOMO_CAM_A_ESCALA_PROF" if a else "AUTONOMO_CAM_ESCALA_PROF",
                                          1.0) or 1.0)
@@ -113,7 +113,7 @@ def rol_de_mxid(cfg, mxid):
 def abrir_como_autonomo(cfg, rol, mxid, nombre="cámara", **kw):
     """(20-nov) La OAK abierta con el MISMO estéreo que usa el modo autónomo para ese rol (del mejor modo a «como
     siempre», _modos_estereo) y con la entrada de control para fijar el enfoque (camara_oak.fijar_enfoque). La usan
-    este proceso y lo que tiene que medir lo mismo que ve el robot (calibrar_escala_profundidad.py,
+    este proceso y lo que tiene que medir lo mismo que ve el robot (calibraciones/calibrar_escala_profundidad.py,
     diagnosticos/medir_pelota.py): la escala o el error medidos con otro modo del estéreo no valen para este.
     kw: el resto de crear_pipeline_oak (con_hd, rellenar_huecos…). Devuelve (dev o None, modo, último error)."""
     from skill_shield.vision.camara_oak import crear_pipeline_oak
@@ -232,7 +232,7 @@ def _grabar(dev, K, n, ruta_calib=None):
         profs.append(prof.copy())
         time.sleep(0.2)
     T = None
-    ruta_c = ruta_calib or getattr(cfg, "CALIB_ROBOT_ARCHIVO", "camara_robot.json")
+    ruta_c = ruta_calib or getattr(cfg, "CALIB_ROBOT_ARCHIVO", "calibraciones/datos/camara_robot.json")
     ruta_c = ruta_c if os.path.isabs(ruta_c) else os.path.join(raiz, ruta_c)
     if os.path.exists(ruta_c):
         from skill_shield.autonomo.calibracion import cargar

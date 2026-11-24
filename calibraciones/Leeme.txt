@@ -1,0 +1,138 @@
+CALIBRACIONES · Skill Shield Nivel 6 (FR5 + OrcaHand + OAK-D)
+=============================================================
+
+Qué hay aquí
+------------
+  calibrar_camara_robot.py         dónde está la cámara respecto al robot (cámara de cabeza o cámara A)
+  calibrar_extrinseca.py           dónde está una cámara respecto a otra (teleoperación)
+  calibrar_escala_profundidad.py   si la profundidad de la OAK-D mide de más o de menos
+  calibrar_manus.py                del guante MANUS a los dedos de la OrcaHand
+  datos/                           lo que guardan los scripts; lo lee el resto del programa (no se edita a mano)
+  tableros/                        los tableros ChArUco para imprimir
+
+Cómo se lanzan
+--------------
+  Desde la RAÍZ del repo y con el entorno del proyecto (source venv_nivel6/bin/activate), por ejemplo:
+      python calibraciones/calibrar_camara_robot.py --verificar
+  Antes, cierra Skill_Shield_Nivel_6.py y el modo autónomo: la cámara, el robot, la mano y el guante
+  tienen que estar libres.
+  Si quedan calibraciones antiguas en la raíz del repo, ./arrancar_nivel6.sh las mueve solo a datos/.
+
+Los dos tableros
+----------------
+  tableros/tablero_calib_robot.png   5x4 cuadros (marcadores 0-9). Cabe en la palma de la OrcaHand.
+                                     Es el de calibrar_camara_robot.py y, por defecto, el de
+                                     calibrar_escala_profundidad.py. Medidas reales en config.py
+                                     (CALIB_ROBOT_TABLERO).
+  tableros/tablero_charuco.png       7x5 cuadros (marcadores 0-16). Es el de calibrar_extrinseca.py.
+                                     No cabe en la palma.
+  Los dos usan el diccionario ArUco 4x4: por eso los marcadores de las herramientas empiezan en el 20.
+  Se imprimen al 100 % (sin «ajustar a página»), se mide un cuadro con calibre y se pegan PLANOS sobre
+  algo rígido. Para sacar otra copia: --generar-tablero en su script (se guarda en tableros/).
+
+
+1. calibrar_camara_robot.py · CÁMARA → ROBOT
+--------------------------------------------
+  Qué calcula: dónde está la cámara de cabeza (OAK-D B) respecto al FR5, en el marco del gemelo de
+  MuJoCo (T_mundo_cam). Con --camara a, lo mismo para la cámara A (la fija de la mesa). El tablero 5x4
+  va pegado en la palma y el robot se lo enseña a la cámara en unas 30 posturas.
+
+  Para qué lo usamos: para pasar lo que ve la cámara (herramientas con ArUco, pelotas, mapa de
+  obstáculos) a coordenadas del robot. Lo usan el modo autónomo, la grabación con objetos, el agarre
+  asistido y el gemelo de la web. Sin ella el robot ve las cosas pero no sabe dónde están.
+
+  Cuándo repetirla: si la cámara se mueve en su soporte o si --verificar da más de
+  CALIB_ROBOT_ERROR_MAX_MM (5 mm). Mover la peana no la estropea: la cámara y el robot van juntos.
+
+  Cómo:
+    python calibraciones/calibrar_camara_robot.py --auto              automática, con el pedal (P mantenida)
+    python calibraciones/calibrar_camara_robot.py --verificar         comprobarla en unas pocas posturas
+    python calibraciones/calibrar_camara_robot.py --repetir           rehacerla con las posturas guardadas
+    python calibraciones/calibrar_camara_robot.py --camara a --auto   la de la cámara A
+    Otros modos (--manual, --manual --sliders, --recalcular, --sin…): --help.
+
+  Guarda en datos/: camara_robot.json (la de la cámara A, camara_a_robot.json), calib_posturas*.json
+  (las posturas), calib_muestras*.json (las muestras, para --recalcular) y *_verificacion.json (la
+  última comprobación). El modo autónomo deja al lado camara_robot.correccion.json: la corrección que
+  va midiendo con el propio brazo, que se olvida sola al volver a calibrar.
+
+  Seguridad: el robot solo se mueve con el pedal, despacio (CALIB_ROBOT_VEL_MAX_DEG_S), y cada trayecto
+  se comprueba antes contra el soporte, la cabeza, la mesa y el suelo.
+
+
+2. calibrar_extrinseca.py · CÁMARA ↔ CÁMARA
+-------------------------------------------
+  Qué calcula: dónde está la cámara B respecto a la A (p_A = R_ab · p_B + t_ab), con el tablero 7x5
+  donde lo vean LAS DOS a la vez (orientado a medio camino entre las dos). Sin tablero, con
+  --metodo cuerpo: moviendo la muñeca delante de las dos cámaras.
+
+  Para qué lo usamos: en la teleoperación, para juntar lo que ven las dos cámaras del brazo del
+  operario (hombro, codo y muñeca), de forma que el FR5 lo siga aunque una de ellas lo pierda. En
+  «Grabación» se usa la pareja A↔C. No dice dónde está el robot: eso es calibrar_camara_robot.py.
+
+  Cuándo: casi nunca a mano. Al pulsar [A] en la teleoperación se comprueba sola con tu cuerpo y, si
+  una cámara se ha movido, se recalcula sola (TELEOP_FR5_AUTO_EXTRINSECA) y deja la anterior como
+  copia .bak_*. Con el tablero: al volver a montar las cámaras o si la automática no sale.
+
+  Cómo (ESPACIO en 12 o más posiciones distintas del tablero, C para calcular y guardar, Q para salir):
+    python calibraciones/calibrar_extrinseca.py                    A↔B con el tablero 7x5
+    python calibraciones/calibrar_extrinseca.py --metodo cuerpo    sin tablero
+    python calibraciones/calibrar_extrinseca.py --mxid-b <MxId de C> --salida camaras_extrinsecas_ac.json
+
+  Guarda en datos/: camaras_extrinsecas.json (la A↔C, camaras_extrinsecas_ac.json). Un nombre suelto
+  en --salida va siempre a datos/.
+
+
+3. calibrar_escala_profundidad.py · ESCALA DE LA PROFUNDIDAD
+------------------------------------------------------------
+  Qué calcula: compara la distancia que da el estéreo de la OAK-D con la del tablero visto en la
+  imagen en color (su tamaño real se conoce) y saca el factor que corrige la profundidad.
+
+  Para qué lo usamos: la profundidad puede salir un tanto por ciento larga o corta (calibración de
+  fábrica, golpes, temperatura); a ~1 m son 1-2 cm y la mano iría a coger «más lejos» de donde está
+  el objeto. Afecta a todo lo que mide distancias con la cámara: pelotas, herramientas y mapa.
+
+  Cuándo: al cambiar el modo del estéreo de una cámara (AUTONOMO_CAM_MONO_800P…) o si las distancias
+  no cuadran.
+
+  Cómo: mueve el tablero, plano y despacio, por la zona de trabajo (de ~0,5 a ~1,3 m), por el centro y
+  por los lados de la imagen; Q o Esc para terminar.
+    python calibraciones/calibrar_escala_profundidad.py                      cámara de cabeza, tablero 5x4
+    python calibraciones/calibrar_escala_profundidad.py --mxid <MxId de A>   la cámara A
+    python calibraciones/calibrar_escala_profundidad.py --tablero 7,5,LADO,MARCADOR
+        con el tablero 7x5 (LADO y MARCADOR medidos con calibre, en metros): el 5x4 solo se detecta
+        hasta ~0,7 m y el 7x5 llega a la distancia de trabajo (~1 m).
+
+  Guarda: nada en datos/. Al final escribe el valor de AUTONOMO_CAM_ESCALA_PROF (o de
+  AUTONOMO_CAM_A_ESCALA_PROF) y hay que copiarlo a config.py.
+
+
+4. calibrar_manus.py · GUANTE MANUS → ORCAHAND
+----------------------------------------------
+  Qué calcula: con 9 poses de tu mano (abierta, puño, abanico, pulgar…) mide el cero de cada sensor
+  del guante, el sentido de cada canal y el desfase del pulgar.
+
+  Para qué lo usamos: para que los dedos de la OrcaHand copien los tuyos en la teleoperación y en la
+  grabación con guante (FUENTE_DEDOS = "manus").
+
+  Cuándo: con un operario nuevo, al cambiar de guante o si la mano del robot no cierra como la tuya.
+
+  Cómo (~2 min, con el programa principal cerrado):
+    python calibraciones/calibrar_manus.py                guiada
+    python calibraciones/calibrar_manus.py --ver          tus 20 ángulos en vivo
+    python calibraciones/calibrar_manus.py --probar       tus ángulos y lo que haría el robot
+    python calibraciones/calibrar_manus.py --recalcular   rehace el mapeo con las poses ya grabadas
+                                                          (sin guante; deja copia de la anterior)
+
+  Guarda en datos/: manus_calibracion.json.
+
+
+Otras calibraciones que no están en esta carpeta
+------------------------------------------------
+  orca_mano/calibration.yaml          topes de los motores de la OrcaHand. La hace el SDK de la mano
+                                      (orca_core), no un script de aquí; la lee
+                                      skill_shield/hardware/orca_hardware.py.
+  diagnosticos/identificar_carga.py   masa y centro de masas de lo que cuelga de la brida (mano +
+                                      adaptador) → FR5_CARGA_* en config.py. Sin ella la controladora
+                                      salta con colisiones falsas.
+  diagnosticos/ajustar_gemelo.py      que el gemelo coincida con el robot montado (giro de la base).

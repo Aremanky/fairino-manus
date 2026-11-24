@@ -2,8 +2,8 @@
 """
 Pruebas de cuRobo con el FR5 + OrcaHand, SIN mover el robot (17-nov). En el PC con la GPU:
 
-    python probar_curobo.py               # todo
-    python probar_curobo.py --n 50        # más tramos al azar
+    python diagnosticos/probar_curobo.py               # todo
+    python diagnosticos/probar_curobo.py --n 50        # más tramos al azar
 
 1. La GPU, PyTorch y cuRobo.
 2. El URDF tiene la misma cinemática que la cadena del proyecto.
@@ -19,7 +19,7 @@ import time
 
 import numpy as np
 
-RAIZ = os.path.dirname(os.path.abspath(__file__))
+RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # raíz del repo (este script está en diagnosticos/)
 sys.path.insert(0, RAIZ)
 sys.path.insert(0, os.path.join(RAIZ, "tests"))
 
@@ -94,7 +94,7 @@ def main():
     titulo("4. El plan real del 17-nov (pelota + dejada)")
     from skill_shield.autonomo import calibracion as C
     d = np.load(os.path.join(RAIZ, "tests", "datos", "plan_pelota_pulgar_17nov.npz"))
-    T = C.cargar(os.path.join(RAIZ, "camara_robot.json"))["T_mundo_cam"]
+    T = C.cargar(os.path.join(RAIZ, G.get("CALIB_ROBOT_ARCHIVO", "calibraciones/datos/camara_robot.json")))["T_mundo_cam"]
     for nombre, modo in (("propio", "propio"), ("cuRobo", "curobo")):
         p = TA.Planificador(cad, dict(G, AUTONOMO_TAREA_PLANIFICADOR=modo), T)
         p.poner_mapa(d["mapa"], float(d["res"]), [(e[:3], e[3]) for e in d["excluir"]])

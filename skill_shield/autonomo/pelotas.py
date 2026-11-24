@@ -340,7 +340,7 @@ class DetectorPelotas(ConCorreccion):
     def __init__(self, cfg, raiz, n_estable=5, olvido_s=2.0, salto_m=0.08):
         g = cfg if isinstance(cfg, dict) else {k: getattr(cfg, k) for k in dir(cfg) if k.isupper()}
         self.cat = catalogo(g)
-        ruta = g.get("CALIB_ROBOT_ARCHIVO", "camara_robot.json")
+        ruta = g.get("CALIB_ROBOT_ARCHIVO", "calibraciones/datos/camara_robot.json")
         self.ruta_calib = ruta if os.path.isabs(ruta) else os.path.join(raiz, ruta)
         self.n_estable = int(g.get("AUTONOMO_PELOTAS_N_ESTABLE", n_estable))
         self.olvido_s = float(g.get("AUTONOMO_PELOTAS_OLVIDO_S", olvido_s))

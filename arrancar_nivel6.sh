@@ -3,6 +3,7 @@
 #  Skill Shield Nivel 6 — ARRANCAR. Un solo script (18-nov): antes también instalar_curobo.sh e
 #  instalar_toppra.sh. Cada vez que se lanza COMPRUEBA y solo instala lo que falte (lo que ya está
 #  no se toca):
+#    0. calibraciones de antes del 24-nov que sigan en la raíz → calibraciones/datos/;
 #    1. submódulo de los táctiles (orca_core_touch);
 #    2. entorno virtual venv_nivel6 (Python 3.12) con requirements.txt (se vuelve a pasar si cambia);
 #    3. cuRobo V2 (NVIDIA): PyTorch para la GPU (RTX 5080, sm_120), cuRobo en ./externos/curobo
@@ -37,7 +38,7 @@ for a in "$@"; do
         --instalar) ARRANCAR=0 ;;
         --probar) PROBAR=1 ;;
         --tests-curobo) PROBAR=1; TESTS_CUROBO=1 ;;
-        -h|--help) sed -n '3,18p' "$0" | sed -E 's/^# ? ?//'; exit 0 ;;
+        -h|--help) sed -n '3,19p' "$0" | sed -E 's/^# ? ?//'; exit 0 ;;
         *) echo "Opción desconocida: $a   (ayuda: $0 --help)"; exit 2 ;;
     esac
 done
@@ -86,8 +87,34 @@ PY
 }
 campo() { echo "$ESTADO" | awk -F'\t' -v k="$1" -v n="$2" '$1 == k {print $n}'; }
 
+# ─────────────────────────────── 0. calibraciones en su carpeta ───────────────────────────────
+# (24-nov) Los resultados de las calibraciones viven en calibraciones/datos/. Los que sigan en la raíz (los que
+# no estaban en git: muestras, verificaciones, la autocorrección, la extrínseca A↔C, copias…) se mueven allí. Si ya hay uno
+# con el mismo nombre en calibraciones/datos/, no se toca ninguno y se avisa (manda el de calibraciones/datos/).
+echo "0) Calibraciones (calibraciones/datos/)"
+VIEJAS=()
+for f in camara_robot.* camara_robot_verificacion.* camara_a_robot.* camara_a_robot_verificacion.* \
+         calib_posturas.json* calib_posturas_a.json* calib_muestras.json* calib_muestras_a.json* \
+         camaras_extrinsecas*.json* manus_calibracion.json*; do
+    [ -f "$f" ] && VIEJAS+=("$f")
+done
+if [ ${#VIEJAS[@]} -eq 0 ]; then
+    ok "en su sitio"
+elif [ $COMPROBAR -eq 1 ]; then
+    aviso "en la raíz (se moverán a calibraciones/datos/ al arrancar): ${VIEJAS[*]}"
+else
+    mkdir -p calibraciones/datos
+    for f in "${VIEJAS[@]}"; do
+        if [ -e "calibraciones/datos/$f" ]; then
+            aviso "$f está en la raíz y en calibraciones/datos/: se usa el de calibraciones/datos/ (borra el otro)"
+        else
+            mv "$f" calibraciones/datos/ && ok "$f → calibraciones/datos/"
+        fi
+    done
+fi
+
 # ─────────────────────────────── 1. submódulo de los táctiles ───────────────────────────────
-echo "1) Submódulo de los táctiles (orca_core_touch, lo usa puente_tactil.py)"
+echo "1) Submódulo de los táctiles (orca_core_touch, lo usa skill_shield/hardware/puente_tactil.py)"
 if [ -n "$(ls -A orca_core_touch 2>/dev/null)" ]; then
     ok "ya está"
 elif [ $COMPROBAR -eq 1 ]; then
@@ -232,7 +259,7 @@ if [ $PROBAR -eq 1 ] || [ $PROBAR_CUROBO -eq 1 ]; then
         fi
         "$PY" -m pytest -q tests/test_curobo.py tests/test_mapa_tsdf.py tests/test_comprobador_lote.py \
             || aviso "algún test del proyecto falla"
-        "$PY" probar_curobo.py || aviso "probar_curobo.py ha fallado"
+        "$PY" diagnosticos/probar_curobo.py || aviso "probar_curobo.py ha fallado"
     elif [ $PROBAR -eq 1 ]; then
         aviso "cuRobo no está: no hay nada que probar"
     fi

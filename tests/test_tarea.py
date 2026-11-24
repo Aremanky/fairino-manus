@@ -374,7 +374,7 @@ def test_marcadores_cerca_mirando_a_la_camara_llega_de_lado(cadena, pl, pos):
     """Caso real del 11-nov: marcadores a 35-50 cm de la cámara de cabeza, mirándola. De frente la
     muñeca no da (J4/J5 fuera de límites); inclinándose sí."""
     from skill_shield.autonomo.calibracion import cargar
-    cam = cargar(os.path.join(RAIZ, "camara_robot.json"))["T_mundo_cam"][:3, 3]
+    cam = cargar(os.path.join(RAIZ, "calibraciones", "datos", "camara_robot.json"))["T_mundo_cam"][:3, 3]
     m = [_marcador(cam - np.array(p), p) for p in pos]
     plan = pl.planificar(Q0, *m)
     assert np.allclose(plan.q_final, Q0) and max(pl.inclinaciones) > 0
@@ -772,7 +772,7 @@ def test_caso_real_17nov_el_pulgar_no_toca_la_mesa(cadena):
     pedida y los tramos van por arriba."""
     from skill_shield.autonomo import calibracion as C
     d = np.load(os.path.join(RAIZ, "tests", "datos", "plan_pelota_pulgar_17nov.npz"))
-    pl = TA.Planificador(cadena, G, C.cargar(os.path.join(RAIZ, "camara_robot.json"))["T_mundo_cam"])
+    pl = TA.Planificador(cadena, G, C.cargar(os.path.join(RAIZ, "calibraciones", "datos", "camara_robot.json"))["T_mundo_cam"])
     pl.poner_mapa(d["mapa"], float(d["res"]), [(e[:3], e[3]) for e in d["excluir"]])
     plan = pl.planificar_pelota(d["q"], d["T"][0], 0.07, d["T"][1])
     b = d["T"][0][:3, 3]

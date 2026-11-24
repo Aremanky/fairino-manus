@@ -35,7 +35,7 @@ una pose de contacto fija. Todo eso se ha QUITADO. Ahora cada actuador k es:
     q_k = q_ref_k + signo_k · ganancia_k · (θ_k − cero_k)          (θ en rad)
 
   · θ_k      tu ángulo (MANUS ergonomics, ya calibrado por MANUS para tu mano).
-  · cero_k   tu ángulo con la mano ABIERTA (pose "abierta" de calibrar_manus.py): quita el
+  · cero_k   tu ángulo con la mano ABIERTA (pose "abierta" de calibraciones/calibrar_manus.py): quita el
              desfase de cada sensor (p. ej. tu DIP del meñique marca 24° con el dedo recto).
   · q_ref_k  lo que hace el robot en esa pose: dedos RECTOS (mcp −4°…−8°, pip 0: así
              quedan rectos en el MJCF), dedos JUNTOS (abducciones de "juntos"), pulgar
@@ -67,8 +67,8 @@ LO QUE NO SE PUEDE COPIAR 1:1 (y antes se "fingía" con las poses forzadas):
     Si quieres compensarlo, sube la ganancia de esa articulación en config.MANUS_GANANCIA
     (deja de ser 1:1 en ella, pero sigue siendo continuo: nada salta a una pose).
 
-CALIBRACIÓN: calibrar_manus.py (9 poses, ~2 min) guarda "version": 4. Una calibración
-v3 con "poses_crudas" se convierte sola al cargarla (python calibrar_manus.py --recalcular
+CALIBRACIÓN: calibraciones/calibrar_manus.py (9 poses, ~2 min) guarda "version": 4. Una calibración
+v3 con "poses_crudas" se convierte sola al cargarla (python calibraciones/calibrar_manus.py --recalcular
 para guardarla ya convertida). Sin calibración: ceros típicos (funciona, pero calibra).
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -105,7 +105,7 @@ v7 (15-oct) — HÁPTICA REAL: SENSORES DE LA ORCAHAND TOUCH FÍSICA → VIBRACI
 config.MANUS_HAPTICA_FUENTE = "real" (por defecto) | "sim" | "auto":
   · "real": cada dedo del guante vibra según la fuerza que mide la YEMA del mismo dedo de
     la mano FÍSICA (sensores táctiles de la OrcaHand Touch). La simulación no interviene.
-    Los sensores los lee puente_tactil.py en un proceso aparte (con el orca_core nuevo, ver
+    Los sensores los lee skill_shield/hardware/puente_tactil.py en un proceso aparte (con el orca_core nuevo, ver
     su cabecera); GuanteManus lo lanza solo y recibe las fuerzas por UDP local
     (skill_shield/hardware/tactil_real.py). Sin sensores → el guante no vibra.
   · "sim": como en v6, contactos de la mano SIMULADA (clase SensorTactil).
@@ -119,7 +119,7 @@ FÍSICO de tu mano; orca_core los nombra en otro orden que tu cableado (15-oct).
 Por defecto solo vibra mientras el guante manda (aplicar = True); MANUS_HAPTICA_SIEMPRE =
 True vibra siempre (p. ej. al reproducir un episodio en la mano física).
 Nuevo cero de los sensores (la mano robótica sin tocar nada): guante.tactil.cero().
-Para probar sin el programa principal: python probar_haptica_tactil.py
+Para probar sin el programa principal: python diagnosticos/probar_haptica_tactil.py
 """
 import json
 import math
@@ -144,7 +144,7 @@ MANUS_LADO        = _p("MANUS_LADO", "derecho")        # mano que se teleopera
 MANUS_SDK_RUTA    = _p("MANUS_SDK_RUTA", os.path.join(
     os.path.dirname(os.path.abspath(_cfg.__file__)), "MANUS_Core_3.2.1_SDK_Linux", "Python"))
 MANUS_CALIBRACION = _p("MANUS_CALIBRACION", os.path.join(
-    os.path.dirname(os.path.abspath(_cfg.__file__)), "manus_calibracion.json"))
+    os.path.dirname(os.path.abspath(_cfg.__file__)), "calibraciones", "datos", "manus_calibracion.json"))
 MANUS_TIMEOUT_S   = float(_p("MANUS_TIMEOUT_S", 0.3))  # sin datos más tiempo → dedos quietos
 MANUS_TAU_S       = float(_p("MANUS_TAU_S", 0.025))    # suavizado (constante de tiempo)
 MANUS_HAPTICA     = bool(_p("MANUS_HAPTICA", True))
@@ -174,7 +174,7 @@ MANUS_TACTIL_MEDIDA  = str(_p("MANUS_TACTIL_MEDIDA", "normal")).lower()  # "norm
 MANUS_TACTIL_F_ON    = float(_p("MANUS_TACTIL_F_ON", 0.3))       # N: aquí empieza a vibrar (el sensor da 0.1 N/paso)
 MANUS_TACTIL_F_MAX   = _p("MANUS_TACTIL_F_MAX", 20.0)            # N al 100 %: número o {"pulgar": 20.0, ...}
 MANUS_TACTIL_VIBRACION_MIN = float(_p("MANUS_TACTIL_VIBRACION_MIN", 0.15))  # vibración a F_ON: la mínima
-                                                                # que notas (búscala con probar_haptica_tactil.py --umbral)
+                                                                # que notas (búscala con diagnosticos/probar_haptica_tactil.py --umbral)
 MANUS_TACTIL_GAMMA   = float(_p("MANUS_TACTIL_GAMMA", 1.0))      # 1.0 = lineal entre F_ON y F_MAX
 MANUS_HAPTICA_SIEMPRE = bool(_p("MANUS_HAPTICA_SIEMPRE", False))  # True: vibra aunque el guante no mande
 DEDOS_TACTIL = ("thumb", "index", "middle", "ring", "pinky")     # nombres de los sensores en orca_core
@@ -372,7 +372,7 @@ def poses_barrido_pulgar(medidas):
 
 def construir_mapeo(medidas, modo=None):
     """medidas: {pose: array(20) grados} → (mapeo {ctrl: {...}}, informe {ctrl: texto}).
-    modo: "cierre" | "1:1" (None = config.MANUS_MAPEO). Lo usan calibrar_manus.py y
+    modo: "cierre" | "1:1" (None = config.MANUS_MAPEO). Lo usan calibraciones/calibrar_manus.py y
     cargar_calibracion (que lo rehace con las poses crudas guardadas)."""
     modo = modo or MANUS_MAPEO
     medidas = {p: np.asarray(a, dtype=float) for p, a in medidas.items()}
@@ -569,12 +569,12 @@ def cargar_calibracion(ruta=MANUS_CALIBRACION, verbose=True):
                           f"({d.get('fecha', '?')}) · mapeo guardado (sin poses crudas)")
             elif verbose:
                 print(f"⚠️  [MANUS] {os.path.basename(ruta)} es antigua y no tiene poses crudas: "
-                      f"ceros típicos. Ejecuta  python calibrar_manus.py")
+                      f"ceros típicos. Ejecuta  python calibraciones/calibrar_manus.py")
         except Exception as e:
             print(f"⚠️  [MANUS] No se pudo leer {ruta} ({e}): uso ceros típicos.")
     elif verbose:
         print("⚠️  [MANUS] Sin calibración (manus_calibracion.json): ceros típicos. "
-              "Ejecuta  python calibrar_manus.py  (2 min).")
+              "Ejecuta  python calibraciones/calibrar_manus.py  (2 min).")
     return mapeo
 
 
@@ -608,7 +608,7 @@ class GuanteManus:
     """Conexión con MANUS (hilo propio), últimos ángulos de la mano y vibración."""
 
     def __init__(self, modo=MANUS_MODO, lado=MANUS_LADO, tactil=True, fuente=None):
-        """tactil=False: no lanza el puente de los sensores físicos (p. ej. calibrar_manus.py).
+        """tactil=False: no lanza el puente de los sensores físicos (p. ej. calibraciones/calibrar_manus.py).
         fuente: "real" | "sim" | "auto" (None = config.MANUS_HAPTICA_FUENTE)."""
         self.modo = modo
         self.lado = lado

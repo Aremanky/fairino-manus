@@ -38,7 +38,7 @@ def planificador():
         G = {k: getattr(config, k) for k in dir(config) if k.isupper()}
         G["AUTONOMO_ESCENA_FIJA_ARCHIVO"] = os.path.join(DATOS, "escena_fija_23nov.json")
         G["AUTONOMO_TAREA_PLANIFICADOR"] = "propio"
-        T_cab = cargar(os.path.join(RAIZ, "camara_robot.json"))["T_mundo_cam"]
+        T_cab = cargar(os.path.join(RAIZ, "calibraciones", "datos", "camara_robot.json"))["T_mundo_cam"]
         yield TA, TA.Planificador(cargar_cadena(G["RUTA_XML"], verbose=False), G, T_cab)
     finally:
         os.environ["SKILL_SHIELD_ESCENA_FIJA"] = "0"

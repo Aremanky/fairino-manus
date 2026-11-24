@@ -1,0 +1,9 @@
+# Entorno de ENTRENAMIENTO del YOLO (venv_yolo), aparte de venv_nivel6:
+# ultralytics instala opencv-python, y en venv_nivel6 eso pisa opencv-contrib-python y desaparece cv2.aruco.
+# PyTorch para la RTX 5080 se instala antes, desde el índice de CUDA 13 (lo hace instalar.sh).
+ultralytics>=8.4          # YOLO26 (yolo26s-seg.pt, yolo26m-seg.pt…)
+pycocotools               # máscaras de PACO (RLE)
+trimesh                   # mallas de HANDAL (si el mango hay que proyectarlo)
+pyyaml
+gdown                     # HANDAL desde Google Drive
+roboflow                  # datasets de Roboflow Universe

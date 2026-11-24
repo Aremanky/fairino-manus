@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""
+Dataset de DETECCIÓN (cajas, formato YOLO: «clase xc yc w h») → dataset de SEGMENTACIÓN con SAM 2:
+cada caja se le pasa a SAM como pista y su máscara pasa a ser el polígono. Sirve para METU-ALET, el de
+herramientas de obra o cualquier proyecto de Roboflow que solo tenga cajas (exportado en «YOLOv8»).
+
+    python cajas_a_mascaras.py <carpeta_con_cajas> <carpeta_salida>
+    python convertir_yolo_seg.py <carpeta_salida> --fuente alet        # y luego, a nuestras clases
+
+La salida conserva la estructura y el data.yaml de la entrada. Las máscaras de SAM con cajas suelen ser
+buenas, pero REVÍSALAS (revisar.py) antes de entrenar con ellas. Estas fuentes no traen el mango:
+completadlo con preetiquetar.py --completar-mango.
+"""
+import argparse
+import glob
+import os
+import shutil
+
+import cv2
+import numpy as np
+
+from comun import mascara_a_poligono
+
+EXT = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("entrada")
+    ap.add_argument("salida")
+    ap.add_argument("--sam", default="sam2.1_b.pt", help="modelo SAM de Ultralytics (se baja solo)")
+    a = ap.parse_args()
+    from ultralytics import SAM
+    sam = SAM(a.sam)
+
+    for y in glob.glob(os.path.join(a.entrada, "*.y*ml")):
+        os.makedirs(a.salida, exist_ok=True)
+        shutil.copyfile(y, os.path.join(a.salida, os.path.basename(y)))
+    n = 0
+    for txt in sorted(glob.glob(os.path.join(a.entrada, "**", "labels", "**", "*.txt"), recursive=True)):
+        base = os.path.splitext(txt.replace(os.sep + "labels" + os.sep, os.sep + "images" + os.sep, 1))[0]
+        img = next((base + e for e in EXT + tuple(x.upper() for x in EXT) if os.path.exists(base + e)), None)
+        if img is None:
+            continue
+        rel_lab = os.path.relpath(txt, a.entrada)
+        rel_img = os.path.relpath(img, a.entrada)
+        os.makedirs(os.path.dirname(os.path.join(a.salida, rel_lab)), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.join(a.salida, rel_img)), exist_ok=True)
+        shutil.copyfile(img, os.path.join(a.salida, rel_img))
+        im = cv2.imread(img)
+        h, w = im.shape[:2]
+        clases, cajas = [], []
+        with open(txt) as f:
+            for l in f:
+                v = l.split()
+                if len(v) == 5:
+                    c, xc, yc, bw, bh = int(float(v[0])), *map(float, v[1:])
+                    clases.append(c)
+                    cajas.append([(xc - bw / 2) * w, (yc - bh / 2) * h, (xc + bw / 2) * w, (yc + bh / 2) * h])
+        lineas = []
+        if cajas:
+            r = sam(img, bboxes=cajas, verbose=False)[0]
+            mascaras = r.masks.data.cpu().numpy() if r.masks is not None else []
+            for c, m in zip(clases, mascaras):
+                if m.shape != (h, w):
+                    m = cv2.resize(m.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+                p = mascara_a_poligono(m)
+                if p is not None:
+                    lineas.append(f"{c} " + " ".join(f"{v:.6f}" for v in p))
+        with open(os.path.join(a.salida, rel_lab), "w") as f:
+            f.write("\n".join(lineas) + ("\n" if lineas else ""))
+        n += 1
+        if n % 100 == 0:
+            print(f"   {n} imágenes", flush=True)
+    print(f"✅ {n} imágenes con máscaras de SAM en {a.salida}")
+
+
+if __name__ == "__main__":
+    main()

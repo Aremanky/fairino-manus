@@ -24,6 +24,9 @@ VISOR_VISTA_INICIAL = dict(azimut=90.0, elevacion=-20.0, distancia=1.1, mirar=(0
 # Ruta al logo IDI / Grupo Elecnor (Apuntando a la nueva carpeta Nivel6)
 RUTA_LOGO = os.path.join(_BASE_DIR, "orcahand_description-main", "v2", "I+D+I_DENOMIN_GRUPO_RGB.png")
 
+# Calibraciones: los scripts están en calibraciones/ (ver calibraciones/Leeme.txt) y sus resultados en
+# calibraciones/datos/. Las rutas *_ARCHIVO, *_POSTURAS y *_MUESTRAS de abajo son relativas a la raíz del repo.
+
 # ── PARÁMETROS DE LA CÁMARA OAK-D Y PROYECCIÓN ────────────────────────────────
 # Formato 4:3 (SENSOR COMPLETO). El sensor de color de la OAK-D (IMX378) es 4:3.
 # Al pedir 1080p (16:9) el firmware RECORTA franjas arriba y abajo: se pierde ~24 %
@@ -524,7 +527,7 @@ CODO_COMPATIBLE   = True
 # ══════════════════════════════════════════════════════════════════════════════
 # FLUIDEZ (30-sep) — MANO FÍSICA SIN TROMPICONES Y CÁMARA MÁS FLUIDA
 # ══════════════════════════════════════════════════════════════════════════════
-# ── Mano física (orca_hardware.py) ──
+# ── Mano física (skill_shield/hardware/orca_hardware.py) ──
 # La cámara da un objetivo nuevo solo ~10-15 veces por segundo. Antes se mandaba tal
 # cual a los servos DESDE el bucle de la cámara → tirón y parada en cada fotograma
 # (la "escalera" del PASO 7.1, pero en la mano real). Ahora un hilo propio manda un
@@ -571,7 +574,7 @@ CAM_A_MXID          = "1944301001AAFA1700"    # MxId de la cámara principal (No
 CAM_C_MXID          = None                    # 16-nov: TERCERA OAK-D (modo GRABACION): con la A, las cámaras cruzadas de la
                                               # teleoperación; la B queda de cámara de cabeza. None = sin C (teleoperación con la A sola)
 CAM_B_MXID          = "1944301081B5FA4800"    # MxId de la cámara secundaria. Se ven con:  python -c "from skill_shield.vision.multicamara import listar_camaras as l; print(l())"
-EXTRINSECAS_ARCHIVO = "camaras_extrinsecas.json"   # lo genera calibrar_extrinseca.py
+EXTRINSECAS_ARCHIVO = "calibraciones/datos/camaras_extrinsecas.json"   # lo genera calibraciones/calibrar_extrinseca.py
 MULTICAM_SYNC_MAX_S = 0.04    # máx. desfase (s) entre el fotograma de A y el de B para emparejarlos
 MULTICAM_MOSTRAR_B  = True    # ventana de depuración "Camara B"
 CAM_A_IR_MA         = 800     # proyector IR de la A (mA, máx. ~1200 en la OAK-D Pro; 0 = apagado)
@@ -634,7 +637,7 @@ Q2_MIN               = -0.5    # rad: el hombro del robot solo se pasa un poco d
 RETARGET_FIEL        = True
 
 # ═══════════════════════════════════════════════════════════════════════════
-# GUANTES MANUS (skill_shield/mano/manus_guante.py · calibrar_manus.py)  — v2, 8-oct
+# GUANTES MANUS (skill_shield/mano/manus_guante.py · calibraciones/calibrar_manus.py)  — v2, 8-oct
 # ═══════════════════════════════════════════════════════════════════════════
 # SUSTITUYE al bloque "GUANTES MANUS" actual de config.py (desde FUENTE_DEDOS hasta el
 # final de MANUS_GANANCIA_FLEXION). Lo que cambia respecto al anterior:
@@ -646,7 +649,7 @@ MANUS_MODO   = "integrado"  # "integrado" = sin Dashboard (CIERRA el Dashboard a
                             #   queda ocupado) | "local" = MANUS Core en este PC | "remoto"
 MANUS_LADO   = "derecho"    # mano que se teleopera
 MANUS_SDK_RUTA = os.path.join(_BASE_DIR, "MANUS_Core_3.2.1_SDK_Linux", "Python")
-MANUS_CALIBRACION = os.path.join(_BASE_DIR, "manus_calibracion.json")   # lo genera calibrar_manus.py
+MANUS_CALIBRACION = os.path.join(_BASE_DIR, "calibraciones", "datos", "manus_calibracion.json")   # lo genera calibraciones/calibrar_manus.py
 MANUS_TIMEOUT_S = 0.3       # s sin datos del guante → los dedos se quedan donde estén
 MANUS_TAU_S     = 0.025     # s: suavizado de los dedos (0 = sin suavizado)
 # Vibración: fuerza de contacto en cada yema de la OrcaHand (simulación) → ese dedo del guante
@@ -673,7 +676,7 @@ MANUS_GANANCIA = {
 #   · el pulgar no se alejaba de la palma ni se apoyaba en ella
 #   · el corazón no se movía hacia los lados (estaba fijo a 0 en tres sitios)
 #   · las abducciones de la mano real iban al revés (cambio mío de la 1ª ronda)
-# Después: python calibrar_manus.py  (hay 2 poses nuevas del corazón).
+# Después: python calibraciones/calibrar_manus.py  (hay 2 poses nuevas del corazón).
 
 # 1) Límites de seguridad de la mano = rango COMPLETO del modelo (ctrlrange del MJCF), que es
 #    también el ROM del SDK de la mano real. Antes: flexiones desde 0 (en el MJCF, con 0° los
@@ -718,7 +721,7 @@ MANUS_RANGO_ROBOT = {
     16: (0.0, 1.867),      # IP:  recto → doblado del todo
 }
 
-# 3) Mano física (orca_hardware.py)
+# 3) Mano física (skill_shield/hardware/orca_hardware.py)
 ORCA_HW_SIGNOS             = {}      # tu mano va en el MISMO sentido que el sim (comprobado)
 ORCA_HW_CIERRE_COMPLETO    = True    # "cerrado" del sim → tope de flexión calibrado + sobrecarrera
 ORCA_HW_SOBRECARRERA_DEG   = 4.0     # grados más allá del tope de flexión (empuja con max_current)
@@ -743,7 +746,7 @@ SUAVE_ACEL_MUNECA_ARCTOS = 15.0   # rad/s²
 #   "auto" → real si llegan datos de los sensores; si no, la simulación
 MANUS_HAPTICA_FUENTE = "real"
 
-# Puente de los sensores (puente_tactil.py, proceso aparte con el orca_core NUEVO).
+# Puente de los sensores (skill_shield/hardware/puente_tactil.py, proceso aparte con el orca_core NUEVO).
 ORCA_TACTIL_ACTIVO    = True                                     # GuanteManus lo lanza y lo cierra solo
 ORCA_TACTIL_CORE_RUTA = os.path.join(_BASE_DIR, "orca_core_touch")   # git clone ... orca_core_touch
 ORCA_TACTIL_PUERTO    = "auto"            # o el puerto de los sensores, p. ej. "/dev/ttyACM0"
@@ -769,7 +772,7 @@ MANUS_TACTIL_F_ON   = 0.3                 # N: aquí empieza a vibrar
 MANUS_TACTIL_F_MAX  = 20.0                # N: aquí llega al máximo (y se queda); o por dedo físico:
 # MANUS_TACTIL_F_MAX = {"pulgar": 20.0, "indice": 20.0, "corazon": 20.0, "anular": 20.0, "menique": 20.0}
 MANUS_TACTIL_VIBRACION_MIN = 0.02         # vibración a 0.3 N: la MÍNIMA que notas. Búscala con
-                                          #   python probar_haptica_tactil.py --umbral
+                                          #   python diagnosticos/probar_haptica_tactil.py --umbral
 MANUS_TACTIL_GAMMA  = 1.0                 # 1.0 = lineal
 MANUS_VIBRACION_MAX = 1.0
 MANUS_HAPTICA_TAU_SUBIDA = 0.02           # s: al apretar responde casi al instante
@@ -1043,8 +1046,8 @@ TELEOP_FR5_DEBUG = True          # imprime estado/rama/error cada DEBUG_ANGULOS_
 #  · TELEOP_FR5_AUTO_EXTRINSECA: al pulsar [A] se comprueba que A y B coinciden con los puntos
 #    de tu cuerpo; si no (el registro del 28-oct dio 36-46 cm: alguna cámara se había movido),
 #    la extrínseca se recalcula sola con tu cuerpo (unos segundos moviendo los brazos) y se
-#    guarda en camaras_extrinsecas.json (la anterior queda como .bak_*). Ya no hace falta el
-#    tablero ni calibrar_extrinseca.py. TELEOP_FR5_VIGILAR_EXTRINSECA: si durante la
+#    guarda en calibraciones/datos/camaras_extrinsecas.json (la anterior queda como .bak_*). Ya no hace falta el
+#    tablero ni calibraciones/calibrar_extrinseca.py. TELEOP_FR5_VIGILAR_EXTRINSECA: si durante la
 #    teleoperación A y B dejan de coincidir (alguien mueve una cámara), se recalibra sola.
 #  · TELEOP_FR5_TRIANGULAR: hombro, codo y muñeca salen de los RAYOS de las dos cámaras (56° y
 #    2 m entre ellas); el estéreo de cada OAK queda como apoyo (falla sobre ropa oscura).
@@ -1159,8 +1162,8 @@ FANTASMA_ACTIVO       = True          # dibujar el brazo fantasma y las dos punt
 FANTASMA_CUERPO_PUNTA = "mano_mount"  # cuerpo del MJCF que se usa como punta del brazo
 GEMELO_DEBUG          = True          # cada 2 s: pose real vs simulador vs comando (terminal)
 
-# ── EPISODIO POR POSES (9-nov): episodio_poses.py ───────────────────────────────────────
-# Brazo de pose en pose con Enter (poses en episodio_poses.txt) + mano con el guante MANUS.
+# ── EPISODIO POR POSES (9-nov): utilidades/episodio_poses.py ────────────────────────────
+# Brazo de pose en pose con Enter (poses en utilidades/episodio_poses.txt) + mano con el guante MANUS.
 EPISODIO_FR5_VEL_MAX_DEG_S = 7.0   # °/s por joint (la 1ª ida a la inicial va a FR5_VEL_APROX_DEG_S)
 EPISODIO_FR5_SIMULACRO     = False  # True = conecta y lee, pero NO mueve el FR5
 
@@ -1229,9 +1232,10 @@ IA_MAX_FRENADO      = 0.2     # al entrenar, fuera los episodios con el brazo fr
 # obstáculos. El objeto a coger es el más cercano a la palma (el fijado, mientras se graba); los
 # objetos y los obstáculos se ven en la ventana de MuJoCo y el brazo FRENA contra los obstáculos.
 # Cada episodio lleva el objeto y si el brazo iba frenado (skill_shield/ia/cabeza.py).
-GRABACION_EXTRINSECAS_ARCHIVO = "camaras_extrinsecas_ac.json"   # A↔C (no pisa la de A↔B del modo normal).
+GRABACION_EXTRINSECAS_ARCHIVO = "calibraciones/datos/camaras_extrinsecas_ac.json"   # A↔C (no pisa la de A↔B del modo normal).
                               # Con la extrínseca automática se calcula sola al pulsar [A]; o con el tablero:
-                              # python calibrar_extrinseca.py --mxid-b <MxId de C> --salida camaras_extrinsecas_ac.json
+                              # python calibraciones/calibrar_extrinseca.py --mxid-b <MxId de C> --salida camaras_extrinsecas_ac.json
+                              # (un nombre suelto en --salida va a calibraciones/datos/)
 GRABACION_MAPA      = True    # mapa de obstáculos con la cámara de cabeza (y frenar contra él)
 GRABACION_FRENAR    = True    # True = el brazo no entra en los obstáculos del mapa · False = solo se ven
 GRABACION_MAPA_MARGEN_M = 0.02  # holgura extra de las cápsulas del robot contra los cubos del mapa
@@ -1353,7 +1357,7 @@ AUTONOMO_CAM_CONFIANZA = 200         # confianza del estéreo (0-255, más bajo 
 # (18-nov) Escala de la profundidad del estéreo (1.0 = tal cual). A ~0,9 m la OAK puede medir algún % de más y la
 # mano baja unos cm más lejos (y más abajo) que la pelota. Medirla: un cartón plano en el centro de la imagen a
 # D mm (cinta, desde el frontal de la cámara); si el «centro:» del vídeo marca M mm, poner D / M (p. ej. 0.97)
-AUTONOMO_CAM_ESCALA_PROF = 1.0          # (18-nov) mejor que con cinta: python calibrar_escala_profundidad.py
+AUTONOMO_CAM_ESCALA_PROF = 1.0          # (18-nov) mejor que con cinta: python calibraciones/calibrar_escala_profundidad.py
 AUTONOMO_MAPA_Z_MIN    = 0.35        # m: más cerca la OAK-D no mide (lo que salga es ruido)
 # Rastro del brazo (12-nov): el robot se quita del mapa en todas sus poses de los últimos BARRIDO_S
 # (la profundidad llega con retraso) y los cubos por los que pasa quedan libres.
@@ -1742,18 +1746,18 @@ AUTONOMO_FR5_CMD_TYPE = 1
 # zona de agarre, mirándola desde OTRO lado (de frente o de lado al robot, inclinada ~45° hacia abajo).
 # Su proceso es el mismo camara.py con --rol a: pelotas y herramientas, SIN mapa (el mapa lo hace la cabeza).
 #   1. Montarla FIJA (si se mueve, hay que recalibrar). Mejor otro controlador USB3 que el de la cabeza.
-#   2. Calibrarla: python calibrar_camara_robot.py --camara a --auto  → AUTONOMO_CAM_A_CALIB_ARCHIVO
+#   2. Calibrarla: python calibraciones/calibrar_camara_robot.py --camara a --auto  → AUTONOMO_CAM_A_CALIB_ARCHIVO
 #      (el mismo tablero en la mano y el mismo proceso que la de cabeza; el tablero, de cara a la cámara A)
-#      Comprobarla: python calibrar_camara_robot.py --camara a --verificar
+#      Comprobarla: python calibraciones/calibrar_camara_robot.py --camara a --verificar
 #   3. Probarla sola: python -m skill_shield.autonomo.camara --rol a --ventana
 #   4. AUTONOMO_CAM_A = True. En la web sale la pestaña «Cámara A».
 # Si la A ve la MISMA pelota que la cabeza (a ≤ MAX_DIF_M), estable y reciente, el plan y el afinado la usan; si
 # no, todo sigue con la cabeza, como antes. En la terminal y en diagnosticos/intentos.jsonl sale con cuál se midió.
 AUTONOMO_CAM_A          = True               # True cuando esté montada y calibrada
 AUTONOMO_CAM_A_MXID     = CAM_A_MXID          # la cámara A de la teleoperación (en este modo está libre)
-AUTONOMO_CAM_A_CALIB_ARCHIVO = "camara_a_robot.json"   # su T_mundo_cam (calibrar_camara_robot.py --camara a)
-AUTONOMO_CAM_A_POSTURAS = "calib_posturas_a.json"      # posturas de SU calibración (no pisan las de la cabeza)
-AUTONOMO_CAM_A_MUESTRAS = "calib_muestras_a.json"
+AUTONOMO_CAM_A_CALIB_ARCHIVO = "calibraciones/datos/camara_a_robot.json"   # su T_mundo_cam (calibraciones/calibrar_camara_robot.py --camara a)
+AUTONOMO_CAM_A_POSTURAS = "calibraciones/datos/calib_posturas_a.json"      # posturas de SU calibración (no pisan las de la cabeza)
+AUTONOMO_CAM_A_MUESTRAS = "calibraciones/datos/calib_muestras_a.json"
 AUTONOMO_CAM_A_IR_MA    = 800                 # proyector IR; si las dos OAK-D Pro se molestan (huecos en la
                                               # profundidad donde se cruzan los puntos), bajad una o ponedla a 0
 AUTONOMO_CAM_A_ESCALA_PROF = 1.0              # como AUTONOMO_CAM_ESCALA_PROF, para la A
@@ -1780,7 +1784,7 @@ AUTONOMO_CAM_A_PELOTA_CORRECCION_M = (0.0, 0.0, 0.0)   # como AUTONOMO_TAREA_PEL
 #    · SUBPIXEL_BITS: fracción de la subpíxel (DepthAI: 3 por defecto; 5 = escalones 4 veces más finos).
 #    Si la OAK no acepta la combinación al abrirse, se reintenta sin extendida y, si tampoco, como antes (400P),
 #    avisando en la terminal. La distancia mínima del mapa se pone sola según lo que se haya abierto.
-#    Tras cambiarlo, revisad la escala: python calibrar_escala_profundidad.py (AUTONOMO_CAM_ESCALA_PROF y la de la A).
+#    Tras cambiarlo, revisad la escala: python calibraciones/calibrar_escala_profundidad.py (AUTONOMO_CAM_ESCALA_PROF y la de la A).
 AUTONOMO_CAM_MONO_800P      = True
 AUTONOMO_CAM_EXTENDIDA      = True
 AUTONOMO_CAM_SUBPIXEL_BITS  = 5
@@ -1791,7 +1795,7 @@ AUTONOMO_CAM_A_SUBPIXEL_BITS = 5
 #    la mitad de resolución) al proceso de la cabeza, que la funde en la MISMA TSDF con su calibración
 #    (AUTONOMO_CAM_A_CALIB_ARCHIVO). Lo que la cabeza no ve (detrás de objetos, bajo el antebrazo) lo ve la A.
 #    El robot se quita igual (sus cápsulas y mallas están en el mundo). Las dos calibraciones tienen que cuadrar:
-#    si una está 1-2 cm desviada, las superficies salen dobles o gruesas (calibrar_camara_robot.py --verificar).
+#    si una está 1-2 cm desviada, las superficies salen dobles o gruesas (calibraciones/calibrar_camara_robot.py --verificar).
 AUTONOMO_CAM_A_AL_MAPA      = True
 AUTONOMO_CAM_A_MAPA_HZ      = 4.0            # imágenes de la A que se mandan al mapa por segundo
 AUTONOMO_CAM_A_MAPA_DIST_MAX = 1.2           # m: lo que la A ve más lejos no pone obstáculos (sí espacio libre)
@@ -1815,19 +1819,19 @@ AUTONOMO_CUROBO_PELOTA_OBSTACULO_MARGEN = 0.0
 AUTONOMO_CUROBO_PELOTA_OBSTACULO_TRAMOS = ("ir a la pelota",)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# CALIBRACIÓN CÁMARA DE CABEZA → ROBOT (10-nov, paso 4) — calibrar_camara_robot.py
+# CALIBRACIÓN CÁMARA DE CABEZA → ROBOT (10-nov, paso 4) — calibraciones/calibrar_camara_robot.py
 # ═══════════════════════════════════════════════════════════════════════════
 # Tablero ChArUco en la brida/mano: el de la calibración extrínseca (7x5, 4x4), medido el 10-nov:
 # cuadro 20 mm, marcador 12,5 mm. Sus marcadores son los ids 0-16 del diccionario 4x4: por eso las
 # herramientas usan ids a partir del 20, y el detector de herramientas ignora los del tablero.
 # Si se cambia de tablero, poned aquí sus medidas REALES (con regla o pie de rey).
 # (16-nov) Tablero PEQUEÑO, del tamaño de la palma: 5x4 cuadros de 25 mm (dibujo de 12,5 x 10 cm).
-# Generarlo: python calibrar_camara_robot.py --generar-tablero → imprimir a 300 ppp al 100 % (sin
+# Generarlo: python calibraciones/calibrar_camara_robot.py --generar-tablero → imprimir a 300 ppp al 100 % (sin
 # «ajustar a página»), medir un cuadro con calibre y poner aquí lo medido. Pegado PLANO en algo rígido.
 # El de antes (folio A4): dict(cuadros=(7, 5), lado=0.0375, marcador=0.0275, diccionario="DICT_4X4_50")
 CALIB_ROBOT_TABLERO = dict(cuadros=(5, 4), lado=0.023, marcador=0.0165, diccionario="DICT_4X4_50")   # medido en el impreso (16-nov)
 CALIB_ROBOT_FOTOS     = 10                      # imágenes promediadas en cada postura (con el pequeño, más)
-# Cámara durante la calibración (calibrar_camara_robot.py):
+# Cámara durante la calibración (calibraciones/calibrar_camara_robot.py):
 CALIB_CAM_ESCALA   = (1, 2)       # reducción del ISP: (1, 2) = 2028x1520 (los cuadros pequeños salen con 1,5x
                                   # más píxeles); (1, 3) = 1352x1014 como antes. Necesita USB3
 CALIB_CAM_FPS      = 10           # el robot está quieto al capturar: pocos fps, menos USB
@@ -1835,9 +1839,9 @@ CALIB_CAM_ENFOQUE  = "calibrado"  # lente fija donde se midieron los intrínseco
 CALIB_CAM_EXPOSICION = None       # None = automática · (µs, ISO), p. ej. (8000, 400), si el tablero brilla o parpadea
 CALIB_CAM_NITIDEZ  = None         # 0-4 (None = la de la cámara)
 CALIB_CAM_RUIDO    = None         # reducción de ruido de luminancia 0-4 (None = la de la cámara); 0-1 = bordes más finos
-CALIB_ROBOT_ARCHIVO   = "camara_robot.json"     # resultado (T_mundo_cam, en el marco del MJCF)
-CALIB_ROBOT_POSTURAS  = "calib_posturas.json"   # posturas enseñadas (joints): se reutilizan siempre
-CALIB_ROBOT_MUESTRAS  = "calib_muestras.json"   # datos brutos de la última calibración (--recalcular)
+CALIB_ROBOT_ARCHIVO   = "calibraciones/datos/camara_robot.json"     # resultado (T_mundo_cam, en el marco del MJCF)
+CALIB_ROBOT_POSTURAS  = "calibraciones/datos/calib_posturas.json"   # posturas enseñadas (joints): se reutilizan siempre
+CALIB_ROBOT_MUESTRAS  = "calibraciones/datos/calib_muestras.json"   # datos brutos de la última calibración (--recalcular)
 CALIB_ROBOT_MIN_MUESTRAS = 15
 CALIB_ROBOT_ERROR_MAX_MM = 5.0                  # criterio de la hoja de ruta
 CALIB_ROBOT_VEL_MAX_DEG_S = 7.0                 # tope del FR5 al ir solo a las posturas (con pedal; más lento = tiembla menos)
@@ -1856,7 +1860,7 @@ CALIB_AUTO_DIST_M     = (0.30, 1.00)            # el tablero entre estas distanc
 # (12-nov) Si en la calibración la OrcaHand fuera montada girada respecto al GEMELO, este ángulo
 # (alrededor del eje de la brida) gira su modelo en las comprobaciones de choque de la calibración.
 # Con la mano ya bien montada (como el gemelo), 0. Las posturas guardadas cuando la mano estaba al
-# revés se adaptan una vez con:  python calibrar_camara_robot.py --girar-posturas 180
+# revés se adaptan una vez con:  python calibraciones/calibrar_camara_robot.py --girar-posturas 180
 # (23-nov) 0: el gemelo ya tiene la mano girada como la real (mano_mount en fairino_mjcf.xml). El 90 que había no era
 # el giro real (las calibraciones dan ~-51°).
 CALIB_MANO_GIRO_DEG = 0.0

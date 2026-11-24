@@ -349,7 +349,7 @@ class AutoExtrinseca:
 
 
 def guardar_extrinsecas(ruta, R, t, info=None, mxid_a=None, mxid_b=None):
-    """Escribe camaras_extrinsecas.json (mismo formato que calibrar_extrinseca.py) y deja una
+    """Escribe camaras_extrinsecas.json (mismo formato que calibraciones/calibrar_extrinseca.py) y deja una
     copia de la anterior como .bak_<fecha>."""
     if os.path.exists(ruta):
         try:

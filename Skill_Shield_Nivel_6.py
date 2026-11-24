@@ -46,15 +46,18 @@ Uso:
 #   ├── mano/         biomecanica.py · retargeting.py (landmarks → ctrl de la OrcaHand)
 #   ├── brazo/        ik.py · hibrido.py · ik_codo_muneca.py · control_suave.py
 #   │                 angulos_humano.py (Pose + estéreo → ángulos del brazo humano)
+#   ├── teleop_fr5/   teleoperación del FR5: cinemática, IK, colisiones, pedal
+#   ├── autonomo/     modo autónomo: bucle, tarea, planificador, mapa, cámaras, web
 #   ├── simulacion/   objetos.py · entorno_taller.py [3] · entorno_taladro.py [4]
 #   │                 demo_taladro.py [5] · hilo_fisica.py
 #   ├── ia/           act.py (modelo ACT, entrenamiento, carga) · episodios.py (qué ve y hace la red)
 #   │                 grabador.py · fuentes.py (el mundo al grabar) · politica.py ([I]) · evaluar.py
-#   ├── hardware/     sincronizacion.py (array de motores para la mano física)
-#   ├── interfaz/     hud_logo.py · menu.py · perfil.py
+#   ├── hardware/     orca_hardware.py (OrcaHand por USB) · puente_tactil.py (táctiles) · fr5_servo.py
+#   │                 sincronizacion.py (array de motores para la mano física) · tactil_real.py
+#   ├── interfaz/     hud_logo.py · perfil.py · sliders_brazo.py · limite_j4.py · fantasma.py
 #   └── comun/        suavizador.py
 #
-# config.py y orca_hardware.py siguen en la raíz, sin cambios.
+# config.py sigue en la raíz. Calibraciones: calibraciones/ (scripts, resultados y Leeme.txt).
 # ══════════════════════════════════════════════════════════════════════════════
 import os
 import sys
@@ -75,7 +78,7 @@ from concurrent.futures import ThreadPoolExecutor
 # IMPORTACIÓN DEL PANEL DE CONFIGURACIÓN GLOBAL (NIVEL 6)
 # ══════════════════════════════════════════════════════════════════════════════
 from config import *
-from orca_hardware import OrcaHardwareWrapper
+from skill_shield.hardware.orca_hardware import OrcaHardwareWrapper
 
 # ── Módulos del proyecto (paquete skill_shield) ──────────────────────────────
 from skill_shield.vision.detectores import (
@@ -955,7 +958,7 @@ def main():
                               f"{_ext[2].get('n_muestras', '?')} muestras)")
                     else:
                         print("⚠️  Cámara B abierta SIN extrínsecos: se muestra, pero NO se fusiona. "
-                              "Ejecuta  python calibrar_extrinseca.py")
+                              "Ejecuta  python calibraciones/calibrar_extrinseca.py")
 
                 # ── TELEOP FR5 v2 (27-oct): muñeca + codo con las dos cámaras → IK de 6 ejes ──
                 # skill_shield/teleop_fr5. Sustituye a los PASOS 2-7 del brazo (que quedan

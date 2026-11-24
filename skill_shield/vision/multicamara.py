@@ -5,7 +5,7 @@ Segunda cámara OAK-D (cámara B) para la teleoperación con dos puntos de vista
 · CamaraSecundaria      context manager: abre la cámara B, activa su IR, saca el fotograma
                         de color + profundidad más cercano en el tiempo al de la cámara A
                         y ejecuta SU PROPIA MediaPipe Pose en un hilo aparte.
-· cargar_extrinsecas()  lee camaras_extrinsecas.json (lo genera calibrar_extrinseca.py).
+· cargar_extrinsecas()  lee camaras_extrinsecas.json (lo genera calibraciones/calibrar_extrinseca.py).
 
 La cámara A sigue funcionando EXACTAMENTE como antes en Skill_Shield_Nivel_6.py; la B
 solo añade información. Convención de extrinsecos:  p_A = R_ab · p_B + t_ab.
@@ -26,7 +26,7 @@ from skill_shield.vision.camara_oak import crear_pipeline_oak
 CAM_A_MXID         = getattr(_cfg, "CAM_A_MXID", None)
 CAM_B_MXID         = getattr(_cfg, "CAM_B_MXID", None)
 SYNC_MAX_S         = float(getattr(_cfg, "MULTICAM_SYNC_MAX_S", 0.04))
-EXTRINSECAS_ARCHIVO = getattr(_cfg, "EXTRINSECAS_ARCHIVO", "camaras_extrinsecas.json")
+EXTRINSECAS_ARCHIVO = getattr(_cfg, "EXTRINSECAS_ARCHIVO", "calibraciones/datos/camaras_extrinsecas.json")
 IR_B_MA            = int(getattr(_cfg, "CAM_B_IR_MA", 800))
 
 
@@ -117,7 +117,7 @@ def cargar_extrinsecas(mxid_a=None, mxid_b=None, ruta=None):
     """
     ruta = _ruta_extrinsecas(ruta)
     if not os.path.exists(ruta):
-        print(f"⚠️  No existe {os.path.basename(ruta)}: ejecuta  python calibrar_extrinseca.py")
+        print(f"⚠️  No existe {os.path.basename(ruta)}: ejecuta  python calibraciones/calibrar_extrinseca.py")
         return None
     with open(ruta, encoding="utf-8") as f:
         d = json.load(f)
@@ -133,7 +133,7 @@ def cargar_extrinsecas(mxid_a=None, mxid_b=None, ruta=None):
             R, t = R.T, -R.T @ t
         else:
             print("⚠️  Las cámaras abiertas NO coinciden con las de camaras_extrinsecas.json "
-                  f"({fa} / {fb}). Recalibra con calibrar_extrinseca.py.")
+                  f"({fa} / {fb}). Recalibra con calibraciones/calibrar_extrinseca.py.")
             return None
     return R, t, d
 

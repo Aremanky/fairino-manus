@@ -4,7 +4,7 @@ Calibración cámara de cabeza → robot (paso 4 de la hoja de ruta) — funcion
 Montaje «ojo fuera de la mano» (eye-to-hand): la cámara va fija en el cabezal del soporte y
 el tablero ChArUco en la brida/mano. Como la cámara y el robot van en la MISMA peana, la
 transformación cámara→robot no cambia al mover la peana: se calibra una vez y luego solo
-se comprueba (calibrar_camara_robot.py --verificar).
+se comprueba (calibraciones/calibrar_camara_robot.py --verificar).
 
 Marcos (todo en metros):
   mundo    = el del MJCF (fairino_mjcf.xml), el mismo que usan el gemelo y la IK.
@@ -283,7 +283,7 @@ def camara_gl(T_mundo_cam, K, ancho, alto, cerca):
 # ── archivo ──────────────────────────────────────────────────────────────────
 def guardar(ruta, res, *, mxid, K, dist, ancho, alto, tablero, n_muestras, usadas):
     d = dict(
-        descripcion="Calibración cámara de cabeza → robot (calibrar_camara_robot.py). Marco 'mundo' = "
+        descripcion="Calibración cámara de cabeza → robot (calibraciones/calibrar_camara_robot.py). Marco 'mundo' = "
                     "el del MJCF (fairino_mjcf.xml). T_mundo_cam: punto en cámara (OpenCV) → mundo.",
         fecha=datetime.datetime.now().isoformat(timespec="seconds"), mxid=mxid,
         T_mundo_cam=np.asarray(res["T_mundo_cam"]).tolist(),

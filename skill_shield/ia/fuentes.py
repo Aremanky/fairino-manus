@@ -7,7 +7,7 @@ bloquea: se leen desde el hilo de la física a 30 Hz.
 
   · brazo real : fr5.q_real_rad()                           (proceso fr5_servo, memoria compartida)
   · mano real  : LectorManoReal → OrcaHardwareWrapper.estado_real() en su propio hilo (~15 Hz)
-  · táctiles   : guante.tactil.fuerzas()                    (puente_tactil.py, por UDP)
+  · táctiles   : guante.tactil.fuerzas()                    (skill_shield/hardware/puente_tactil.py, por UDP)
   · objetos    : FuenteObjetosCamara — la cámara de cabeza del modo autónomo (pelotas.py por color
                  + profundidad y herramientas.py con ArUco), lanzada aquí si la teleoperación no la
                  usa — o FuenteObjetosSim — los objetos de la mesa del taller [3] en MuJoCo.
@@ -175,7 +175,7 @@ class FuenteObjetosCamara:
         if self.calibrada is None:
             return "esperando a la cámara de cabeza"
         if not self.calibrada:
-            return "cámara de cabeza sin calibrar (python calibrar_camara_robot.py --auto)"
+            return "cámara de cabeza sin calibrar (python calibraciones/calibrar_camara_robot.py --auto)"
         return "ok"
 
     def cerrar(self):

@@ -1,0 +1,89 @@
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+#  Clases del YOLO de herramientas y cómo se traduce cada dataset a ellas.
+#  El ORDEN de «clases» es el id que ve YOLO: una vez entrenado un modelo, no lo cambiéis
+#  (añadid clases nuevas siempre AL FINAL).
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+clases:
+  - mango            # 0 · la parte por la que se coge (de CUALQUIER herramienta): una instancia por herramienta
+  - martillo         # 1
+  - alicates         # 2 · de punta, universales, de corte, de presión…
+  - destornillador   # 3
+  - llave            # 4 · inglesa, fija, combinada, grifa
+  - carraca          # 5
+  - taladro          # 6 · taladro / atornillador de batería
+  - tijeras          # 7
+  - cuchillo         # 8 · cúter, cuchillo
+  - flexometro       # 9
+  - sierra           # 10 · serrucho, sierra de arco
+  - cinta_aislante   # 11
+
+# ── PACO-LVIS (convertir_paco.py) ── nombre del objeto en PACO → nuestra clase
+paco:
+  objetos:
+    hammer: martillo
+    pliers: alicates
+    screwdriver: destornillador
+    wrench: llave
+    drill: taladro
+    scissors: tijeras
+    knife: cuchillo
+  partes_mango: [handle, grip]     # partes de PACO que juntas son el «mango» (p. ej. hammer:handle + hammer:grip)
+
+# ── HANDAL (convertir_handal.py) ── palabra que aparece en la ruta de la escena → nuestra clase
+#    (las categorías de cocina de HANDAL —ladle, mug, pan, spatula, strainer, utensil, whisk,
+#    measuring cup— no se usan)
+handal:
+  ratchet: carraca              # antes que «wrench» (alguna carpeta puede llamarse «ratchet_wrench»)
+  hammer: martillo
+  plier: alicates
+  screwdriver: destornillador
+  wrench: llave
+  drill: taladro
+
+# ── Datasets en formato YOLO-seg (Roboflow, CVAT, fotos propias: convertir_yolo_seg.py) ──
+#    nombre de clase del dataset (en minúsculas) → nuestra clase. Lo que no esté aquí se ignora
+#    (el script lo dice). Añadid aquí los nombres de vuestras exportaciones de CVAT.
+yolo_seg:
+  mango: mango
+  handle: mango
+  grip: mango
+  hammer: martillo
+  claw hammer: martillo
+  martillo: martillo
+  pliers: alicates
+  cutting pliers: alicates
+  needle-nose pliers: alicates
+  alicates: alicates
+  screwdriver: destornillador
+  screwdriver+: destornillador
+  destornillador: destornillador
+  wrench: llave
+  spanner: llave
+  crescent wrench: llave
+  сrescent wrench: llave        # (en Roboflow viene con una «С» cirílica)
+  gas wrench: llave
+  llave: llave
+  ratchet: carraca
+  carraca: carraca
+  drill: taladro
+  power drill: taladro
+  taladro: taladro
+  scissors: tijeras
+  tijeras: tijeras
+  knife: cuchillo
+  cutter: cuchillo
+  cuchillo: cuchillo
+  tape measure: flexometro
+  flexometro: flexometro
+  handsaw: sierra
+  saw: sierra
+  sierra: sierra
+  electrical tape: cinta_aislante
+  cinta_aislante: cinta_aislante
+
+# ── Roboflow Universe (descargar_roboflow.py) ── proyectos de SEGMENTACIÓN a bajar.
+#    La versión es la que sale en la página del proyecto (pestaña «Dataset» / «Versions»).
+roboflow:
+  - {workspace: a-gbzqd, proyecto: tools-segmentation-0jsgu, version: 1}
+  - {workspace: arcad-bef2o, proyecto: tools-segmentation-ul4wk-gcjyh, version: 1}
+  - {workspace: dmitri-belgorodov, proyecto: tools-segmentation-2-4hxds, version: 1}

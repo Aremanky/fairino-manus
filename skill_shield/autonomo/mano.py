@@ -17,7 +17,7 @@ Ojo: sin par, los tendones quedan algo flojos y la postura medida puede diferir 
 de la de los dedos.
 
 Los táctiles van con TactilReal (skill_shield/hardware/tactil_real.py), que lanza
-puente_tactil.py y recibe las fuerzas por UDP; aquí solo se resume su estado.
+skill_shield/hardware/puente_tactil.py y recibe las fuerzas por UDP; aquí solo se resume su estado.
 """
 import os
 import threading
@@ -43,7 +43,7 @@ _SENSOR_DE_DEDO_DEFECTO = {"pulgar": "index", "indice": "ring", "corazon": "thum
 
 def _config_mano():
     """(puerto, baudios, ids de motor) del config.yaml de la OrcaHand (el que usa la teleop)."""
-    from orca_hardware import _CONFIG_PATH
+    from skill_shield.hardware.orca_hardware import _CONFIG_PATH
     import yaml
     with open(_CONFIG_PATH, encoding="utf-8") as f:
         c = yaml.safe_load(f)
@@ -116,7 +116,7 @@ class TraductorMano:
     def __init__(self, config_path=None):
         import contextlib
         import io
-        from orca_hardware import OrcaHardwareWrapper, _CONFIG_PATH, crear_orcahand
+        from skill_shield.hardware.orca_hardware import OrcaHardwareWrapper, _CONFIG_PATH, crear_orcahand
         ruta = config_path or _CONFIG_PATH
         with contextlib.redirect_stdout(io.StringIO()):     # sus avisos ya los da la teleoperación
             self._hand = crear_orcahand(config_path=ruta)   # con su calibration.yaml (orca_core 0.14 también)

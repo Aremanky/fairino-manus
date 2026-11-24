@@ -5,30 +5,34 @@ Prueba de la háptica REAL: yemas de la OrcaHand Touch física → vibración de
 Sin simulación ni cámaras: arranca el guante MANUS y el puente de los sensores táctiles y
 hace vibrar cada dedo del guante según lo que mide la yema del mismo dedo de la mano física.
 
-    python probar_haptica_tactil.py             # en vivo: aprieta las yemas de la OrcaHand
-    python probar_haptica_tactil.py --dedos     # solo el guante: vibra cada dedo por turno
-                                                # (comprueba el orden pulgar → meñique)
-    python probar_haptica_tactil.py --umbral    # solo el guante: sube la vibración del índice
-                                                # poco a poco → apunta el 1er valor que notes y
-                                                # ponlo en MANUS_TACTIL_VIBRACION_MIN
-    python probar_haptica_tactil.py --umbral --dedo pulgar
-    python probar_haptica_tactil.py --mock      # sensores simulados (sin la mano física)
-    python probar_haptica_tactil.py --puerto /dev/ttyACM0   # puerto fijo de los sensores
+    python diagnosticos/probar_haptica_tactil.py             # en vivo: aprieta las yemas de la OrcaHand
+    python diagnosticos/probar_haptica_tactil.py --dedos     # solo el guante: vibra cada dedo por turno
+                                                            # (comprueba el orden pulgar → meñique)
+    python diagnosticos/probar_haptica_tactil.py --umbral    # solo el guante: sube la vibración del índice
+                                                            # poco a poco → apunta el 1er valor que notes y
+                                                            # ponlo en MANUS_TACTIL_VIBRACION_MIN
+    python diagnosticos/probar_haptica_tactil.py --umbral --dedo pulgar
+    python diagnosticos/probar_haptica_tactil.py --mock      # sensores simulados (sin la mano física)
+    python diagnosticos/probar_haptica_tactil.py --puerto /dev/ttyACM0   # puerto fijo de los sensores
 
 En vivo:  Enter = nuevo cero de los sensores (sin tocar nada) · Ctrl+C = salir.
 La tabla muestra, por dedo, la fuerza filtrada (N) y la vibración (%). Con ella se ajustan
 MANUS_TACTIL_F_ON (umbral) y MANUS_TACTIL_F_MAX (100 %) en config.py.
 """
 import argparse
+import os
 import select
 import sys
 import time
 
 import numpy as np
 
-from skill_shield.hardware import tactil_real
-from skill_shield.mano import manus_guante
-from skill_shield.mano.manus_guante import GuanteManus
+RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # raíz del repo (este script está en diagnosticos/)
+sys.path.insert(0, RAIZ)
+
+from skill_shield.hardware import tactil_real                # noqa: E402
+from skill_shield.mano import manus_guante                   # noqa: E402
+from skill_shield.mano.manus_guante import GuanteManus       # noqa: E402
 
 NOMBRES = ("pulgar", "índice", "corazón", "anular", "meñique")
 NOMBRES_CLAVE = ("pulgar", "indice", "corazon", "anular", "menique")

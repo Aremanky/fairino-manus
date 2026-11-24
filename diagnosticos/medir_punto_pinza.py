@@ -183,7 +183,7 @@ def main():
           f"(radial {(math.hypot(p[0], p[1]) - math.hypot(p_mod[0], p_mod[1])) * 100:+.1f}, "
           f"a lo largo del eje {resto[2] * 100:+.1f} cm)")
     if abs(th) >= 2.0:
-        print("\nEn fairino_mjcf.xml (y en modelo/fairino_description/mjcf/fairino_mjcf.xml), cambia la línea de "
+        print("\nEn fairino_mjcf.xml (y en web_windows/modelo/fairino_description/mjcf/fairino_mjcf.xml), cambia la línea de "
               "mano_mount por (y deja CALIB_MANO_GIRO_DEG = 0 en config.py):")
         print("   " + linea_mano_mount(cfg.RUTA_XML, th) + ' childclass="mano" gravcomp="1">')
         print("y regenera los archivos de cuRobo:\n   python -m skill_shield.autonomo.curobo_fr5.urdf\n"

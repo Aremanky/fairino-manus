@@ -3,10 +3,10 @@
 EPISODIO por poses (9-nov): el BRAZO va de pose en pose con Enter y la MANO se teleopera con
 el guante MANUS como siempre (OrcaHand Touch real + háptica de sus sensores).
 
-    ./venv_nivel6/bin/python episodio_poses.py episodio_poses.txt
-    ./venv_nivel6/bin/python episodio_poses.py episodio_poses.txt --grabar coger_pieza
-    ./venv_nivel6/bin/python episodio_poses.py episodio_poses.txt --simulacro    # el FR5 no se mueve
-    ./venv_nivel6/bin/python episodio_poses.py episodio_poses.txt --sin-robot    # solo simulador
+    ./venv_nivel6/bin/python utilidades/episodio_poses.py utilidades/episodio_poses.txt
+    ./venv_nivel6/bin/python utilidades/episodio_poses.py utilidades/episodio_poses.txt --grabar coger_pieza
+    ./venv_nivel6/bin/python utilidades/episodio_poses.py utilidades/episodio_poses.txt --simulacro    # el FR5 no se mueve
+    ./venv_nivel6/bin/python utilidades/episodio_poses.py utilidades/episodio_poses.txt --sin-robot    # solo simulador
 
 El fichero tiene una pose por línea: 6 ángulos en GRADOS DE LA CONTROLADORA (los de la WebApp
 y los de la ventana de sliders; el botón "Imprimir pose" de los sliders escribe la línea ya
@@ -35,7 +35,7 @@ import time
 
 import numpy as np
 
-RAIZ = os.path.dirname(os.path.abspath(__file__))
+RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # raíz del repo (este script está en utilidades/)
 sys.path.insert(0, RAIZ)
 os.chdir(RAIZ)
 
@@ -170,7 +170,7 @@ def main():
     # ── mano física y guante, como en Skill_Shield ──
     mano = None
     if not a.sin_mano:
-        from orca_hardware import OrcaHardwareWrapper
+        from skill_shield.hardware.orca_hardware import OrcaHardwareWrapper
         mano = OrcaHardwareWrapper(puerto=cfg.PUERTO_HARDWARE)
         mano.conectar()
         if not mano.conectado:

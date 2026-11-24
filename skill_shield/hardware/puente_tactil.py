@@ -17,9 +17,9 @@ Instalación (una vez), en la raíz del proyecto:
 
 Uso normal: NO hace falta lanzarlo a mano. GuanteManus lo arranca solo
 (config.ORCA_TACTIL_ACTIVO = True) y lo cierra al salir. A mano, para probar:
-    python puente_tactil.py --ver                 # tabla en vivo de las fuerzas (N)
-    python puente_tactil.py --ver --mock          # sin mano: sensores simulados
-    python puente_tactil.py --puerto /dev/ttyACM0 # puerto fijo (si la detección falla)
+    python skill_shield/hardware/puente_tactil.py --ver                 # tabla en vivo de las fuerzas (N)
+    python skill_shield/hardware/puente_tactil.py --ver --mock          # sin mano: sensores simulados
+    python skill_shield/hardware/puente_tactil.py --puerto /dev/ttyACM0 # puerto fijo (si la detección falla)
 
 Al conectar pone a CERO los sensores (la mano NO debe tocar nada esos ~2 s). El programa
 principal puede pedir un nuevo cero en cualquier momento (mensaje "cero").
@@ -37,7 +37,8 @@ import sys
 import threading
 import time
 
-AQUI = os.path.dirname(os.path.abspath(__file__))
+# Raíz del repo (config.py, orca_core_touch/): este archivo está en skill_shield/hardware/
+RAIZ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FINGERS = ("thumb", "index", "middle", "ring", "pinky")
 # Para la tabla de --ver: qué sensor lleva cada dedo FÍSICO (igual que en manus_guante.py;
 # el puente manda SIEMPRE los nombres de orca_core: el reparto lo hace el programa principal)
@@ -48,19 +49,19 @@ _SENSOR_DE_DEDO_DEFECTO = {"pulgar": "index", "indice": "ring", "corazon": "thum
 
 def _cfg(nombre, defecto):
     try:
-        sys.path.insert(0, AQUI)
+        sys.path.insert(0, RAIZ)
         import config
         return getattr(config, nombre, defecto)
     except Exception:
         return defecto
     finally:
-        if sys.path and sys.path[0] == AQUI:
+        if sys.path and sys.path[0] == RAIZ:
             sys.path.pop(0)
 
 
 def argumentos():
     p = argparse.ArgumentParser(description="Sensores táctiles de la OrcaHand Touch → UDP")
-    p.add_argument("--core", default=_cfg("ORCA_TACTIL_CORE_RUTA", os.path.join(AQUI, "orca_core_touch")),
+    p.add_argument("--core", default=_cfg("ORCA_TACTIL_CORE_RUTA", os.path.join(RAIZ, "orca_core_touch")),
                    help="carpeta del orca_core NUEVO (git clone ... orca_core_touch)")
     p.add_argument("--puerto", default=_cfg("ORCA_TACTIL_PUERTO", "auto"),
                    help="'auto' o el puerto de los sensores (p. ej. /dev/ttyACM0)")

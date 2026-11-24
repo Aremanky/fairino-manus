@@ -272,7 +272,9 @@ def test_constructor_corrige_la_calibracion_y_quita_el_brazo(tmp_path):
     class Canal:
         def leer(self):
             return empaquetar_pose(Q0, True, None), time.time()
-    shutil.copy(os.path.join(RAIZ, "camara_robot.json"), tmp_path)
+    destino = tmp_path / G["CALIB_ROBOT_ARCHIVO"]          # la misma ruta relativa que en el repo
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(os.path.join(RAIZ, G["CALIB_ROBOT_ARCHIVO"]), destino)
     cm = ConstructorMapa(dict(G), str(tmp_path), Canal(), None, None)
     cm._recargar_calibracion()
     err = np.array([0.03, -0.02, 0.025])

@@ -7,8 +7,8 @@ cartón y una cinta métrica; aquí se usa un tablero ChArUco, cuya distancia sa
 solvePnP (escala real: la del tamaño de sus cuadros, medido con calibre), y se compara, píxel a píxel del
 tablero, con la profundidad del estéreo (la misma tubería que el modo autónomo, sin escalar).
 
-    python calibrar_escala_profundidad.py                       # tablero de CALIB_ROBOT_TABLERO
-    python calibrar_escala_profundidad.py --tablero 7,5,0.040,0.030      # cuadros x, y, lado, marcador (m)
+    python calibraciones/calibrar_escala_profundidad.py                       # tablero de CALIB_ROBOT_TABLERO
+    python calibraciones/calibrar_escala_profundidad.py --tablero 7,5,0.040,0.030      # cuadros x, y, lado, marcador (m)
 
 Mueve el tablero (plano y rígido) por la zona de trabajo, de ~0,5 a ~1,3 m, por el centro y por los lados de
 la imagen, despacio. Q o Esc para terminar. Al final dice el valor de AUTONOMO_CAM_ESCALA_PROF y si la escala
@@ -27,7 +27,7 @@ import time
 import cv2
 import numpy as np
 
-RAIZ = os.path.dirname(os.path.abspath(__file__))
+RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # raíz del repo (este script está en calibraciones/)
 sys.path.insert(0, RAIZ)
 
 

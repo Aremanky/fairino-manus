@@ -2,12 +2,12 @@
 """
 Calibración guante MANUS → OrcaHand, IMITACIÓN 1:1  (manus_calibracion.json, versión 4)
 =======================================================================================
-    python calibrar_manus.py              # calibración guiada (~2 min, 9 poses)
-    python calibrar_manus.py --ver        # ver en vivo los 20 ángulos de tu mano
-    python calibrar_manus.py --probar     # ver en vivo tus ángulos y el ctrl 1:1 del robot
-    python calibrar_manus.py --recalcular # rehacer el mapeo con las poses YA grabadas en
-                                          # manus_calibracion.json (sin guante; guarda copia).
-                                          # Sirve también para pasar una calibración v3 a 1:1.
+    python calibraciones/calibrar_manus.py              # calibración guiada (~2 min, 9 poses)
+    python calibraciones/calibrar_manus.py --ver        # ver en vivo los 20 ángulos de tu mano
+    python calibraciones/calibrar_manus.py --probar     # ver en vivo tus ángulos y el ctrl 1:1 del robot
+    python calibraciones/calibrar_manus.py --recalcular # rehacer el mapeo con las poses YA grabadas en
+                                                        # manus_calibracion.json (sin guante; guarda copia).
+                                                        # Sirve también para pasar una calibración v3 a 1:1.
 
 QUÉ HACE (v4, 15-oct)
   El robot copia tus ángulos GRADO A GRADO (ver la cabecera de manus_guante.py):
@@ -42,7 +42,12 @@ import time
 
 import numpy as np
 
-from skill_shield.mano.manus_guante import (
+# Este script vive en calibraciones/: la raíz del repo (config.py, skill_shield/) tiene que estar en sys.path
+RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if RAIZ not in sys.path:
+    sys.path.insert(0, RAIZ)
+
+from skill_shield.mano.manus_guante import (  # noqa: E402
     ERGO, NOMBRES, GuanteManus, MANUS_CALIBRACION, MANUS_MAPEO, angulos_a_ctrl,
     cargar_calibracion, construir_mapeo,
 )
@@ -143,7 +148,7 @@ def recalcular(ruta=MANUS_CALIBRACION):
     crudas = d.get("poses_crudas")
     if not crudas:
         print("❌ Esa calibración no tiene 'poses_crudas': hay que repetirla con el guante:  "
-              "python calibrar_manus.py")
+              "python calibraciones/calibrar_manus.py")
         return 1
     medidas = {p: np.asarray(a, dtype=float) for p, a in crudas.items()}
     if "abierta" not in medidas:

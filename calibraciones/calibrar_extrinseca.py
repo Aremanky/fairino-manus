@@ -1,10 +1,10 @@
 """
 Calibración EXTRÍNSECA entre las dos OAK-D: dónde está la cámara B respecto a la A.
-Genera camaras_extrinsecas.json (p_A = R_ab · p_B + t_ab), que lee Skill_Shield_Nivel_6.py.
+Genera calibraciones/datos/camaras_extrinsecas.json (p_A = R_ab · p_B + t_ab), que lee Skill_Shield_Nivel_6.py.
 
-  python calibrar_extrinseca.py --generar-tablero       # guarda tablero_charuco.png para imprimir
-  python calibrar_extrinseca.py                         # calibra con el tablero ChArUco (recomendado)
-  python calibrar_extrinseca.py --metodo cuerpo         # sin tablero: mueve la muñeca delante de las dos
+  python calibraciones/calibrar_extrinseca.py --generar-tablero       # guarda calibraciones/tableros/tablero_charuco.png
+  python calibraciones/calibrar_extrinseca.py                         # calibra con el tablero ChArUco (recomendado)
+  python calibraciones/calibrar_extrinseca.py --metodo cuerpo         # sin tablero: mueve la muñeca delante de las dos
 
 ChArUco: imprime el tablero a ESCALA REAL (comprueba con una regla el lado del cuadrado),
 pégalo en una superficie plana y rígida y colócalo donde LAS DOS cámaras lo vean a la vez.
@@ -25,10 +25,18 @@ no sobre el preview de 640x480: el doble de píxeles por marcador = el doble de 
 import argparse
 import datetime
 import json
+import os
 import sys
 
 import cv2
 import numpy as np
+
+# Este script vive en calibraciones/: la raíz del repo (config.py, skill_shield/) tiene que estar en sys.path
+RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if RAIZ not in sys.path:
+    sys.path.insert(0, RAIZ)
+DATOS = os.path.join(RAIZ, "calibraciones", "datos")          # resultados (camaras_extrinsecas*.json)
+TABLEROS = os.path.join(RAIZ, "calibraciones", "tableros")    # PNG de los tableros para imprimir
 
 # ═════════════ funciones puras (probadas con datos sintéticos) ═════════════
 
@@ -208,6 +216,13 @@ def kabsch_recortado(PB, PA, descartar=0.2, iteraciones=3):
     R, t = kabsch(PB[idx], PA[idx])
     res = np.linalg.norm((PB[idx] @ R.T + t) - PA[idx], axis=1)
     return R, t, float(np.sqrt(np.mean(res ** 2))), len(idx)
+
+
+def ruta_salida(nombre):
+    """--salida: un nombre suelto (camaras_extrinsecas_ac.json) va a calibraciones/datos/; con carpeta, tal cual."""
+    if os.path.isabs(nombre) or os.path.dirname(nombre):
+        return os.path.abspath(nombre)
+    return os.path.join(DATOS, nombre)
 
 
 def guardar(ruta, R, t, mxid_a, mxid_b, metodo, n, extra):
@@ -525,7 +540,9 @@ def main():
                     help="detectar el tablero en el preview (640x480) en vez de en la imagen del ISP")
     ap.add_argument("--brazo", choices=("derecho", "izquierdo"), default="derecho")
     ap.add_argument("--mxid-a"); ap.add_argument("--mxid-b")
-    ap.add_argument("--salida", default=None)
+    ap.add_argument("--salida", default=None,
+                    help="archivo de salida (por defecto EXTRINSECAS_ARCHIVO de config.py); "
+                         "un nombre suelto se guarda en calibraciones/datos/")
     ap.add_argument("--dist-min", type=float, default=0.15, help="separación mínima entre paradas (m), método cuerpo")
     ap.add_argument("--rms-max", type=float, default=0.06, help="error RMS máximo (m) para guardar; --forzar lo ignora")
     ap.add_argument("--forzar", action="store_true", help="guardar aunque el error sea alto")
@@ -534,11 +551,13 @@ def main():
     if args.generar_tablero:
         board, _ = crear_tablero(args.cuadros, args.lado, args.marcador, args.diccionario)
         px = 400                                            # píxeles por cuadrado: nítido hasta A2
-        cv2.imwrite("tablero_charuco.png", board.generateImage((args.cuadros[0] * px, args.cuadros[1] * px),
-                                                               marginSize=px // 5))
+        os.makedirs(TABLEROS, exist_ok=True)
+        salida = os.path.join(TABLEROS, "tablero_charuco.png")
+        cv2.imwrite(salida, board.generateImage((args.cuadros[0] * px, args.cuadros[1] * px),
+                                                marginSize=px // 5))
         ancho_cm = args.cuadros[0] * args.lado * 100
         alto_cm = args.cuadros[1] * args.lado * 100
-        print(f"Guardado tablero_charuco.png ({args.cuadros[0]}x{args.cuadros[1]}). Imprímelo para que cada "
+        print(f"Guardado {salida} ({args.cuadros[0]}x{args.cuadros[1]}). Imprímelo para que cada "
               f"cuadrado mida {args.lado * 1000:.0f} mm (tablero {ancho_cm:.0f}x{alto_cm:.0f} cm sin margen) "
               f"y mídelo con una regla. Al calibrar pasa los MISMOS --cuadros/--lado/--marcador.")
         return
@@ -559,7 +578,7 @@ def main():
         print(f"\n❌ Error RMS {rms * 1000:.0f} mm > {args.rms_max * 1000:.0f} mm: NO se guarda (una calibración mala "
               f"empeora la fusión). Repite con más paradas bien repartidas, o usa --metodo charuco.")
         sys.exit(1)
-    ruta = args.salida or _ruta_extrinsecas()
+    ruta = ruta_salida(args.salida) if args.salida else _ruta_extrinsecas()
     guardar(ruta, R, t, cams[0]["mxid"], cams[1]["mxid"], args.metodo, n, extra)
     sep = np.linalg.norm(t)
     giro = np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1)))

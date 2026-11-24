@@ -47,9 +47,9 @@ python Skill_Shield_Nivel_6.py
 | Pieza | Para qué | Dónde se configura |
 |---|---|---|
 | Fairino FR5 | brazo (ServoJ cada 8 ms en su propio proceso, `skill_shield/hardware/fr5_servo.py`) | `FR5_*` (carga, TCP, límites; IP `FR5_IP`, por defecto 192.168.58.2) |
-| OrcaHand | mano, por USB (`orca_hardware.py`, `orca_mano/`) | `PUERTO_HARDWARE`, `ORCA_HW_*` |
-| Táctiles de la OrcaHand | fuerza en las yemas (`puente_tactil.py`) | `ORCA_TACTIL_*` |
-| Guante MANUS Core 3 | dedos del operario (`skill_shield/mano/manus_guante.py`, `calibrar_manus.py`) | `FUENTE_DEDOS`, `MANUS_*` |
+| OrcaHand | mano, por USB (`skill_shield/hardware/orca_hardware.py`, `orca_mano/`) | `PUERTO_HARDWARE`, `ORCA_HW_*` |
+| Táctiles de la OrcaHand | fuerza en las yemas (`skill_shield/hardware/puente_tactil.py`) | `ORCA_TACTIL_*` |
+| Guante MANUS Core 3 | dedos del operario (`skill_shield/mano/manus_guante.py`, `calibraciones/calibrar_manus.py`) | `FUENTE_DEDOS`, `MANUS_*` |
 | OAK-D Pro **A** | teleoperación y, en el modo autónomo, cámara fija de la mesa | `CAM_A_MXID`, `AUTONOMO_CAM_A_*` |
 | OAK-D Pro **B** | cámara de cabeza del robot (objetos y obstáculos) | `CAM_B_MXID`, `AUTONOMO_CAM_MXID` |
 | OAK-D Pro **C** | teleoperación (cruzada con la A) en «Grabación» | `CAM_C_MXID` |
@@ -99,14 +99,21 @@ objetivo. La seta física sigue siendo la parada de verdad.
 La teleoperación de arriba más lo que ve el modo autónomo con la cámara de cabeza (`skill_shield/ia/cabeza.py`):
 - **Cámaras:** A y C cruzadas para teleoperar (sin `CAM_C_MXID`, solo la A) y la B como cabeza:
   herramientas con ArUco, pelotas y mapa de obstáculos. Extrínseca A↔C en `GRABACION_EXTRINSECAS_ARCHIVO`
-  (sola con el cuerpo al pulsar `[A]`, o con el tablero: `python calibrar_extrinseca.py --mxid-b <MxId de C>
-  --salida camaras_extrinsecas_ac.json`).
+  (sola con el cuerpo al pulsar `[A]`, o con el tablero: `python calibraciones/calibrar_extrinseca.py
+  --mxid-b <MxId de C> --salida camaras_extrinsecas_ac.json`, que se guarda en `calibraciones/datos/`).
 - **Objetivo:** el objeto que se puede coger más cercano a la palma (`[O]` cambia de objeto).
 - **El brazo frena** contra los obstáculos del mapa (`GRABACION_FRENAR`), salvo alrededor del objetivo.
 - **Agarre asistido** (`GRABACION_AGARRE_ASISTIDO`): `[L]` lleva la mano a la postura de agarre con el
   planificador del autónomo (con el pedal); al llegar, pisar el pedal pasa a modo **relativo** y empieza
   a grabarse; al soltarlo se guarda. `[M]` marca el episodio como fallido, `[K]` vuelve a la
   teleoperación normal, `[B]` bloquea el giro.
+
+---
+## Visión: YOLO de herramientas y mango
+
+`yolo_herramientas/` — segmentación de cada herramienta y de su mango con YOLO26-seg (entorno aparte,
+`venv_yolo`). Datasets públicos (HANDAL, PACO, Roboflow), fotos propias con la cámara de cabeza, unión,
+entrenamiento en la RTX 5080 y prueba en vivo: los pasos y comandos, en `yolo_herramientas/LEEME.md`.
 
 ---
 ## IA: grabar, entrenar y reproducir
@@ -163,21 +170,26 @@ si se caen (cámaras, web, gemelo de la web).
 ---
 ## Calibraciones
 
-| Qué | Cómo | Resultado |
+Todo lo de calibración está en `calibraciones/`: los scripts, sus resultados en `calibraciones/datos/` y los
+tableros para imprimir en `calibraciones/tableros/`. Qué es cada uno y cuándo repetirlo: `calibraciones/Leeme.txt`.
+Se lanzan desde la raíz del repo:
+
+| Qué | Cómo | Resultado (en `calibraciones/datos/`) |
 |---|---|---|
-| Cámara de cabeza → robot | `python calibrar_camara_robot.py --auto` (tablero ChArUco en la mano, P mantenida) · comprobar con `--verificar` | `camara_robot.json` |
-| Cámara A → robot | `python calibrar_camara_robot.py --camara a --auto` | `camara_a_robot.json` |
+| Cámara de cabeza → robot | `python calibraciones/calibrar_camara_robot.py --auto` (tablero ChArUco 5x4 en la mano, P mantenida) · comprobar con `--verificar` | `camara_robot.json` |
+| Cámara A → robot | `python calibraciones/calibrar_camara_robot.py --camara a --auto` | `camara_a_robot.json` |
 | Calibración a mano | `--manual` (arrastre en la WebApp + ESPACIO) o `--manual --sliders` (con la ventana de sliders y el pedal) · `--recalcular` con las muestras guardadas | |
-| Escala de la profundidad | `python calibrar_escala_profundidad.py` | `AUTONOMO_CAM_ESCALA_PROF` |
-| Extrínseca entre cámaras | `python calibrar_extrinseca.py` | `camaras_extrinsecas*.json` |
-| Guante MANUS | `python calibrar_manus.py` | `manus_calibracion.json` |
+| Escala de la profundidad | `python calibraciones/calibrar_escala_profundidad.py` | valor de `AUTONOMO_CAM_ESCALA_PROF` (se copia a `config.py`) |
+| Extrínseca entre cámaras | `python calibraciones/calibrar_extrinseca.py` (tablero ChArUco 7x5) | `camaras_extrinsecas*.json` |
+| Guante MANUS | `python calibraciones/calibrar_manus.py` | `manus_calibracion.json` |
 | Carga de la brida | `python diagnosticos/identificar_carga.py` (`--leer` = la de la controladora) | `FR5_CARGA_*` |
 
 En la calibración, el robot solo se mueve con el pedal, a ≤ `CALIB_ROBOT_VEL_MAX_DEG_S`, y cada trayecto
 se comprueba antes (mano y tablero contra el brazo, el soporte, la cabeza, las cajas y el suelo; bloque
-`CALIB_*`). Generar el tablero: `--generar-tablero` (imprimir al 100 %, medir un cuadro con calibre).
-Marcadores de las herramientas: `python -m skill_shield.autonomo.herramientas --generar` (y `--probar`).
-Cierra antes el modo autónomo: la cámara y el robot tienen que estar libres.
+`CALIB_*`). Generar el tablero: `--generar-tablero` (queda en `calibraciones/tableros/`; imprimir al 100 %,
+medir un cuadro con calibre). Marcadores de las herramientas: `python -m skill_shield.autonomo.herramientas
+--generar` (y `--probar`). Cierra antes el modo autónomo: la cámara y el robot tienen que estar libres.
+Las calibraciones que aún estén en la raíz (de antes de esta carpeta) las mueve solo `./arrancar_nivel6.sh`.
 
 ---
 ## Diagnósticos (`diagnosticos/`)
@@ -188,7 +200,16 @@ Cierra antes el modo autónomo: la cámara y el robot tienen que estar libres.
 - `ver_estorbo.py [plan_fallido_….npz]` — qué cubos del mapa no dejan coger la pelota.
 - `banco_planes.py --guardar antes.json` / `--comparar antes.json` — comparar planes antes y después de un cambio.
 - `estimar_cdm_mano.py` — primera estimación del centro de masas de la mano.
+- `probar_curobo.py [--n 50]` — cuRobo con el FR5 + OrcaHand en la GPU, sin mover el robot (lo lanza `./arrancar_nivel6.sh --probar`).
+- `probar_haptica_tactil.py [--dedos | --umbral | --mock]` — táctiles de la OrcaHand → vibración del guante, sin el programa principal.
 - `python -m skill_shield.autonomo.choque_mano [--mapa]` — huecos de la mano en posturas guardadas.
+
+---
+## Utilidades (`utilidades/`)
+
+- `python utilidades/episodio_poses.py utilidades/episodio_poses.txt [--grabar TAREA]` — el brazo va de pose en
+  pose con Enter y la mano se teleopera con el guante (las poses salen del botón «Imprimir pose» de la ventana de
+  sliders).
 
 ---
 ## Pruebas
@@ -206,25 +227,34 @@ Las de cuRobo y algunas de la IA necesitan la GPU / torch y se saltan si no est�
 Skill_Shield_Nivel_6.py      programa principal: menú y bucle de teleoperación / grabación / IA
 config.py                    TODOS los ajustes
 arrancar_nivel6.sh           instala lo que falte y arranca
-orca_hardware.py             OrcaHand por USB (envío continuo, arranque suave)
-puente_tactil.py             táctiles de la OrcaHand (lo lanza el guante / el modo autónomo)
-calibrar_*.py                calibraciones (ver tabla)
+calibraciones/               scripts de calibración (calibrar_*.py) + Leeme.txt
+  datos/                     sus resultados: camara_robot.json, camaras_extrinsecas.json, manus_calibracion.json…
+  tableros/                  tableros ChArUco para imprimir (5x4 de la palma, 7x5 de la extrínseca)
 skill_shield/
   autonomo/                  modo autónomo: modo.py (bucle), tarea.py, ejecucion.py, planificador,
                              choque_mano.py, mapa.py, camara.py, camara_a.py, web.py + estatico/
   autonomo/curobo_fr5/       integración con cuRobo
   teleop_fr5/                teleoperación del FR5: cinemática, IK, colisiones, pedal
-  hardware/                  fr5_servo (proceso ServoJ), táctiles
+  hardware/                  fr5_servo (proceso ServoJ), orca_hardware (OrcaHand por USB: envío continuo,
+                             arranque suave), puente_tactil (táctiles; lo lanza el guante / el modo autónomo)
   interfaz/                  ventana de sliders, límite del J4, HUD
   ia/                        grabación, ACT, política, agarre asistido, cámara de cabeza
   vision/ brazo/ mano/       cámaras OAK-D, MediaPipe, retargeting del brazo y de la mano
   simulacion/                entornos de MuJoCo (taller, taladro)
+diagnosticos/                herramientas de diagnóstico y pruebas con hardware (probar_*.py)
+utilidades/                  episodio por poses (episodio_poses.py + .txt)
+yolo_herramientas/           YOLO de herramientas y mango: datasets, conversión, entrenamiento (LEEME.md)
+tests/                       pruebas sin hardware
 fairino_description/         modelo MJCF del FR5 + soporte + OrcaHand (lo usa todo)
-curobo_fr5/                  URDF y configuración del robot para cuRobo
-orca_core-main/, orca_core_touch/, orca_mano/   SDK y configuración de la OrcaHand
+orcahand_description-main/, taladro/   mallas de la OrcaHand y del taladro (las incluye el MJCF)
+curobo_fr5/                  URDF y configuración del robot para cuRobo (generados desde el MJCF)
+orca_mano/                   config.yaml + calibration.yaml de la OrcaHand (los lee orca_hardware)
+orca_core-main/, orca_core_touch/   SDK de la OrcaHand (viejo para los motores; nuevo, submódulo, para los táctiles)
 MANUS_Core_3.2.1_SDK_Linux/  SDK del guante
 fairino/                     SDK del FR5
-diagnosticos/                herramientas de diagnóstico
-tests/                       pruebas sin hardware
-fuente/, modelo/, web/, SkillShield_Web.exe, mujoco.dll   ejecutable de Windows de la web (gemelo sin robot)
+episodios/, modelos/         datos antiguos de la IA (los nuevos van a ~/skill_shield_datos)
+marcadores/                  marcadores ArUco de las herramientas para imprimir
+docs/                        manual de Skill Shield Nivel 6 (PDF)
+web_windows/                 ejecutable de Windows de la web (gemelo sin robot): SkillShield_Web.exe,
+                             mujoco.dll, modelo/, web/, licencias/ y su código en fuente/
 ```

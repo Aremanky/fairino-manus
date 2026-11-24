@@ -45,7 +45,7 @@ def main():
     T_cam = info.get("T_mundo_cam")
     if T_cam is None:
         from skill_shield.autonomo.calibracion import cargar
-        T_cam = cargar(os.path.join(RAIZ, G.get("CALIB_ROBOT_ARCHIVO", "camara_robot.json")))["T_mundo_cam"]
+        T_cam = cargar(os.path.join(RAIZ, G.get("CALIB_ROBOT_ARCHIVO", "calibraciones/datos/camara_robot.json")))["T_mundo_cam"]
     T_cam = np.asarray(T_cam, float)
     pl = TA.Planificador(cargar_cadena(G["RUTA_XML"], verbose=False), G, T_cam)
     try:

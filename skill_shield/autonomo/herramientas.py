@@ -217,7 +217,7 @@ class DetectorHerramientas(ConCorreccion):
         g = cfg if isinstance(cfg, dict) else {k: getattr(cfg, k) for k in dir(cfg) if k.isupper()}
         self.cat = catalogo(g)
         self.det = crear_detector(g.get("AUTONOMO_HERRAMIENTAS_DICCIONARIO", DICCIONARIO))
-        ruta = g.get("CALIB_ROBOT_ARCHIVO", "camara_robot.json")
+        ruta = g.get("CALIB_ROBOT_ARCHIVO", "calibraciones/datos/camara_robot.json")
         self.ruta_calib = ruta if os.path.isabs(ruta) else os.path.join(raiz, ruta)
         self.n_estable = int(g.get("AUTONOMO_HERRAMIENTAS_N_ESTABLE", n_estable))
         self.olvido_s = float(g.get("AUTONOMO_HERRAMIENTAS_OLVIDO_S", olvido_s))

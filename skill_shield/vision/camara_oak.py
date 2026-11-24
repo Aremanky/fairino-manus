@@ -159,7 +159,7 @@ def crear_pipeline_oak(ancho: int = ANCHO_CAM, alto: int = ALTO_CAM,
 
 
 def fijar_enfoque(dev, enfoque="calibrado", nombre="OAK", cola="control"):
-    """(20-nov) Lente de la cámara de color FIJA, como en calibrar_camara_robot.py (CALIB_CAM_ENFOQUE).
+    """(20-nov) Lente de la cámara de color FIJA, como en calibraciones/calibrar_camara_robot.py (CALIB_CAM_ENFOQUE).
     "calibrado" = la posición con la que se midieron en fábrica los intrínsecos y la alineación
     profundidad→color; un número 0-255 = esa posición; None = autoenfoque (lo de antes). Con el
     autoenfoque la lente se mueve: la focal deja de ser la de K y la profundidad alineada deja de caer

@@ -740,7 +740,7 @@ def modelo_colision(cadena, cfg, T_mundo_cam=None, radio_mano=None, nombre_camar
     if T_mundo_cam is not None:
         ent.cajas.append(Caja(nombre_camara, np.asarray(T_mundo_cam)[:3, 3], (0.07, 0.07, 0.07)))
     if otras_camaras is None:
-        c_a = _centro_calibrada(g, "AUTONOMO_CAM_A_CALIB_ARCHIVO", "camara_a_robot.json") \
+        c_a = _centro_calibrada(g, "AUTONOMO_CAM_A_CALIB_ARCHIVO", "calibraciones/datos/camara_a_robot.json") \
             if g.get("AUTONOMO_CAM_A", False) else None
         otras_camaras = [("camara_a", c_a)] if c_a is not None else []
     for nombre, c in otras_camaras:
@@ -762,7 +762,7 @@ class ConstructorMapa:
         import os
         g = cfg if isinstance(cfg, dict) else {k: getattr(cfg, k) for k in dir(cfg) if k.isupper()}
         self.g = g
-        ruta = g.get("CALIB_ROBOT_ARCHIVO", "camara_robot.json")
+        ruta = g.get("CALIB_ROBOT_ARCHIVO", "calibraciones/datos/camara_robot.json")
         self.ruta_calib = ruta if os.path.isabs(ruta) else os.path.join(raiz, ruta)
         z_suelo = g.get("SOPORTE_SUELO_Z") if g.get("SOPORTE_HOMBROS", False) else 0.0
         # (17-nov) antes acababa en y = −1,10 m y z = 0,60 m: la cajonera y el panel del punto de dejada

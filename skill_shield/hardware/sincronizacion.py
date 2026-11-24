@@ -1,7 +1,7 @@
 """
 Mano física: construcción del array de motores desde la simulación + límite de seguridad.
 
-El puente con el SDK de la OrcaHand sigue en orca_hardware.py (raíz del proyecto).
+El puente con el SDK de la OrcaHand está en orca_hardware.py (en esta misma carpeta).
 
 (Extraído de Skill_Shield_Nivel_6.py — código sin cambios, solo reubicado.)
 """

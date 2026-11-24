@@ -8,7 +8,7 @@ zona de agarre a ~0,4-0,5 m y desde otro lado:
 
   · Proceso propio: el mismo skill_shield/autonomo/camara.py con --rol a (sin mapa de obstáculos: el mapa lo sigue
     haciendo solo la cabeza), con su calibración cámara→robot (AUTONOMO_CAM_A_CALIB_ARCHIVO, la saca
-    calibrar_camara_robot.py --camara a) y sus canales (imagen, info y lista de pelotas/herramientas).
+    calibraciones/calibrar_camara_robot.py --camara a) y sus canales (imagen, info y lista de pelotas/herramientas).
   · Tarea (tarea.py): si la cámara A ve la MISMA pelota que la cabeza (a ≤ AUTONOMO_CAM_A_MAX_DIF_M), estable y
     reciente, se planifica con la medida de la A, se desliza por SU rayo al apoyarla en la mesa y se afina con ella
     al llegar encima (lo que tape el brazo se mira desde la A). Si la A no la ve, todo sigue como antes (cabeza).

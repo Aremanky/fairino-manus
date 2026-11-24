@@ -1,5 +1,5 @@
 """
-Pruebas de la calibración cámara de cabeza → robot (calibrar_camara_robot.py), sin robot ni cámara:
+Pruebas de la calibración cámara de cabeza → robot (calibraciones/calibrar_camara_robot.py), sin robot ni cámara:
 
     python -m pytest tests/test_calibracion_robot.py -q
 

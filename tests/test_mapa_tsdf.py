@@ -29,7 +29,7 @@ LIM = ((-1.0, 0.6), (-1.6, 0.4), (-0.975, 0.9))
 
 
 def _T():
-    return C.cargar(os.path.join(RAIZ, "camara_robot.json"))["T_mundo_cam"]
+    return C.cargar(os.path.join(RAIZ, "calibraciones", "datos", "camara_robot.json"))["T_mundo_cam"]
 
 
 def _rayos(T):

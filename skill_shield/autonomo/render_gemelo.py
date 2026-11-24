@@ -47,7 +47,7 @@ def _parsear():
     ap.add_argument("--alto", type=int, default=int(getattr(cfg, "AUTONOMO_SIM_ALTO", 540)))
     ap.add_argument("--fps", type=float, default=float(getattr(cfg, "AUTONOMO_SIM_FPS", 20)))
     ap.add_argument("--gl", default=getattr(cfg, "AUTONOMO_SIM_GL", "egl"))
-    ap.add_argument("--calibracion", default=getattr(cfg, "CALIB_ROBOT_ARCHIVO", "camara_robot.json"))
+    ap.add_argument("--calibracion", default=getattr(cfg, "CALIB_ROBOT_ARCHIVO", "calibraciones/datos/camara_robot.json"))
     ap.add_argument("--calidad", type=int, default=int(getattr(cfg, "AUTONOMO_JPEG_CALIDAD", 80)))
     ap.add_argument("--padre", type=int, default=0)
     ap.add_argument("--ventana", action="store_true")

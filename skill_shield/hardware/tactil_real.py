@@ -28,7 +28,7 @@ def _p(nombre, defecto):
 
 _RAIZ = os.path.dirname(os.path.abspath(_cfg.__file__))
 ORCA_TACTIL_UDP        = str(_p("ORCA_TACTIL_UDP", "127.0.0.1:47311"))
-ORCA_TACTIL_PUENTE     = str(_p("ORCA_TACTIL_PUENTE", os.path.join(_RAIZ, "puente_tactil.py")))
+ORCA_TACTIL_PUENTE     = str(_p("ORCA_TACTIL_PUENTE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "puente_tactil.py")))
 ORCA_TACTIL_LANZAR     = bool(_p("ORCA_TACTIL_LANZAR_PUENTE", True))
 ORCA_TACTIL_MAX_EDAD_S = float(_p("ORCA_TACTIL_MAX_EDAD_S", 0.15))   # datos más viejos = sin datos
 ORCA_TACTIL_ARGS_PUENTE = list(_p("ORCA_TACTIL_ARGS_PUENTE", []))   # p. ej. ["--puerto", "/dev/ttyACM0"]

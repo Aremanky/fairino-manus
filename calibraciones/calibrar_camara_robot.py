@@ -3,36 +3,36 @@
 Calibración cámara de cabeza → robot (paso 4 de la hoja de ruta, 10-nov)
 =========================================================================
 Tablero ChArUco en la brida/mano + cámara de cabeza fija en el soporte («ojo fuera de la mano»).
-Resultado: camara_robot.json con T_mundo_cam (marco del MJCF, el del gemelo y la IK).
+Resultado: calibraciones/datos/camara_robot.json con T_mundo_cam (marco del MJCF, el del gemelo y la IK).
 
 La cámara viaja en la MISMA peana que el robot: al mover la peana la calibración NO cambia.
 Las posturas se guardan en ángulos de joint (calib_posturas.json), así que valen siempre.
 
 Uso (cierra antes el modo autónomo / la teleoperación: la cámara y el robot tienen que estar libres):
-  python calibrar_camara_robot.py --generar-tablero   # PNG del tablero para imprimir y montar
-  python calibrar_camara_robot.py --auto              # AUTOMÁTICA: pon el robot donde la cámara vea
-                                                      #   el tablero y mantén el pedal; el programa
-                                                      #   elige las posturas, las recorre y calibra
-  python calibrar_camara_robot.py --repetir           # repite las posturas guardadas y recalibra
-  python calibrar_camara_robot.py --verificar         # va a unas pocas posturas y comprueba el error
-  python calibrar_camara_robot.py --verificar --sin   # (19-nov) igual pero SIN PEDAL: entra por la postura
-                                                      #   guardada más cercana y va sola a ~4 posturas
-  python calibrar_camara_robot.py --verificar --aqui  # comprueba en la postura actual, sin moverlo
-  python calibrar_camara_robot.py --manual --sliders  # (20-nov) MANUAL CON SLIDERS: mueves el robot con la
-                                                      #   ventana de sliders (ARMAR + pedal P mantenido);
-                                                      #   cada movimiento se comprueba antes (soporte, mesa…).
-                                                      #   + --sin: sin pedal, basta con ARMAR los sliders
-  python calibrar_camara_robot.py --manual            # MANUAL: mueves tú el robot (arrastre en la
-                                                      #   WebApp) y pulsas ESPACIO en cada postura
-  python calibrar_camara_robot.py --recalcular        # recalcula con las muestras guardadas
-  python calibrar_camara_robot.py --auto --sin        # (17-nov) cualquier modo + --sin: SIN PEDAL, el robot se
-                                                      #   mueve solo (P = pausa/seguir, Q/Esc = parar y salir)
-  python calibrar_camara_robot.py --girar-posturas 180  # la mano se ha vuelto a montar girada 180° en la
-                                                      #   brida: adapta UNA VEZ las posturas guardadas
-                                                      #   (J6 ± 180°) y el tablero de camara_robot.json
-  python calibrar_camara_robot.py --camara a --auto   # (19-nov) la CÁMARA A (OAK-D fija de la mesa): igual,
-                                                      #   con sus archivos (AUTONOMO_CAM_A_CALIB_ARCHIVO,
-                                                      #   _POSTURAS, _MUESTRAS); vale con cualquier modo
+  python calibraciones/calibrar_camara_robot.py --generar-tablero   # PNG del tablero para imprimir y montar
+  python calibraciones/calibrar_camara_robot.py --auto              # AUTOMÁTICA: pon el robot donde la cámara vea
+                                                                    #   el tablero y mantén el pedal; el programa
+                                                                    #   elige las posturas, las recorre y calibra
+  python calibraciones/calibrar_camara_robot.py --repetir           # repite las posturas guardadas y recalibra
+  python calibraciones/calibrar_camara_robot.py --verificar         # va a unas pocas posturas y comprueba el error
+  python calibraciones/calibrar_camara_robot.py --verificar --sin   # (19-nov) igual pero SIN PEDAL: entra por la postura
+                                                                    #   guardada más cercana y va sola a ~4 posturas
+  python calibraciones/calibrar_camara_robot.py --verificar --aqui  # comprueba en la postura actual, sin moverlo
+  python calibraciones/calibrar_camara_robot.py --manual --sliders  # (20-nov) MANUAL CON SLIDERS: mueves el robot con la
+                                                                    #   ventana de sliders (ARMAR + pedal P mantenido);
+                                                                    #   cada movimiento se comprueba antes (soporte, mesa…).
+                                                                    #   + --sin: sin pedal, basta con ARMAR los sliders
+  python calibraciones/calibrar_camara_robot.py --manual            # MANUAL: mueves tú el robot (arrastre en la
+                                                                    #   WebApp) y pulsas ESPACIO en cada postura
+  python calibraciones/calibrar_camara_robot.py --recalcular        # recalcula con las muestras guardadas
+  python calibraciones/calibrar_camara_robot.py --auto --sin        # (17-nov) cualquier modo + --sin: SIN PEDAL, el robot se
+                                                                    #   mueve solo (P = pausa/seguir, Q/Esc = parar y salir)
+  python calibraciones/calibrar_camara_robot.py --girar-posturas 180  # la mano se ha vuelto a montar girada 180° en la
+                                                                    #   brida: adapta UNA VEZ las posturas guardadas
+                                                                    #   (J6 ± 180°) y el tablero de camara_robot.json
+  python calibraciones/calibrar_camara_robot.py --camara a --auto   # (19-nov) la CÁMARA A (OAK-D fija de la mesa): igual,
+                                                                    #   con sus archivos (AUTONOMO_CAM_A_CALIB_ARCHIVO,
+                                                                    #   _POSTURAS, _MUESTRAS); vale con cualquier modo
 
 El robot solo se mueve MIENTRAS se mantiene el pedal de hombre muerto (TELEOP_FR5_PEDAL =
 "teclado": tecla P con la ventana delante, o "evdev"); al soltarlo se queda quieto. Velocidad
@@ -76,10 +76,14 @@ import time
 import cv2
 import numpy as np
 
-import config as cfg
-from skill_shield.autonomo import calibracion as C
+# Este script vive en calibraciones/: la raíz del repo (config.py, skill_shield/) tiene que estar en sys.path
+RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if RAIZ not in sys.path:
+    sys.path.insert(0, RAIZ)
 
-RAIZ = os.path.dirname(os.path.abspath(__file__))
+import config as cfg                                        # noqa: E402
+from skill_shield.autonomo import calibracion as C          # noqa: E402
+
 TABLERO = dict(cfg.CALIB_ROBOT_TABLERO)
 
 
@@ -88,9 +92,9 @@ def _ruta(nombre_cfg, defecto):
     return r if os.path.isabs(r) else os.path.join(RAIZ, r)
 
 
-ARCHIVO = _ruta("CALIB_ROBOT_ARCHIVO", "camara_robot.json")
-POSTURAS = _ruta("CALIB_ROBOT_POSTURAS", "calib_posturas.json")
-MUESTRAS = _ruta("CALIB_ROBOT_MUESTRAS", "calib_muestras.json")
+ARCHIVO = _ruta("CALIB_ROBOT_ARCHIVO", "calibraciones/datos/camara_robot.json")
+POSTURAS = _ruta("CALIB_ROBOT_POSTURAS", "calibraciones/datos/calib_posturas.json")
+MUESTRAS = _ruta("CALIB_ROBOT_MUESTRAS", "calibraciones/datos/calib_muestras.json")
 # (19-nov) qué cámara se calibra: la de cabeza (por defecto) o la cámara A de la mesa (--camara a). Cada una con su
 # archivo, sus posturas y sus muestras; las dos con el mismo tablero
 CAMARA = "cabeza"
@@ -105,9 +109,9 @@ def elegir_camara(cual):
     if cual == "a":
         CAM_MXID = getattr(cfg, "AUTONOMO_CAM_A_MXID", None)
         CAM_NOMBRE = "Cámara A (mesa)"
-        ARCHIVO = _ruta("AUTONOMO_CAM_A_CALIB_ARCHIVO", "camara_a_robot.json")
-        POSTURAS = _ruta("AUTONOMO_CAM_A_POSTURAS", "calib_posturas_a.json")
-        MUESTRAS = _ruta("AUTONOMO_CAM_A_MUESTRAS", "calib_muestras_a.json")
+        ARCHIVO = _ruta("AUTONOMO_CAM_A_CALIB_ARCHIVO", "calibraciones/datos/camara_a_robot.json")
+        POSTURAS = _ruta("AUTONOMO_CAM_A_POSTURAS", "calibraciones/datos/calib_posturas_a.json")
+        MUESTRAS = _ruta("AUTONOMO_CAM_A_MUESTRAS", "calibraciones/datos/calib_muestras_a.json")
         if not CAM_MXID:
             sys.exit("✗ Falta AUTONOMO_CAM_A_MXID en config.py (el MxId de la cámara A).")
         print(f"📷 Calibrando la CÁMARA A (mesa) {CAM_MXID} → {os.path.basename(ARCHIVO)} "
@@ -182,7 +186,8 @@ def generar_tablero():
     # en vez de 37,5 mm al imprimir a 300 ppp).
     img = board.generateImage((cuadros[0] * px + 2 * margen, cuadros[1] * px + 2 * margen),
                               marginSize=margen)
-    salida = os.path.join(RAIZ, "tablero_calib_robot.png")
+    salida = os.path.join(RAIZ, "calibraciones", "tableros", "tablero_calib_robot.png")
+    os.makedirs(os.path.dirname(salida), exist_ok=True)
     try:                                   # (16-nov) con los 300 ppp dentro del PNG: al 100 % sale a su tamaño
         from PIL import Image
         Image.fromarray(img).save(salida, dpi=(300, 300))
@@ -271,7 +276,7 @@ def modo_girar_posturas(grados):
             _escribir_json(ARCHIVO, d)
             print(f"✓ {ARCHIVO}: tablero girado {float(grados):.0f}° con la mano (la cámara no cambia). "
                   f"Copia: {ARCHIVO}.antes_giro")
-    print("Ahora:  python calibrar_camara_robot.py --verificar   (y si sale mal, --repetir)")
+    print("Ahora:  python calibraciones/calibrar_camara_robot.py --verificar   (y si sale mal, --repetir)")
     return True
 
 
@@ -460,7 +465,7 @@ def modelo_colision(cadena, T_mundo_cam=None):
         # (19-nov) calibrando la A: ella es «la cámara» del modelo y la de cabeza, si está calibrada, otra caja más
         from skill_shield.autonomo.mapa import _centro_calibrada
         c_cab = _centro_calibrada({k: getattr(cfg, k) for k in dir(cfg) if k.isupper()},
-                                  "CALIB_ROBOT_ARCHIVO", "camara_robot.json")
+                                  "CALIB_ROBOT_ARCHIVO", "calibraciones/datos/camara_robot.json")
         return _mc(cadena, cfg, T_mundo_cam, radio_mano=RADIO_MANO, nombre_camara="camara_a",
                    otras_camaras=[("camara_cabeza", c_cab)] if c_cab is not None else [])
     return _mc(cadena, cfg, T_mundo_cam, radio_mano=RADIO_MANO)
@@ -1325,7 +1330,7 @@ def modo_repetir_o_verificar(verificar, aqui=False, s=None):
                         errores_mm=[round(float(v), 2) for v in e], ok=ok, umbral_mm=ERROR_MAX))
     print(f"\n{'✅' if ok else '❌'} Verificación: error medio {np.mean(e):.1f} mm, máx {np.max(e):.1f} mm "
           f"(umbral {ERROR_MAX:.0f} mm)" + ("" if ok else
-          " → la cámara o el tablero se han movido: recalibra con  python calibrar_camara_robot.py --repetir"))
+          " → la cámara o el tablero se han movido: recalibra con  python calibraciones/calibrar_camara_robot.py --repetir"))
     return ok
 
 
@@ -1541,7 +1546,7 @@ def main():
     global SIN_PEDAL
     SIN_PEDAL = bool(args.sin)
     if args.sliders and not args.manual:
-        sys.exit("✗ --sliders va con --manual:  python calibrar_camara_robot.py [--camara a] --manual --sliders")
+        sys.exit("✗ --sliders va con --manual:  python calibraciones/calibrar_camara_robot.py [--camara a] --manual --sliders")
     if args.camara != "cabeza":
         elegir_camara(args.camara)
 

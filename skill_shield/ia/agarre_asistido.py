@@ -183,7 +183,7 @@ class AgarreAsistido:
         import os
         from skill_shield.autonomo.tarea import Planificador
         T = None
-        ruta = self.cfg.get("CALIB_ROBOT_ARCHIVO", "camara_robot.json")
+        ruta = self.cfg.get("CALIB_ROBOT_ARCHIVO", "calibraciones/datos/camara_robot.json")
         ruta = ruta if os.path.isabs(ruta) else os.path.join(self.raiz, ruta)
         if os.path.exists(ruta):
             from skill_shield.autonomo.calibracion import cargar

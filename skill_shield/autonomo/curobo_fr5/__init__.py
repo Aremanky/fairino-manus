@@ -13,5 +13,5 @@ Uso en el modo autónomo (config.py): AUTONOMO_TAREA_PLANIFICADOR = "curobo". cu
 tramo y el planificador del proyecto lo VERIFICA con todas sus comprobaciones (mallas de la mano
 con su postura, lo que lleva, el J4, las mesas...); si no lo acepta, o si cuRobo no está
 instalado, se usa el camino propio como siempre. Instalación: ./arrancar_nivel6.sh (si falta);
-pruebas: ./arrancar_nivel6.sh --probar o probar_curobo.py en la raíz del proyecto.
+pruebas: ./arrancar_nivel6.sh --probar o python diagnosticos/probar_curobo.py.
 """

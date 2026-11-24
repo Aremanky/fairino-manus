@@ -31,7 +31,7 @@ if "mujoco" not in sys.modules:                                    # PiezasMano 
     _mj.mj_name2id = lambda m, t, n: m.nombres.index(n) if n in m.nombres else -1
     sys.modules["mujoco"] = _mj
 
-from orca_hardware import _CONFIG_PATH                             # noqa: E402
+from skill_shield.hardware.orca_hardware import _CONFIG_PATH       # noqa: E402
 from skill_shield.autonomo.mano import ESCALA_POS, MonitorMano, TraductorMano   # noqa: E402
 from skill_shield.autonomo.mapa import (MapaOcupacion, PiezasMano, desempaquetar_pose,   # noqa: E402
                                         empaquetar_pose)

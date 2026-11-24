@@ -1,7 +1,7 @@
 """
 (17-nov) Migración a cuRobo: lo que se puede probar SIN GPU ni cuRobo (URDF, mundo/ESDF y cómo el
 planificador del proyecto verifica lo que propone cuRobo). Con cuRobo instalado y la GPU, además,
-probar_curobo.py en la raíz del proyecto.
+python diagnosticos/probar_curobo.py.
 
     python -m pytest tests/test_curobo.py -q
 """
@@ -166,7 +166,7 @@ def test_sin_curobo_instalado_sigue_el_propio(cadena):
     pl = TA.Planificador(cadena, dict(G, AUTONOMO_TAREA_PLANIFICADOR="curobo"))
     try:
         import curobo  # noqa: F401
-        pytest.skip("cuRobo está instalado: esto se prueba con probar_curobo.py")
+        pytest.skip("cuRobo está instalado: esto se prueba con diagnosticos/probar_curobo.py")
     except ImportError:
         pass
     assert pl.curobo is None
