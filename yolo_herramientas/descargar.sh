@@ -4,6 +4,8 @@
 #   ./yolo_herramientas/descargar.sh paco        # anotaciones de PACO-LVIS (las imágenes las baja convertir_paco.py)
 #   ./yolo_herramientas/descargar.sh handal      # HANDAL desde Google Drive (MUCHOS GB: ver abajo)
 #   ./yolo_herramientas/descargar.sh roboflow    # proyectos de Roboflow de clases.yaml (hace falta ROBOFLOW_API_KEY)
+#   ./yolo_herramientas/descargar.sh ninja       # Dataset Ninja de clases.yaml (METU-ALET: 49 herramientas, ~2,7 GB)
+#   ./yolo_herramientas/descargar.sh open_images # Open Images V7: solo las imágenes con herramientas (FiftyOne)
 #   ./yolo_herramientas/descargar.sh coco        # (opcional) COCO train2017+val2017 enteros, 19 GB
 set -uo pipefail
 RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -56,6 +58,38 @@ roboflow() {
     cd "$RAIZ/yolo_herramientas" && "$PY" descargar_roboflow.py
 }
 
+ninja() {
+    "$PY" -m pip install -q --upgrade dataset-tools || { echo "❌ no se pudo instalar dataset-tools"; exit 1; }
+    "$PY" - "$DATOS/ninja" "$RAIZ/yolo_herramientas" <<'EOF2'
+import glob, os, re, sys, tarfile
+destino, yh = sys.argv[1], sys.argv[2]
+sys.path.insert(0, yh)
+from comun import cargar_config
+import dataset_tools as dtools
+for nombre in cargar_config().get("dataset_ninja") or []:
+    d = os.path.join(destino, re.sub(r"[^a-z0-9]+", "-", nombre.lower()).strip("-"))
+    if glob.glob(os.path.join(d, "**", "ann", "*.json"), recursive=True):
+        print(f"✅ {nombre} ya está en {d}")
+        continue
+    print(f"⬇ {nombre} → {d}")
+    os.makedirs(d, exist_ok=True)
+    dtools.download(dataset=nombre, dst_dir=d)
+    for t in glob.glob(os.path.join(d, "**", "*.tar"), recursive=True):
+        with tarfile.open(t) as tf:
+            try:
+                tf.extractall(os.path.dirname(t), filter="data")
+            except TypeError:
+                tf.extractall(os.path.dirname(t))
+        os.remove(t)
+    print(f"   {len(glob.glob(os.path.join(d, '**', 'ann', '*.json'), recursive=True))} anotaciones")
+EOF2
+}
+
+open_images() {
+    "$PY" -c "import fiftyone" 2>/dev/null || "$PY" -m pip install -q fiftyone || { echo "❌ no se pudo instalar fiftyone"; exit 1; }
+    cd "$RAIZ/yolo_herramientas" && "$PY" descargar_open_images.py
+}
+
 coco() {
     mkdir -p "$DATOS/coco" && cd "$DATOS/coco" || exit 1
     for s in train2017 val2017; do
@@ -68,6 +102,8 @@ case "${1:-}" in
     paco) paco ;;
     handal) handal ;;
     roboflow) roboflow ;;
+    ninja) ninja ;;
+    open_images) open_images ;;
     coco) coco ;;
-    *) sed -n '2,7p' "$0" | sed 's/^# \?//'; exit 2 ;;
+    *) sed -n '2,9p' "$0" | sed 's/^# \?//'; exit 2 ;;
 esac

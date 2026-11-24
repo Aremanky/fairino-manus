@@ -22,6 +22,47 @@ Es un entorno **aparte** de `venv_nivel6`: Ultralytics instala `opencv-python` y
 rompe `cv2.aruco`. Al final dice si PyTorch ve la GPU; si no la ve, no sigas (entrenaría en la CPU).
 
 ---
+## Camino rápido: solo datasets públicos (`publicos.sh`)
+
+Sin fotos propias, en dos fases, con todo lo público que hay:
+
+| Fuente | Qué aporta | Mango |
+|---|---|---|
+| HANDAL | 9 categorías de taller, decenas de miles de imágenes | sí |
+| PACO | martillos, alicates, destornilladores, llaves, taladros, tijeras, cuchillos | sí |
+| METU-ALET (Dataset Ninja) | 49 herramientas de taller, obra, jardín y oficina | no (lo pone la fase 1) |
+| Open Images V7 | martillo, destornillador, taladro, llave, tijeras, motosierra, hacha, linterna… | no |
+| Roboflow Universe | herramientas de mano en fotos variadas | no |
+
+1. **FASE 1 «mango»:** se entrena con HANDAL + PACO, que son las únicas fuentes con el mango marcado.
+2. **COMPLETAR:** ese modelo marca el mango dentro de cada herramienta de las demás fuentes.
+3. **FASE 2 «amplio»:** se entrena con todo junto. El resultado es el modelo final, con las 37 herramientas de `clases.yaml`.
+
+```bash
+source venv_yolo/bin/activate
+export ROBOFLOW_API_KEY=xxxxxxxx                    # opcional (app.roboflow.com → Settings → API Keys)
+./yolo_herramientas/publicos.sh descargar           # PACO, METU-ALET, Open Images, Roboflow
+./yolo_herramientas/descargar.sh handal             # HANDAL: bajar los zips a mano (lo explica) y repetir
+./yolo_herramientas/publicos.sh convertir           # todo a nuestras clases; las cajas, con SAM 2 (horas)
+#    → mira los mosaicos de $HERRAMIENTAS_DATOS/convertidos/*/revision/
+./yolo_herramientas/publicos.sh fase1               # entrena mango_v1
+./yolo_herramientas/publicos.sh completar           # → mira convertidos/*_mango/revision/
+./yolo_herramientas/publicos.sh fase2               # entrena herramientas_amplio (el modelo final)
+```
+Cada paso se puede repetir: lo ya bajado y lo ya pasado por SAM no se rehace. Hay que mirar los mosaicos
+entre pasos. Las máscaras que salen de cajas con SAM y los mangos que pone la fase 1 son automáticos, y
+un error ahí solo se ve a ojo.
+
+- **Más herramientas:** añadid su nombre en `clases` (al final) y en `nombres` de `clases.yaml`. Después se
+  añaden más fuentes: `open_images.clases`, `dataset_ninja` (por ejemplo «Small Size Construction Tools»,
+  12 herramientas de obra, ~132 GB) o más proyectos en `roboflow`.
+- **Equilibrio:** HANDAL tiene muchas más imágenes que el resto. En la fase 2 se limita a `MAX_HANDAL=15000`
+  para que no se coma a las demás.
+- **Modelo final:** `runs/segment/herramientas_amplio/weights/best.pt`. Para probarlo en vivo, el paso 6.
+
+Los pasos de abajo son lo mismo, una fuente cada vez, por si hay que repetir o revisar una sola.
+
+---
 ## 2. Datasets públicos → nuestro formato
 
 Cada `convertir_*.py` deja su fuente en `$HERRAMIENTAS_DATOS/convertidos/<fuente>/` ya con nuestras clases.
@@ -61,15 +102,16 @@ export ROBOFLOW_API_KEY=xxxxxxxx         # app.roboflow.com → Settings → API
 Los proyectos están en `clases.yaml` → `roboflow` (si una versión no existe, el script lo dice: mira en la
 web qué versiones tiene). Estas fuentes no traen el mango: no entran en el dataset hasta el paso 7.
 
-### 2d. Datasets solo con cajas (opcional: METU-ALET, herramientas de obra…)
-Exportados en formato YOLO de detección: `cajas_a_mascaras.py` les saca la máscara con SAM 2 y luego
-`convertir_yolo_seg.py` los pasa a nuestras clases (ver la ayuda de cada uno). Tampoco traen mango.
+### 2d. Datasets solo con cajas (METU-ALET, Open Images, herramientas de obra…)
+`convertir_supervisely.py` (los de Dataset Ninja) o `descargar_open_images.py` los dejan en formato YOLO de
+detección; `cajas_a_mascaras.py` les saca la máscara con SAM 2 y `convertir_yolo_seg.py` los pasa a nuestras
+clases. Tampoco traen mango (ver paso 7). `publicos.sh convertir` hace todo esto solo.
 
 ---
-## 3. Fotos propias (imprescindible)
+## 3. Fotos propias (más adelante)
 
-Lo público enseña qué es un martillo; lo que hace que funcione **en la sala y con nuestra cámara** son
-fotos tomadas con la propia OAK-D de la cabeza.
+Lo público enseña qué es un martillo; lo que más mejora el resultado **en la sala y con nuestra cámara** son
+fotos tomadas con la propia OAK-D de la cabeza. Cuando las haya, entran como una fuente más.
 
 ```bash
 ./venv_nivel6/bin/python yolo_herramientas/capturar_oak.py --sesion mesa_luz_dia
@@ -174,8 +216,11 @@ yolo export model=runs/segment/herramientas_v2/weights/best.pt format=engine hal
 | Archivo | Qué hace |
 |---|---|
 | `clases.yaml` | clases y cómo se traduce cada dataset a ellas |
+| `publicos.sh` | el camino solo con datasets públicos: descargar → convertir → fase 1 → completar → fase 2 |
 | `instalar.sh` | crea `venv_yolo` |
-| `descargar.sh` | PACO, HANDAL, Roboflow, COCO entero (opcional) |
+| `descargar.sh` | PACO, HANDAL, Dataset Ninja, Open Images, Roboflow, COCO entero (opcional) |
+| `descargar_open_images.py` · `descargar_roboflow.py` | los usa `descargar.sh` |
+| `convertir_supervisely.py` | Dataset Ninja (METU-ALET…) → YOLO con sus nombres |
 | `convertir_paco.py` · `convertir_handal.py` · `convertir_yolo_seg.py` | cada dataset → `convertidos/<fuente>/` |
 | `cajas_a_mascaras.py` | dataset de cajas → máscaras con SAM 2 |
 | `capturar_oak.py` | fotos con la cámara de cabeza (con `venv_nivel6`) |

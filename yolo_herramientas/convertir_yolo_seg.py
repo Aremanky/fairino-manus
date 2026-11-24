@@ -3,7 +3,7 @@
 Cualquier dataset en formato YOLO-seg (Roboflow, una exportación de CVAT «Ultralytics YOLO Segmentation»,
 vuestras fotos ya etiquetadas…) → nuestras clases.
 
-Lee los nombres de clase de su data.yaml y los traduce con el bloque «yolo_seg» de clases.yaml (lo que no
+Lee los nombres de clase de su data.yaml y los traduce con el bloque «nombres» de clases.yaml (lo que no
 esté ahí se ignora y se dice). Sirve con las dos disposiciones habituales:
     train/images + train/labels (+ valid/, test/)       ← Roboflow
     images/train + labels/train (+ val)                 ← Ultralytics / CVAT
@@ -63,7 +63,7 @@ def main():
     a = ap.parse_args()
 
     cfg = cargar_config()
-    mapa = {str(k).strip().lower(): id_clase(cfg, v) for k, v in cfg["yolo_seg"].items()}
+    mapa = {str(k).strip().lower(): id_clase(cfg, v) for k, v in cfg["nombres"].items()}
     nombres = nombres_de(a.carpeta)
     traduccion, ignoradas = {}, []
     for i, n in nombres.items():
@@ -74,7 +74,7 @@ def main():
             ignoradas.append(n)
     print("Clases → " + " · ".join(f"{nombres[i]}→{cfg['clases'][c]}" for i, c in traduccion.items()))
     if ignoradas:
-        print("⚠ Se ignoran (añádelas a «yolo_seg» en clases.yaml si las quieres): " + ", ".join(ignoradas))
+        print("⚠ Se ignoran (añádelas a «nombres» en clases.yaml si las quieres): " + ", ".join(ignoradas))
 
     esc = Escritor(a.fuente, cfg, max_lado=a.max_lado, limpiar=True)
     st = Counter()

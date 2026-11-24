@@ -16,6 +16,7 @@ import argparse
 import glob
 import json
 import os
+import random
 import shutil
 from collections import Counter
 
@@ -49,6 +50,8 @@ def main():
     ap.add_argument("--fuentes", nargs="*", default=None, help="por defecto, todas las de convertidos/")
     ap.add_argument("--repetir", nargs="*", default=[], metavar="FUENTE=N",
                     help="repetir N veces las imágenes de TRAIN de una fuente (las vuestras pesan más)")
+    ap.add_argument("--max", nargs="*", default=[], metavar="FUENTE=N",
+                    help="como mucho N imágenes de TRAIN de esa fuente (para que HANDAL no se coma a las demás)")
     ap.add_argument("--incluir-sin-mango", action="store_true")
     a = ap.parse_args()
 
@@ -57,6 +60,7 @@ def main():
     base = os.path.join(dir_datos(), "convertidos")
     fuentes = a.fuentes or sorted(d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d)))
     repetir = {k: int(v) for k, v in (x.split("=") for x in a.repetir)}
+    maximo = {k: int(v) for k, v in (x.split("=") for x in a.max)}
     destino = os.path.join(dir_datos(), "yolo", a.nombre)
     if os.path.isdir(destino):
         shutil.rmtree(destino)
@@ -68,6 +72,9 @@ def main():
     imgs = Counter()
     for fu in fuentes:
         d = os.path.join(base, fu)
+        if fu + "_mango" in fuentes and os.path.isdir(d + "_mango"):
+            print(f"· {fu}: se usa su versión con mango ({fu}_mango)")
+            continue
         if not os.path.isdir(d):
             print(f"⚠ {fu}: no está en {base}, se salta")
             continue
@@ -78,7 +85,10 @@ def main():
             continue
         n_rep = repetir.get(fu, 1)
         for s in ("train", "val"):
-            for img in sorted(glob.glob(os.path.join(d, "images", s, "*"))):
+            lista = sorted(glob.glob(os.path.join(d, "images", s, "*")))
+            if s == "train" and fu in maximo and len(lista) > maximo[fu]:
+                lista = [lista[i] for i in sorted(random.Random(0).sample(range(len(lista)), maximo[fu]))]
+            for img in lista:
                 stem = os.path.splitext(os.path.basename(img))[0]
                 lab = os.path.join(d, "labels", s, stem + ".txt")
                 if not os.path.exists(lab):
@@ -91,7 +101,7 @@ def main():
                     enlazar(lab, os.path.join(destino, "labels", s, stem + suf + ".txt"))
                     total[s].update(clases)
                     imgs[s] += 1
-        print(f"✓ {fu}" + (f" (x{n_rep} en train)" if n_rep > 1 else ""))
+        print(f"✓ {fu}" + (f" (x{n_rep} en train)" if n_rep > 1 else "") + (f" (máx. {maximo[fu]} en train)" if fu in maximo else ""))
 
     ruta_yaml = os.path.join(destino, a.nombre + ".yaml")
     with open(ruta_yaml, "w", encoding="utf-8") as f:

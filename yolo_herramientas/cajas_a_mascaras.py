@@ -7,8 +7,9 @@ herramientas de obra o cualquier proyecto de Roboflow que solo tenga cajas (expo
     python cajas_a_mascaras.py <carpeta_con_cajas> <carpeta_salida>
     python convertir_yolo_seg.py <carpeta_salida> --fuente alet        # y luego, a nuestras clases
 
-La salida conserva la estructura y el data.yaml de la entrada. Las máscaras de SAM con cajas suelen ser
-buenas, pero REVÍSALAS (revisar.py) antes de entrenar con ellas. Estas fuentes no traen el mango:
+La salida conserva la estructura y el data.yaml de la entrada; lo que ya era polígono se deja igual. Las máscaras de SAM con cajas suelen ser
+buenas, pero REVÍSALAS (revisar.py) antes de entrenar con ellas. Si se corta, al relanzarlo sigue
+por donde iba. Estas fuentes no traen el mango:
 completadlo con preetiquetar.py --completar-mango.
 """
 import argparse
@@ -37,7 +38,8 @@ def main():
         os.makedirs(a.salida, exist_ok=True)
         shutil.copyfile(y, os.path.join(a.salida, os.path.basename(y)))
     n = 0
-    for txt in sorted(glob.glob(os.path.join(a.entrada, "**", "labels", "**", "*.txt"), recursive=True)):
+    txts = sorted(set(glob.glob(os.path.join(a.entrada, "**", "labels", "**", "*.txt"), recursive=True)))
+    for txt in txts:
         base = os.path.splitext(txt.replace(os.sep + "labels" + os.sep, os.sep + "images" + os.sep, 1))[0]
         img = next((base + e for e in EXT + tuple(x.upper() for x in EXT) if os.path.exists(base + e)), None)
         if img is None:
@@ -46,18 +48,25 @@ def main():
         rel_img = os.path.relpath(img, a.entrada)
         os.makedirs(os.path.dirname(os.path.join(a.salida, rel_lab)), exist_ok=True)
         os.makedirs(os.path.dirname(os.path.join(a.salida, rel_img)), exist_ok=True)
-        shutil.copyfile(img, os.path.join(a.salida, rel_img))
+        if os.path.exists(os.path.join(a.salida, rel_lab)):      # ya hecha (se puede cortar y seguir)
+            n += 1
+            continue
+        try:
+            os.link(img, os.path.join(a.salida, rel_img))
+        except OSError:
+            shutil.copyfile(img, os.path.join(a.salida, rel_img))
         im = cv2.imread(img)
         h, w = im.shape[:2]
-        clases, cajas = [], []
+        clases, cajas, lineas = [], [], []
         with open(txt) as f:
             for l in f:
                 v = l.split()
-                if len(v) == 5:
+                if len(v) >= 7:                        # ya es un polígono: se deja tal cual
+                    lineas.append(l.strip())
+                elif len(v) == 5:
                     c, xc, yc, bw, bh = int(float(v[0])), *map(float, v[1:])
                     clases.append(c)
                     cajas.append([(xc - bw / 2) * w, (yc - bh / 2) * h, (xc + bw / 2) * w, (yc + bh / 2) * h])
-        lineas = []
         if cajas:
             r = sam(img, bboxes=cajas, verbose=False)[0]
             mascaras = r.masks.data.cpu().numpy() if r.masks is not None else []
@@ -70,8 +79,8 @@ def main():
         with open(os.path.join(a.salida, rel_lab), "w") as f:
             f.write("\n".join(lineas) + ("\n" if lineas else ""))
         n += 1
-        if n % 100 == 0:
-            print(f"   {n} imágenes", flush=True)
+        if n % 200 == 0:
+            print(f"   {n}/{len(txts)} imágenes", flush=True)
     print(f"✅ {n} imágenes con máscaras de SAM en {a.salida}")
 
 
