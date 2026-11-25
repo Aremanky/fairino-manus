@@ -14,7 +14,7 @@ import random
 import cv2
 import numpy as np
 
-from comun import cargar_config
+from comun import cargar_config, ruta_datos
 
 COLORES = [(60, 200, 60), (255, 120, 0), (0, 140, 255), (200, 0, 200), (0, 220, 255), (255, 0, 120),
            (120, 120, 255), (0, 255, 160), (180, 180, 0), (255, 200, 120), (90, 60, 200), (60, 160, 255)]
@@ -46,6 +46,7 @@ def main():
     ap.add_argument("--n", type=int, default=24)
     ap.add_argument("--split", default="*")
     a = ap.parse_args()
+    a.carpeta = ruta_datos(a.carpeta)          # vale «paco» o la ruta entera
     nombres = cargar_config()["clases"]
     imgs = sorted(glob.glob(os.path.join(a.carpeta, "images", a.split, "*")))
     if not imgs:

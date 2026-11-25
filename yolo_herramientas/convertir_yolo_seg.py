@@ -13,6 +13,7 @@ esté ahí se ignora y se dice). Sirve con las dos disposiciones habituales:
 """
 import argparse
 import glob
+import hashlib
 import os
 import re
 import sys
@@ -20,7 +21,7 @@ from collections import Counter
 
 import yaml
 
-from comun import Escritor, cargar_config, id_clase, particion
+from comun import Escritor, cargar_config, particion, ruta_datos, traductor
 
 EXT_IMG = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
 
@@ -60,16 +61,20 @@ def main():
     ap.add_argument("--repartir", action="store_true", help="ignorar sus splits y repartir train/val por imagen")
     ap.add_argument("--frac-val", type=float, default=0.15)
     ap.add_argument("--max-lado", type=int, default=1280)
+    ap.add_argument("--max-fondo", type=float, default=0.1,
+                    help="imágenes sin ninguna herramienta nuestra que se guardan, como fracción de las que sí "
+                         "tienen (0,1 = un 10 %%; en los datasets de taller sobran fotos de oficina, EPI…)")
     a = ap.parse_args()
 
+    a.carpeta = ruta_datos(a.carpeta)
     cfg = cargar_config()
-    mapa = {str(k).strip().lower(): id_clase(cfg, v) for k, v in cfg["nombres"].items()}
+    traducir = traductor(cfg)
     nombres = nombres_de(a.carpeta)
     traduccion, ignoradas = {}, []
     for i, n in nombres.items():
-        k = n.strip().lower()
-        if k in mapa:
-            traduccion[i] = mapa[k]
+        c = traducir(n)
+        if c is not None:
+            traduccion[i] = c
         else:
             ignoradas.append(n)
     print("Clases → " + " · ".join(f"{nombres[i]}→{cfg['clases'][c]}" for i, c in traduccion.items()))
@@ -78,6 +83,7 @@ def main():
 
     esc = Escritor(a.fuente, cfg, max_lado=a.max_lado, limpiar=True)
     st = Counter()
+    pendientes, fondos = [], []
     for txt in sorted(glob.glob(os.path.join(a.carpeta, "**", "*.txt"), recursive=True)):
         rel = os.path.relpath(txt, a.carpeta)
         if "labels" not in rel.replace("\\", "/").split("/"):
@@ -106,8 +112,14 @@ def main():
                 inst.append((traduccion[c], p))
         split = particion(os.path.basename(img), a.frac_val) if a.repartir else split_de(rel)
         nombre = a.fuente + "_" + re.sub(r"[^A-Za-z0-9]+", "_", os.path.splitext(rel)[0]).strip("_")
+        (pendientes if inst else fondos).append((nombre, img, inst, split))
+    n_fondo = min(len(fondos), int(a.max_fondo * len(pendientes)))
+    if len(fondos) > n_fondo:
+        st["imágenes sin herramientas descartadas"] = len(fondos) - n_fondo
+    fondos.sort(key=lambda x: hashlib.md5(x[0].encode()).hexdigest())     # al azar, pero siempre las mismas
+    for nombre, img, inst, split in pendientes + fondos[:n_fondo]:
         if esc.guardar(nombre, img, inst, split):
-            st["imágenes"] += 1
+            st["imágenes" if inst else "imágenes de fondo"] += 1
     if st["cajas (sin máscara) que se saltan"]:
         print("⚠ Este dataset tiene cajas, no máscaras: pásalo por cajas_a_mascaras.py")
     print(" · ".join(f"{k}: {v}" for k, v in st.items()))

@@ -20,9 +20,30 @@ import shutil
 import cv2
 import numpy as np
 
-from comun import mascara_a_poligono
+from comun import cargar_config, mascara_a_poligono, ruta_datos, traductor
 
 EXT = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+
+
+def clases_utiles(entrada):
+    """Ids del data.yaml de la entrada cuyas clases traduce clases.yaml (bloque «nombres»); las demás
+    (EPI, oficina, jardín…) no se pasan por SAM: no se van a usar y es lo que más tiempo lleva.
+    None si no hay data.yaml que leer (entonces se pasan todas)."""
+    import yaml
+    ys = glob.glob(os.path.join(entrada, "*.y*ml"))
+    if not ys:
+        return None
+    with open(ys[0], encoding="utf-8") as f:
+        nombres = (yaml.safe_load(f) or {}).get("names")
+    if isinstance(nombres, list):
+        nombres = dict(enumerate(nombres))
+    if not nombres:
+        return None
+    traducir = traductor(cargar_config())
+    utiles = {int(i) for i, n in nombres.items() if traducir(n) is not None}
+    print(f"   SAM solo para {len(utiles)} de {len(nombres)} clases: "
+          + ", ".join(str(nombres[i]) for i in sorted(utiles)))
+    return utiles
 
 
 def main():
@@ -30,7 +51,11 @@ def main():
     ap.add_argument("entrada")
     ap.add_argument("salida")
     ap.add_argument("--sam", default="sam2.1_b.pt", help="modelo SAM de Ultralytics (se baja solo)")
+    ap.add_argument("--todas", action="store_true",
+                    help="pasar por SAM todas las cajas (por defecto, solo las de clases que tiene clases.yaml)")
     a = ap.parse_args()
+    a.entrada, a.salida = ruta_datos(a.entrada), ruta_datos(a.salida)
+    utiles = None if a.todas else clases_utiles(a.entrada)
     from ultralytics import SAM
     sam = SAM(a.sam)
 
@@ -65,6 +90,8 @@ def main():
                     lineas.append(l.strip())
                 elif len(v) == 5:
                     c, xc, yc, bw, bh = int(float(v[0])), *map(float, v[1:])
+                    if utiles is not None and c not in utiles:     # no es de obra: no se aprende
+                        continue
                     clases.append(c)
                     cajas.append([(xc - bw / 2) * w, (yc - bh / 2) * h, (xc + bw / 2) * w, (yc + bh / 2) * h])
         if cajas:

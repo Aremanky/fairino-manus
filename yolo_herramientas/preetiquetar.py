@@ -15,6 +15,7 @@ Usa un modelo ya entrenado para ahorrar trabajo de etiquetado. Dos usos:
 """
 import argparse
 import glob
+import json
 import os
 import shutil
 import zipfile
@@ -91,6 +92,13 @@ def completar_mango(modelo, fuente, conf, imgsz, dentro_min):
                 f.write("\n".join(lineas + nuevas) + "\n")
             n_img += 1
             n_mangos += len(nuevas)
+    info = {}
+    if os.path.exists(os.path.join(orig, "info.json")):
+        with open(os.path.join(orig, "info.json"), encoding="utf-8") as f:
+            info = json.load(f)
+    info.update(fuente=fuente + "_mango", mangos_añadidos=n_mangos)
+    with open(os.path.join(dest, "info.json"), "w", encoding="utf-8") as f:
+        json.dump(info, f, indent=2, ensure_ascii=False)
     print(f"✅ {n_img} imágenes, {n_mangos} mangos añadidos → {dest}\n   Revísalo: python revisar.py {dest}")
 
 

@@ -25,7 +25,7 @@ import cv2
 import numpy as np
 import yaml
 
-from comun import mascara_a_poligono, particion
+from comun import mascara_a_poligono, particion, ruta_datos
 
 
 def bitmap_a_mascara(obj, h, w):
@@ -53,6 +53,7 @@ def main():
     ap.add_argument("salida")
     ap.add_argument("--frac-val", type=float, default=0.1)
     a = ap.parse_args()
+    a.entrada, a.salida = ruta_datos(a.entrada), ruta_datos(a.salida)
 
     anns = sorted(glob.glob(os.path.join(a.entrada, "**", "ann", "*.json"), recursive=True))
     if not anns:

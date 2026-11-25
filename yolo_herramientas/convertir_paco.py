@@ -155,8 +155,8 @@ def main():
                         inst.append((id_mango, pm))
             if inst:
                 esc.guardar(f"paco_{img_id}", ruta_img, inst, A_NUESTRO[split])
-            if n % 500 == 0:
-                print(f"   {split}: {n}/{len(objetos)}", flush=True)
+            if (n + 1) % 500 == 0 or n + 1 == len(objetos):
+                print(f"   {split}: {n + 1}/{len(objetos)} convertidas", flush=True)
 
     print("\nHerramientas y partes de agarre en PACO:")
     for k, v in sorted(cuenta.items()):

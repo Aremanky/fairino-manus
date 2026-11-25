@@ -34,6 +34,15 @@ def enlazar(origen, destino):
         shutil.copyfile(origen, destino)
 
 
+def clases_de(dir_fuente):
+    """Lista de clases con la que se convirtió la fuente (la guarda info.json); None si no consta."""
+    try:
+        with open(os.path.join(dir_fuente, "info.json"), encoding="utf-8") as f:
+            return json.load(f).get("clases")
+    except (OSError, ValueError):
+        return None
+
+
 def contar(dir_fuente, n_clases):
     c = Counter()
     for txt in glob.glob(os.path.join(dir_fuente, "labels", "*", "*.txt")):
@@ -77,6 +86,11 @@ def main():
             continue
         if not os.path.isdir(d):
             print(f"⚠ {fu}: no está en {base}, se salta")
+            continue
+        otras = clases_de(d)
+        if otras != nombres:
+            print(f"⚠ {fu}: se convirtió con " + ("otra lista de clases" if otras else "una versión anterior") +
+                  " de clases.yaml → fuera. Vuelve a convertirlo (publicos.sh convertir, o su convertir_*.py)")
             continue
         c = contar(d, len(nombres))
         herramientas = sum(v for k, v in c.items() if k != 0)

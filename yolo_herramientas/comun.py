@@ -10,6 +10,7 @@ unir_datasets.py junta las fuentes que se le digan en <DATOS>/yolo/<nombre>/ con
 import hashlib
 import json
 import os
+import re
 import shutil
 from collections import Counter
 
@@ -35,6 +36,45 @@ def id_clase(cfg, nombre):
     if nombre not in cfg["_id"]:
         raise SystemExit(f"✗ La clase «{nombre}» no está en la lista «clases» de clases.yaml")
     return cfg["_id"][nombre]
+
+
+def normalizar_nombre(nombre):
+    """«Power_Drill», «power-drill » y «power drill» → «power drill» (para comparar nombres de clase)."""
+    return re.sub(r"\s+", " ", re.sub(r"[_\-]+", " ", str(nombre))).strip().lower()
+
+
+def traductor(cfg):
+    """Función nombre de clase de otro dataset → id de nuestra clase (o None), con el bloque «nombres» de
+    clases.yaml. Admite mayúsculas, guiones bajos y plurales sencillos («Hammers» → hammer)."""
+    mapa = {normalizar_nombre(k): id_clase(cfg, v) for k, v in cfg["nombres"].items()}
+
+    def traducir(nombre):
+        n = normalizar_nombre(nombre)
+        for c in (n, n[:-1] if n.endswith("s") else None, n[:-2] if n.endswith("es") else None):
+            if c and c in mapa:
+                return mapa[c]
+        return None
+    return traducir
+
+
+RAICES_DATOS = ("convertidos", "yolo_crudo", "yolo", "ninja", "obra", "handal", "paco", "coco")
+
+
+def ruta_datos(p):
+    """Rutas de los comandos del LEEME cuando $HERRAMIENTAS_DATOS no está exportada («/convertidos/paco»,
+    que en realidad es <datos>/convertidos/paco) o cuando se da solo el nombre de la fuente («paco»)."""
+    if os.path.exists(p):
+        return p
+    base = dir_datos()
+    partes = p.strip("/").split("/")
+    if p.startswith("/") and partes[0] in RAICES_DATOS:
+        return os.path.join(base, p.lstrip("/"))
+    if not p.startswith("/") and len(partes) == 1:
+        for c in (os.path.join(base, "convertidos", p), os.path.join(base, "yolo", p),
+                  os.path.join(base, "yolo_crudo", p)):
+            if os.path.exists(c):
+                return c
+    return p
 
 
 def dir_datos():
@@ -139,7 +179,7 @@ class Escritor:
 
     def cerrar(self, extra=None):
         nombres = self.cfg["clases"]
-        info = dict(fuente=self.fuente, imagenes=dict(self.n_img),
+        info = dict(fuente=self.fuente, clases=list(nombres), imagenes=dict(self.n_img),
                     instancias={s: {nombres[c]: n for (s2, c), n in sorted(self.n_inst.items()) if s2 == s}
                                 for s in ("train", "val")})
         info.update(extra or {})

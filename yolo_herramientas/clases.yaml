@@ -1,47 +1,37 @@
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
-#  Clases del YOLO de herramientas y cómo se traduce cada dataset a ellas.
+#  Clases del YOLO de herramientas de OBRA E INSTALACIONES y cómo se traduce cada dataset a ellas.
+#  Lo que no es de obra (tijeras, cuchillos de cocina, material de oficina, jardín, EPI…) no se aprende:
+#  en las fotos queda como fondo, que también ayuda a no confundirlo con una herramienta.
 #  El ORDEN de «clases» es el id que ve YOLO: una vez entrenado un modelo, no lo cambiéis
 #  (añadid clases nuevas siempre AL FINAL).
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 clases:
   - mango              # 0 · la parte por la que se coge (de CUALQUIER herramienta): una instancia por herramienta
   - martillo           # 1
-  - alicates           # 2 · de punta, universales, de corte, de presión…
+  - alicates           # 2 · universales, de punta, de corte, de presión, pelacables
   - destornillador     # 3
   - llave              # 4 · inglesa, fija, combinada, grifa
   - carraca            # 5
-  - taladro            # 6 · taladro / atornillador de batería
-  - tijeras            # 7
-  - cuchillo           # 8 · cúter, cuchillo
-  - flexometro         # 9
-  - sierra             # 10 · serrucho, sierra de arco
-  - cinta_aislante     # 11 · cinta aislante / adhesiva
-  - cincel             # 12
-  - mazo               # 13
-  - pala               # 14
-  - sargento           # 15 · sargento / mordaza
-  - paleta             # 16 · paleta de albañil, llana
-  - cepillo_carpintero # 17
-  - tijera_chapa       # 18
-  - amoladora          # 19 · radial
-  - regla              # 20
-  - lima               # 21
-  - brocha             # 22 · brocha, cepillo de púas
-  - grapadora          # 23 · grapadora, grapadora de obra
-  - nivel              # 24
-  - rotulador          # 25 · rotulador, lápiz, bolígrafo
-  - escuadra           # 26
-  - rastrillo          # 27
-  - pistola_silicona   # 28
-  - llave_allen        # 29
-  - espatula           # 30
-  - hacha              # 31
-  - palanca            # 32 · palanqueta, pata de cabra
-  - soldador           # 33 · soldador de estaño
-  - calibre            # 34 · pie de rey
-  - linterna           # 35
-  - remachadora        # 36
-  - motosierra         # 37
+  - taladro            # 6 · taladro, atornillador de batería, martillo percutor
+  - amoladora          # 7 · radial
+  - sierra             # 8 · serrucho, sierra de arco
+  - cuter              # 9 · cúter, navaja de electricista
+  - flexometro         # 10
+  - nivel              # 11
+  - cincel             # 12 · cincel, cortafríos
+  - mazo               # 13 · maceta, mazo de goma
+  - paleta             # 14 · paleta de albañil, llana
+  - pala               # 15
+  - llave_allen        # 16
+  - sargento           # 17 · sargento, mordaza
+  - palanca            # 18 · palanqueta, pata de cabra
+  - pistola_silicona   # 19
+  - grapadora          # 20 · grapadora de obra (no la de oficina)
+  - remachadora        # 21
+  - tijera_chapa       # 22
+  - lima               # 23
+  - escuadra           # 24
+  - espatula           # 25
 
 # ── PACO-LVIS (convertir_paco.py) ── nombre del objeto en PACO → nuestra clase
 paco:
@@ -51,8 +41,6 @@ paco:
     screwdriver: destornillador
     wrench: llave
     drill: taladro
-    scissors: tijeras
-    knife: cuchillo
   partes_mango: [handle, grip]     # partes de PACO que juntas son el «mango» (p. ej. hammer:handle + hammer:grip)
 
 # ── HANDAL (convertir_handal.py) ── palabra que aparece en la ruta de la escena → nuestra clase
@@ -83,89 +71,105 @@ nombres:
   plier: alicates
   cutting pliers: alicates
   needle-nose pliers: alicates
+  wire stripper: alicates
   alicates: alicates
   # destornillador
   screwdriver: destornillador
   screwdriver+: destornillador
   destornillador: destornillador
-  # llave
+  # llave (spanner = llave fija; wrench = inglesa o grifa)
   wrench: llave
   spanner: llave
+  adjustable wrench: llave
+  combination wrench: llave
+  combinational wrench: llave
   crescent wrench: llave
   сrescent wrench: llave        # (en Roboflow viene con una «С» cirílica)
   gas wrench: llave
+  pipe wrench: llave
   llave: llave
-  # resto de las de taller
+  # herramienta eléctrica
   ratchet: carraca
+  ratchet wrench: carraca
+  socket wrench: carraca
   drill: taladro
+  cordless drill: taladro
+  electric drill: taladro
   "drill (tool)": taladro       # Open Images
   power drill: taladro
   drill machine: taladro
-  scissors: tijeras
-  knife: cuchillo
-  cutter: cuchillo
-  utility knife: cuchillo
-  "kitchen knife": cuchillo     # Open Images
-  tape measure: flexometro
-  meter: flexometro             # METU-ALET (el metro de cinta)
+  impact driver: taladro
+  hammer drill: taladro
+  rotary hammer: taladro
+  grinder: amoladora
+  angle grinder: amoladora
+  # corte
   handsaw: sierra
   saw: sierra
   hacksaw: sierra
-  electrical tape: cinta_aislante
-  tape: cinta_aislante          # METU-ALET
-  chisel: cincel
-  mallet: mazo
-  spade: pala
-  shovel: pala
-  clamp: sargento
-  trowel: paleta
-  plane: cepillo_carpintero
+  cutter: cuter
+  box cutter: cuter
+  utility knife: cuter
+  knife: cuter                  # en los datasets de obra (METU-ALET, Small Size Construction Tools) es el cúter
   aviation snip: tijera_chapa
-  grinder: amoladora
-  angle grinder: amoladora
-  ruler: regla
+  tin snips: tijera_chapa
   file: lima
-  brush: brocha
-  stapler: grapadora
-  staple gun: grapadora
-  tacker: grapadora
+  # medir y marcar
+  tape measure: flexometro
+  measuring tape: flexometro
+  meter: flexometro             # METU-ALET (el metro de cinta)
   level: nivel
   spirit level: nivel
-  marker: rotulador
-  pen: rotulador
-  pencil: rotulador
   square: escuadra
-  rake: rastrillo
-  caulk gun: pistola_silicona
+  # albañilería
+  chisel: cincel
+  mallet: mazo
+  rubber mallet: mazo
+  sledgehammer: mazo
+  trowel: paleta
+  float: paleta                 # llana (Roboflow tools-detection-kpbuj)
+  spade: pala
+  shovel: pala
+  putty knife: espatula
+  scraper: espatula
+  # montaje
   hex key: llave_allen
   allen key: llave_allen
-  putty knife: espatula
-  axe: hacha
+  clamp: sargento
   crowbar: palanca
-  soldering iron: soldador
-  soldering_iron: soldador
-  caliper: calibre
-  flashlight: linterna
-  torch: linterna
+  caulk gun: pistola_silicona
+  staple gun: grapadora
+  tacker: grapadora             # Small Size Construction Tools (grapadora de obra)
   riveter: remachadora
-  chainsaw: motosierra
   # y vuestros nombres de CVAT, si los ponéis en castellano, salen solos (mismo nombre que la clase)
 
 # ── Open Images V7 (descargar_open_images.py) ── clases a bajar (nombre exacto de Open Images).
 #    Las que no existan en Open Images se saltan con un aviso.
 open_images:
-  clases: [Hammer, Screwdriver, "Drill (Tool)", Wrench, Scissors, Chainsaw, Axe, Flashlight, Ruler, "Kitchen knife"]
+  clases: [Hammer, Screwdriver, "Drill (Tool)", Wrench, Chisel]
   max_por_split: 6000            # imágenes como mucho por split (train / validation)
 
 # ── Dataset Ninja (descargar.sh ninja) ── datasets en formato Supervisely (cajas)
-dataset_ninja:
-  - METU-ALET                    # 49 herramientas, ~2,7 GB
-  # - Small Size Construction Tools   # 12 herramientas de obra, ~132 GB (descomentad si hay disco)
+#    METU-ALET está fuera: en nov. 2026 su descarga está rota (la automática devuelve una página web y la
+#    del navegador llega cortada). Si vuelve a funcionar: «dataset_ninja: [METU-ALET]».
+dataset_ninja: []
 
-# ── Roboflow Universe (descargar_roboflow.py) ── la versión es la que sale en la web del proyecto.
-#    tipo: seg = ya trae máscaras · cajas = solo cajas (se les saca la máscara con SAM)
+# ── Small Size Construction Tools (Zenodo 6530106, CC BY 4.0; descargar.sh obra + convertir_obra.py) ──
+#    25 084 fotos de 12 herramientas de obra de interior, la cuarta parte en obras reales. Cajas.
+#    «origen»: sus clases en el orden de sus ids (la web las da en orden alfabético; convertir_obra.py
+#    --inspeccionar pinta unas cuantas con estos nombres para comprobar que el orden es el bueno).
+obra:
+  origen: [bucket, cutter, drill, grinder, hammer, knife, saw, shovel, spanner, tacker, trowel, wrench]
+  partes: [1, 2, 3, 4]           # DATA1..DATA4.zip: 18,9 + 26,3 + 40,8 + 23,5 GB
+
+# ── Roboflow Universe (descargar_roboflow.py) ── workspace/proyecto de la URL del proyecto
+#    (universe.roboflow.com/<workspace>/<proyecto>). Sin «version» se baja la última que tenga; con
+#    «version: N», esa. Las cajas se pasan por SAM y los polígonos se dejan como vienen.
 roboflow:
-  - {workspace: a-gbzqd, proyecto: tools-segmentation-0jsgu, version: 1, tipo: seg}
-  - {workspace: arcad-bef2o, proyecto: tools-segmentation-ul4wk-gcjyh, version: 1, tipo: seg}
-  - {workspace: dmitri-belgorodov, proyecto: tools-segmentation-2-4hxds, version: 1, tipo: seg}
-  - {workspace: mechanical-tools, proyecto: mechanical-tools-10000, version: 1, tipo: cajas}
+  - {workspace: dmitri-belgorodov, proyecto: tools-segmentation-2-4hxds}      # máscaras
+  - {workspace: arcad-bef2o, proyecto: tools-segmentation-ul4wk-gcjyh}        # máscaras
+  - {workspace: toolbox-tools-classification, proyecto: tools-segmentation-sd5zy}   # máscaras
+  - {workspace: mechanical-tools, proyecto: mechanical-tools-10000}           # cajas
+  - {workspace: tooldetection-pabid, proyecto: tooldetection}   # cajas: taladro, martillo, alicates, sierra, pala, paleta, llave
+  - {workspace: tirths-workspace-tnc8d, proyecto: tools-detection-kpbuj}      # martillo, taladro, paleta, llana, pala
+  - {workspace: work-mpjwe, proyecto: tooldetection-cnpf6}     # taladro, alicates, sierra, llave, martillo

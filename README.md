@@ -109,11 +109,12 @@ La teleoperación de arriba más lo que ve el modo autónomo con la cámara de c
   teleoperación normal, `[B]` bloquea el giro.
 
 ---
-## Visión: YOLO de herramientas y mango
+## Visión: YOLO de herramientas de obra y mango
 
-`yolo_herramientas/` — segmentación de cada herramienta y de su mango con YOLO26-seg (entorno aparte,
-`venv_yolo`). Datasets públicos (HANDAL, PACO, Roboflow), fotos propias con la cámara de cabeza, unión,
-entrenamiento en la RTX 5080 y prueba en vivo: los pasos y comandos, en `yolo_herramientas/LEEME.md`.
+`yolo_herramientas/` — segmentación de cada herramienta de obra e instalaciones (25 clases: taladro,
+destornillador, martillo, amoladora…) y de su mango con YOLO26-seg (entorno aparte, `venv_yolo`).
+Datasets públicos (HANDAL, PACO, Small Size Construction Tools, METU-ALET, Open Images, Roboflow), fotos
+propias con la cámara de cabeza, unión, entrenamiento en la RTX 5080 y prueba en vivo: los pasos y comandos, en `yolo_herramientas/LEEME.md`.
 
 ---
 ## IA: grabar, entrenar y reproducir
